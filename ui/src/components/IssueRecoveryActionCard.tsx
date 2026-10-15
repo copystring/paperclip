@@ -1013,6 +1013,9 @@ export function IssueRecoveryActionCard({
     if (cardState === "resolved" && action.outcome) {
       return `Recovery resolved as ${OUTCOME_LABEL[action.outcome] ?? action.outcome}.`;
     }
+    if (action.cause === "execution_review_participant_recovery") {
+      return "The review stage is still waiting for a recorded decision. Restore the reviewer path to continue; a finished run or comment alone does not complete the review.";
+    }
     if (
       (cardState === "needed" || cardState === "escalated") &&
       action.kind === "active_run_watchdog" &&
@@ -1022,7 +1025,7 @@ export function IssueRecoveryActionCard({
     }
     if (lineage) return lineageHeadline(lineage);
     return KIND_HEADLINE[action.kind] ?? KIND_HEADLINE.missing_disposition;
-  }, [action.kind, action.outcome, action.ownerType, cardState, lineage]);
+  }, [action.cause, action.kind, action.outcome, action.ownerType, cardState, lineage]);
 
   // A lane with no path left must not keep advertising a retry that will never run — whether
   // the budget ran out or the scheduled attempt simply never fired.

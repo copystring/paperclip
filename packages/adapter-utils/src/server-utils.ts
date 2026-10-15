@@ -549,6 +549,7 @@ type PaperclipWakeExecutionStage = {
   } | null;
   lastDecisionOutcome: string | null;
   allowedActions: string[];
+  recoveryInstruction: string | null;
 };
 
 type PaperclipWakeComment = {
@@ -1578,6 +1579,8 @@ function normalizePaperclipWakeExecutionStage(
   const stageType = asString(stage.stageType, "").trim() || null;
   const lastDecisionOutcome =
     asString(stage.lastDecisionOutcome, "").trim() || null;
+  const recoveryInstruction =
+    asString(stage.recoveryInstruction, "").trim() || null;
 
   if (
     !wakeRole &&
@@ -1587,6 +1590,7 @@ function normalizePaperclipWakeExecutionStage(
     !returnAssignee &&
     !reviewRequest &&
     !lastDecisionOutcome &&
+    !recoveryInstruction &&
     allowedActions.length === 0
   ) {
     return null;
@@ -1601,6 +1605,7 @@ function normalizePaperclipWakeExecutionStage(
     reviewRequest,
     lastDecisionOutcome,
     allowedActions,
+    recoveryInstruction,
   };
 }
 
@@ -2917,6 +2922,9 @@ function renderPaperclipWakePromptBody(
         executionStage.reviewRequest.instructions,
       );
     }
+    if (executionStage.recoveryInstruction) {
+      lines.push("", "Execution review recovery:", executionStage.recoveryInstruction);
+    }
     lines.push("");
     if (
       executionStage.wakeRole === "reviewer" ||
@@ -2927,6 +2935,10 @@ function renderPaperclipWakePromptBody(
         "Do not execute the task itself or continue executor work.",
         "Review the issue and choose one of the allowed actions above.",
         "If you request changes, the workflow routes back to the stored return assignee.",
+        "Record the decision with PATCH /api/issues/<issueId> using the current issue ID.",
+        "Include Authorization: Bearer $PAPERCLIP_API_KEY and X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on the request.",
+        'Approve with JSON { "status": "done", "comment": "Approved: …" }; request changes with { "status": "in_progress", "comment": "Changes requested: …" }.',
+        "A comment or final response alone does not record the decision; confirm the PATCH response before reporting completion.",
         "",
       );
     } else if (executionStage.wakeRole === "executor") {

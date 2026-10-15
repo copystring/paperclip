@@ -61,6 +61,31 @@ type TransitionResult = {
   workflowControlledAssignment?: boolean;
 };
 
+export type ExecutionStageWakeRole = "reviewer" | "approver" | "executor";
+
+/** Build the server-owned execution-stage context shared by normal and recovery wakes. */
+export function buildExecutionStageWakeContext(input: {
+  state: IssueExecutionState;
+  wakeRole: ExecutionStageWakeRole;
+  recoveryInstruction?: string;
+}) {
+  return {
+    wakeRole: input.wakeRole,
+    stageId: input.state.currentStageId,
+    stageType: input.state.currentStageType,
+    currentParticipant: input.state.currentParticipant,
+    returnAssignee: input.state.returnAssignee,
+    reviewRequest: input.state.reviewRequest ?? null,
+    lastDecisionOutcome: input.state.lastDecisionOutcome,
+    allowedActions: input.wakeRole === "executor"
+      ? ["address_changes", "resubmit"]
+      : ["approve", "request_changes"],
+    ...(input.recoveryInstruction
+      ? { recoveryInstruction: input.recoveryInstruction }
+      : {}),
+  };
+}
+
 /**
  * Consecutive agent-initiated changes-requested rounds tolerated on one stage
  * before the pending review escalates to the responsible human. Policies can

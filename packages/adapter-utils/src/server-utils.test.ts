@@ -2836,6 +2836,8 @@ describe("renderPaperclipWakePrompt", () => {
             "Please focus on edge cases and leave a short risk summary.",
         },
         allowedActions: ["approve", "request_changes"],
+        recoveryInstruction:
+          "The previous reviewer run ended without a saved decision for this pending stage.",
       },
       fallbackFetchNeeded: false,
     });
@@ -2847,6 +2849,15 @@ describe("renderPaperclipWakePrompt", () => {
     expect(prompt).toContain(
       "You are waking as the active reviewer for this issue.",
     );
+    expect(prompt).toContain(
+      "The previous reviewer run ended without a saved decision for this pending stage.",
+    );
+    expect(prompt).toContain("PATCH /api/issues/<issueId>");
+    expect(prompt).toContain('"status": "done", "comment": "Approved: …"');
+    expect(prompt).toContain('"status": "in_progress", "comment": "Changes requested: …"');
+    expect(prompt).toContain("Authorization: Bearer $PAPERCLIP_API_KEY");
+    expect(prompt).toContain("X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID");
+    expect(prompt).toContain("A comment or final response alone does not record the decision");
   });
 
   it("delivers typed disposition repair instructions without liveness classification", () => {

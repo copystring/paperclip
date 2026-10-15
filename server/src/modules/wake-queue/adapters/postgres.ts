@@ -34,7 +34,10 @@ import { issueService } from "../../../services/issues.js";
 import { issueRecoveryActionService } from "../../../services/issue-recovery-actions.js";
 import { readContinuationAttempt } from "../../../services/recovery/run-liveness-continuations.js";
 import { withRecoveryContext } from "../../../services/recovery/status-only-context.js";
-import { parseIssueExecutionState } from "../../../services/issue-execution-policy.js";
+import {
+  buildExecutionStageWakeContext,
+  parseIssueExecutionState,
+} from "../../../services/issue-execution-policy.js";
 import {
   queuedCommentIdsFromWakePayload,
   withQueuedCommentIdsInWakePayload,
@@ -576,6 +579,15 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
 
     async queueReviewParticipantRecoveryRun({ companyId, issue, finishingRun, recoveryAgent, sessionBefore, now }) {
       const executionState = parseIssueExecutionState(issue.executionState);
+      const executionStage = executionState
+        ? buildExecutionStageWakeContext({
+            state: executionState,
+            wakeRole:
+              executionState.currentStageType === "approval" ? "approver" : "reviewer",
+            recoveryInstruction:
+              "The previous reviewer run ended without a saved decision for this pending stage. Finish the review and record the decision through the issue update route below. Do not treat comments or prose as a saved decision.",
+          })
+        : null;
       const wakeupRequest = await tx
         .insert(agentWakeupRequests)
         .values({
@@ -589,8 +601,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
               issueId: issue.id,
               retryOfRunId: finishingRun.id,
               retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON,
-              currentStageId: executionState?.currentStageId ?? null,
-              currentStageType: executionState?.currentStageType ?? null,
+              ...(executionStage ? { executionStage } : {}),
             },
             "normal_model",
           ),
@@ -619,10 +630,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
               retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON,
               source: "issue.execution_review_recovery",
               retryOfRunId: finishingRun.id,
-              currentStageId: executionState?.currentStageId ?? null,
-              currentStageType: executionState?.currentStageType ?? null,
-              reviewRecoveryInstruction:
-                "The previous reviewer run ended while this execution-review stage was still pending. Submit the review decision now, or mark the issue blocked with the exact unblock action.",
+              ...(executionStage ? { executionStage } : {}),
             },
             "normal_model",
           ),

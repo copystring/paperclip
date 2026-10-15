@@ -34,6 +34,12 @@ own policy and access review.
 Gaps: Granting access is distinct from using access. No equivalent agent management path
 exists in these routes.
 
+The OpenCode local adapter delivers the already assigned runtime MCP servers
+through a private, temporary remote-MCP configuration. This delivery does not
+change grants, profiles, or action policies. Adapter tests cover authentication,
+configuration preservation, and cleanup; a synthetic Linux CLI connection and
+tools/list probe checks transport only, not every assigned app action.
+
 ## `action-policy`
 
 Review: `baseline`.

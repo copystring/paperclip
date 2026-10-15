@@ -61,6 +61,10 @@ Manual: Filter by status and assignee, change grouping/sort, open a task, and re
 
 Automated: [task detail](../../ui/src/pages/IssueDetail.test.tsx) covers component behavior, while [issue service](../../server/src/__tests__/issues-service.test.ts) covers server contracts.
 
+Automated: [task chat](../../ui/src/components/TaskChatThread.test.tsx) verifies that active recovery actions are visible in the current chat interface and use the shared recovery controls. Closed tasks suppress historical recovery, and native execution reconciliation retains its separate guarded path.
+
+Manual: Open a blocked task with an active operator recovery action in the current chat interface. Verify that the recovery explanation and permitted actions appear, that resolving through the existing control persists the requested transition, and that the subsequent run follows the execution policy. A successful run summary alone is not a review decision.
+
 Manual: For a disposable task owned by a legacy agent, have its current run
 assign the task to a human with status In review. Verify that assignment and
 status persist, that the current run finishes without `issue_reassigned`, and
