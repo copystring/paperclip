@@ -7526,6 +7526,7 @@ export function issueService(db: Db) {
     actorAgentId: string;
     actorRunId: string;
     expectedCheckoutRunId: string;
+    expectedStatuses?: string[];
   }) {
     return db.transaction(async (tx) => {
       const lockedIssue = await tx
@@ -7546,7 +7547,7 @@ export function issueService(db: Db) {
       }
 
       if (
-        lockedIssue.status !== "in_progress" ||
+        !(lockedIssue.status === "in_progress" || (lockedIssue.status === "in_review" && input.expectedStatuses?.includes("in_review"))) ||
         lockedIssue.assigneeAgentId !== input.actorAgentId ||
         lockedIssue.checkoutRunId !== input.expectedCheckoutRunId
       ) {
@@ -7604,7 +7605,7 @@ export function issueService(db: Db) {
         .where(
           and(
             eq(issues.id, input.issueId),
-            eq(issues.status, "in_progress"),
+            inArray(issues.status, input.expectedStatuses ?? ["in_progress"]),
             eq(issues.assigneeAgentId, input.actorAgentId),
             eq(issues.checkoutRunId, input.expectedCheckoutRunId),
           ),
@@ -11736,8 +11737,8 @@ export function issueService(db: Db) {
           assigneeUserId: null,
           checkoutRunId,
           executionRunId: checkoutRunId,
-          status: "in_progress",
-          startedAt: now,
+          status: sql`case when ${issues.status} = 'in_review' then 'in_review' else 'in_progress' end`,
+          startedAt: sql`case when ${issues.status} = 'in_review' then ${issues.startedAt} else ${now.toISOString()}::timestamptz end`,
           updatedAt: now,
         })
         .where(
@@ -11772,7 +11773,7 @@ export function issueService(db: Db) {
 
       if (
         current.assigneeAgentId === agentId &&
-        current.status === "in_progress" &&
+        (current.status === "in_progress" || (current.status === "in_review" && expectedStatuses.includes("in_review"))) &&
         current.checkoutRunId == null &&
         (current.executionRunId == null ||
           current.executionRunId === checkoutRunId) &&
@@ -11788,7 +11789,7 @@ export function issueService(db: Db) {
           .where(
             and(
               eq(issues.id, id),
-              eq(issues.status, "in_progress"),
+              eq(issues.status, current.status),
               eq(issues.assigneeAgentId, agentId),
               isNull(issues.checkoutRunId),
               or(
@@ -11805,7 +11806,7 @@ export function issueService(db: Db) {
       if (
         checkoutRunId &&
         current.assigneeAgentId === agentId &&
-        current.status === "in_progress" &&
+        (current.status === "in_progress" || (current.status === "in_review" && expectedStatuses.includes("in_review"))) &&
         current.checkoutRunId &&
         current.checkoutRunId !== checkoutRunId
       ) {
@@ -11814,6 +11815,7 @@ export function issueService(db: Db) {
           actorAgentId: agentId,
           actorRunId: checkoutRunId,
           expectedCheckoutRunId: current.checkoutRunId,
+          expectedStatuses,
         });
         if (staleAdoption.adopted) {
           const row = await db
@@ -11847,12 +11849,10 @@ export function issueService(db: Db) {
             executionRunId: checkoutRunId,
             executionAgentNameKey: null,
             executionLockedAt: now,
-            status: "in_progress",
+            status: sql`case when ${issues.status} = 'in_review' then 'in_review' else 'in_progress' end`,
+            startedAt: sql`case when ${issues.status} in ('in_progress', 'in_review') then ${issues.startedAt} else ${now.toISOString()}::timestamptz end`,
             updatedAt: now,
           };
-          if (current.status !== "in_progress") {
-            adoptionSet.startedAt = now;
-          }
           const adopted = await db
             .update(issues)
             .set(adoptionSet)
@@ -11879,7 +11879,7 @@ export function issueService(db: Db) {
       // If this run already owns it and it's in_progress, return it (no self-409)
       if (
         current.assigneeAgentId === agentId &&
-        current.status === "in_progress" &&
+        (current.status === "in_progress" || (current.status === "in_review" && expectedStatuses.includes("in_review"))) &&
         sameRunLock(current.checkoutRunId, checkoutRunId)
       ) {
         const row = await db

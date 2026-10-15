@@ -156,6 +156,53 @@ describeEmbeddedPostgres("issueService run attachment artifacts", () => {
   }, 20_000);
 });
 
+describeEmbeddedPostgres("issueService checkout preserves review phase", () => {
+  const tempDbs: Array<Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>> = [];
+  afterAll(async () => { await Promise.all(tempDbs.map((tempDb) => tempDb.cleanup())); });
+
+  it("keeps in_review and startedAt during initial checkout", async () => {
+    const tempDb = await startEmbeddedPostgresTestDatabase("paperclip-checkout-review-phase-");
+    tempDbs.push(tempDb);
+    const db = createDb(tempDb.connectionString);
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    const startedAt = new Date("2026-10-01T10:00:00.000Z");
+    await db.insert(companies).values({ id: companyId, name: "Paperclip", issuePrefix: "RVP", requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Reviewer", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "running", invocationSource: "manual", startedAt: new Date() });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Review phase", status: "in_review", priority: "medium", startedAt });
+
+    const svc = issueService(db);
+    await svc.checkout(issueId, agentId, ["in_review"], runId);
+    await expect(svc.checkout(issueId, agentId, ["in_review"], runId)).resolves.toMatchObject({ status: "in_review" });
+    const row = await db.select({ status: issues.status, startedAt: issues.startedAt }).from(issues).where(eq(issues.id, issueId)).then(rows => rows[0]);
+    expect(row).toEqual({ status: "in_review", startedAt });
+  }, 20_000);
+
+  it("keeps in_review and startedAt when adopting a stale execution lock", async () => {
+    const tempDb = await startEmbeddedPostgresTestDatabase("paperclip-adopt-review-phase-");
+    tempDbs.push(tempDb);
+    const db = createDb(tempDb.connectionString);
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const staleRunId = randomUUID();
+    const nextRunId = randomUUID();
+    const startedAt = new Date("2026-10-01T10:00:00.000Z");
+    await db.insert(companies).values({ id: companyId, name: "Paperclip", issuePrefix: "RVA", requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Reviewer", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.insert(heartbeatRuns).values({ id: staleRunId, companyId, agentId, status: "failed", invocationSource: "manual", finishedAt: new Date() });
+    await db.insert(heartbeatRuns).values({ id: nextRunId, companyId, agentId, status: "running", invocationSource: "manual", startedAt: new Date() });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Review phase stale lock", status: "in_review", priority: "medium", assigneeAgentId: agentId, executionRunId: staleRunId, startedAt });
+
+    await issueService(db).checkout(issueId, agentId, ["in_review"], nextRunId);
+    const row = await db.select({ status: issues.status, startedAt: issues.startedAt, checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId }).from(issues).where(eq(issues.id, issueId)).then(rows => rows[0]);
+    expect(row).toEqual({ status: "in_review", startedAt, checkoutRunId: nextRunId, executionRunId: nextRunId });
+  }, 20_000);
+});
+
 describe("readIssueCommentRunLogText", () => {
   it("cancels timed-out storage reads so later listings can recover", async () => {
     let active = 0;
