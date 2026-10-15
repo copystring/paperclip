@@ -86,6 +86,42 @@ export function buildExecutionStageWakeContext(input: {
   };
 }
 
+/** Build current stage context only when this run's agent owns the current stage turn. */
+export function buildCurrentExecutionStageWakeContext(input: {
+  executionState: unknown;
+  issueStatus: string;
+  agentId: string;
+  assigneeAgentId: string | null;
+  assigneeUserId: string | null;
+}) {
+  if (input.assigneeAgentId !== input.agentId || input.assigneeUserId !== null) return null;
+  const state = parseIssueExecutionState(input.executionState);
+  if (!state || !state.currentStageId || !state.currentStageType) return null;
+
+  if (
+    state.status === "pending" &&
+    input.issueStatus === "in_review" &&
+    state.currentParticipant?.type === "agent" &&
+    state.currentParticipant.agentId === input.agentId
+  ) {
+    return buildExecutionStageWakeContext({
+      state,
+      wakeRole: state.currentStageType === "approval" ? "approver" : "reviewer",
+    });
+  }
+
+  if (
+    state.status === "changes_requested" &&
+    input.issueStatus === "in_progress" &&
+    state.returnAssignee?.type === "agent" &&
+    state.returnAssignee.agentId === input.agentId
+  ) {
+    return buildExecutionStageWakeContext({ state, wakeRole: "executor" });
+  }
+
+  return null;
+}
+
 /**
  * Consecutive agent-initiated changes-requested rounds tolerated on one stage
  * before the pending review escalates to the responsible human. Policies can
