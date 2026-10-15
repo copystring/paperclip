@@ -751,6 +751,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         );
         const resolved = resolveHeartbeatRunResponse({
           resultJson: persistedResultJson,
+          runSucceeded: livenessRun.status === "succeeded",
           conversationTurnFinished: isConversation(issueContext) && livenessRun.status === "succeeded"
             && persistedResultJson?.finalizationReasonCode === "conversation_turn_finished",
           existingComment: existingRunComment,

@@ -77,7 +77,7 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     expect(pluginSource).toContain("MAX_PENDING_CHARS");
     expect(pluginSource).toContain("parserUncertain");
     expect(pluginSource).toContain('requestBody.model');
-    expect(pluginSource).toContain("normalizedTimeoutRetries >= retryBudget");
+    expect(pluginSource).toContain("normalizedTimeoutRetries < retryBudget");
     expect(pluginSource).toContain("const retryBudget = 2;");
     expect(pluginSource).not.toContain(apiKey);
     expect(prepared.notes.join("\n")).not.toContain(apiKey);

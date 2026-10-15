@@ -225,7 +225,16 @@ export const PaperclipModelStepTimeout = async () => {
             && !request.overlap
             && activeFetches.size === 1;
           const mapTimeout = (error) => {
-            if (!mayRetry() || normalizedTimeoutRetries >= retryBudget) return error;
+            if (!request.timedOut || externalSignal?.aborted) return error;
+            const retry = mayRetry() && normalizedTimeoutRetries < retryBudget;
+            // Only bounded protocol facts: never log prompts, arguments, URLs or credentials.
+            console.error("[paperclip] model-step-timeout " + JSON.stringify({
+              retry, retriesUsed: normalizedTimeoutRetries, retryBudget,
+              sse: request.canNormalizeTimeout, completeTool: request.sawCompleteTool,
+              parserUncertain: request.parserUncertain, overlap: request.overlap,
+              dispatched: dispatchCount !== request.baseline,
+            }));
+            if (!retry) return error;
             normalizedTimeoutRetries += 1;
             return new Error("response timeout", { cause: error });
           };
@@ -258,6 +267,7 @@ export const PaperclipModelStepTimeout = async () => {
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
           let pending = "";
+          let streamDone = false;
           const calls = new Map();
           const inspectFrame = (frame) => {
             const lines = frame.split(/\\r?\\n/);
@@ -267,7 +277,7 @@ export const PaperclipModelStepTimeout = async () => {
             }
             const data = lines.filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\\n");
             if (!data) return;
-            if (data === "[DONE]") return;
+            if (data === "[DONE]") { streamDone = true; return; }
             let event;
             try { event = JSON.parse(data); } catch { request.parserUncertain = true; return; }
             if (!event || typeof event !== "object" || !Array.isArray(event.choices)) {
@@ -316,7 +326,10 @@ export const PaperclipModelStepTimeout = async () => {
             }
             const frames = pending.split(/\\r?\\n\\r?\\n/);
             pending = frames.pop() ?? "";
-            for (const frame of frames) inspectFrame(frame);
+            for (const frame of frames) {
+              inspectFrame(frame);
+              if (streamDone) break;
+            }
             if (final && pending.trim()) inspectFrame(pending);
           };
           const body = new ReadableStream({
@@ -331,6 +344,14 @@ export const PaperclipModelStepTimeout = async () => {
                 } else {
                   if (isSse) inspectChunk(item.value);
                   controller.enqueue(item.value);
+                  if (streamDone) {
+                    // SSE completion is independent of HTTP EOF. Some proxies
+                    // keep the transport alive after the terminal marker.
+                    finishDeadline();
+                    finish();
+                    controller.close();
+                    void reader.cancel().catch(() => {});
+                  }
                 }
               } catch (error) {
                 // A complete call may arrive in the last chunk without the
