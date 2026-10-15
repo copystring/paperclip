@@ -52,6 +52,9 @@ descriptions after deriving the caller's authorized tool set. Punctuation and
 word spacing do not require an exact catalog phrase; discovery never adds grants.
 An OpenCode exit without assistant text or a completed tool action is reported as
 `opencode_empty_response`, rather than successful work.
+An owned remote-call deadline is `tool_timeout` even when the HTTP wrapper
+changes the thrown error type. It preserves connection health and reports the
+remote outcome as unknown; it never replays a possibly applied action.
 
 ## `action-policy`
 

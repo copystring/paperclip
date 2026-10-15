@@ -4426,6 +4426,61 @@ rl.on("line", (line) => {
     });
   }
 
+  it("classifies a wrapped caller-deadline abort as an unknown timeout without poisoning health or replaying", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const fake = await startFakeRemoteMcpServer(() => ({ body: {} }));
+    let dispatchCount = 0;
+    const gateway = createTestToolGatewayService(db, {
+      remoteHttpRequest: async (_url, init) => {
+        dispatchCount += 1;
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            // Stand in for a wrapper that hides AbortError behind its own
+            // transport error after the caller's deadline fires.
+            reject(new ToolGatewayHttpError(502, "wrapped transport failure", "mcp_remote_fetch_failed"));
+          }, { once: true });
+        });
+      },
+    });
+    try {
+      const { connection } = await createRemoteMcpTool(db, company.id, {
+        applicationKey: "wrapped-deadline-abort",
+        toolName: "kv_set",
+        url: fake.url,
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const connectedTool = (await gateway.listToolsForSession(session.token))
+        .find((tool) => tool.providerType === "mcp_remote_http");
+      expect(connectedTool).toBeTruthy();
+
+      const error = await gateway.executeTool({
+        sessionToken: session.token,
+        tool: connectedTool!.name,
+        parameters: { key: "deadline", value: "unknown" },
+        timeoutMs: 10,
+      }).then(
+        () => { throw new Error("Expected caller deadline to win over wrapped transport failure"); },
+        (failure) => failure as ToolGatewayHttpError,
+      );
+
+      expectGatewayError(error, 504, "tool_timeout");
+      expect(error.message).toContain("10 ms caller deadline");
+      expect(error.message).toContain("outcome is unknown");
+      expect(error.message).toContain("explicit retry");
+      expect(dispatchCount).toBe(1);
+      await expect(db.select({ healthStatus: toolConnections.healthStatus }).from(toolConnections).where(
+        eq(toolConnections.id, connection.id),
+      )).resolves.toEqual([{ healthStatus: "ok" }]);
+      const [invocation] = await db.select().from(toolInvocations);
+      expect(invocation).toMatchObject({ status: "timed_out", errorCode: "tool_timeout" });
+    } finally {
+      await fake.close();
+    }
+  });
+
   function initializeFakeMcpSession(request: FakeMcpRequest, sessionId: string) {
     return {
       headers: { "mcp-session-id": sessionId },
