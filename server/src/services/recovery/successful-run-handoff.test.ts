@@ -109,6 +109,12 @@ describe("successful run handoff decision", () => {
     expect(decision.instruction).toContain("2. Move it to `in_review` with a real reviewer path");
     expect(decision.instruction).toContain("3. Mark it `blocked` with first-class blockers");
     expect(decision.instruction).toContain("4. Either delegate follow-up work");
+    expect(decision.instruction).toContain("POST /api/agents/$PAPERCLIP_AGENT_ID/wakeup");
+    expect(decision.instruction).toContain("forceFreshSession=true");
+    expect(decision.instruction).toContain("GET /api/issues/$PAPERCLIP_TASK_ID/diagnostics/wakes");
+    expect(decision.instruction).toContain("deferred_issue_execution or queued");
+    expect(decision.instruction).toContain("Do not PATCH executionPolicy with resumeIntent/resumeFromRunId/nextAction");
+    expect(decision.instruction).toContain("a coalesced wake, a skipped/rejected wake");
     expect(decision.instruction).toContain("This is a disposition-only recovery for the persisted source run");
     expect(decision.instruction).toContain("Do not redo implementation");
   });

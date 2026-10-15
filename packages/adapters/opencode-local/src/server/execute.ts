@@ -52,6 +52,7 @@ import {
   readPaperclipRuntimeSkillEntries,
   readPaperclipIssueWorkModeFromContext,
   resolveLegacyPaperclipDesiredSkillNames,
+  PAPERCLIP_OPERATIONAL_SKILL_KEY,
 } from "@paperclipai/adapter-utils/server-utils";
 import { isOpenCodeUnknownSessionError, parseOpenCodeJsonl, createOpenCodeJsonlParser } from "./parse.js";
 import {
@@ -210,6 +211,59 @@ async function ensureOpenCodeSkillsInjected(
   }
 }
 
+async function resolveVerifiedOperationalSkillDir(input: {
+  sourceDir: string;
+  installedDir: string;
+}): Promise<string> {
+  try {
+    const [sourceRealPath, installedRealPath] = await Promise.all([
+      fs.realpath(input.sourceDir),
+      fs.realpath(input.installedDir),
+    ]);
+    if (sourceRealPath !== installedRealPath) return "";
+    const skillFilePath = path.join(installedRealPath, "SKILL.md");
+    const skillFile = await fs.stat(skillFilePath);
+    if (!skillFile.isFile()) return "";
+    await fs.readFile(skillFilePath, "utf8");
+    return input.installedDir;
+  } catch {
+    return "";
+  }
+}
+
+export async function verifyRemoteOperationalSkillDir(input: {
+  runId: string;
+  target: NonNullable<AdapterExecutionContext["executionTarget"]>;
+  skillDir: string;
+  copyResult: { exitCode: number | null; timedOut: boolean };
+  cwd: string;
+  env: Record<string, string>;
+  timeoutSec: number;
+  graceSec: number;
+  onLog: AdapterExecutionContext["onLog"];
+}): Promise<string> {
+  if (!input.skillDir || input.copyResult.exitCode !== 0 || input.copyResult.timedOut) return "";
+  const skillFilePath = path.posix.join(input.skillDir, "SKILL.md");
+  const quotedSkillFilePath = "'" + skillFilePath.replace(/'/g, "'\\''") + "'";
+  try {
+    const verificationResult = await runAdapterExecutionTargetShellCommand(
+      input.runId,
+      input.target,
+      `test -f ${quotedSkillFilePath} && test -r ${quotedSkillFilePath}`,
+      {
+        cwd: input.cwd,
+        env: input.env,
+        timeoutSec: input.timeoutSec,
+        graceSec: input.graceSec,
+        onLog: input.onLog,
+      },
+    );
+    return verificationResult.exitCode === 0 && !verificationResult.timedOut ? input.skillDir : "";
+  } catch {
+    return "";
+  }
+}
+
 async function buildOpenCodeSkillsDir(config: Record<string, unknown>): Promise<string> {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-skills-"));
   const target = path.join(tmp, "skills");
@@ -263,13 +317,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
   const openCodeSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredOpenCodeSkillNames = resolveLegacyPaperclipDesiredSkillNames(config, openCodeSkillEntries);
+  const operationalPaperclipSkill = openCodeSkillEntries.find(
+    (entry) => entry.key.trim().toLowerCase() === PAPERCLIP_OPERATIONAL_SKILL_KEY,
+  );
+  const canLoadOperationalPaperclipSkill = Boolean(
+    operationalPaperclipSkill &&
+    desiredOpenCodeSkillNames.includes(operationalPaperclipSkill.key) &&
+    !isPaperclipSkillSourceMissing(operationalPaperclipSkill),
+  );
+  let operationalPaperclipSkillDir = "";
   if (!executionTargetIsRemote) {
+    const skillsHome = resolveOpenCodeSkillsHome(config);
     await ensureOpenCodeSkillsInjected(
       onLog,
       openCodeSkillEntries,
       desiredOpenCodeSkillNames,
-      resolveOpenCodeSkillsHome(config),
+      skillsHome,
     );
+    if (canLoadOperationalPaperclipSkill && operationalPaperclipSkill) {
+      operationalPaperclipSkillDir = await resolveVerifiedOperationalSkillDir({
+        sourceDir: operationalPaperclipSkill.source,
+        installedDir: path.join(skillsHome, operationalPaperclipSkill.runtimeName),
+      });
+    }
   }
 
   const envConfig = parseObject(config.env);
@@ -474,12 +544,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           });
       if (remoteHomeDir && preparedExecutionTargetRuntime.assetDirs.skills) {
         const remoteSkillsDir = path.posix.join(remoteHomeDir, ".claude", "skills");
-        await runAdapterExecutionTargetShellCommand(
+        const copyResult = await runAdapterExecutionTargetShellCommand(
           runId,
           executionTarget,
           `mkdir -p ${JSON.stringify(path.posix.dirname(remoteSkillsDir))} && rm -rf ${JSON.stringify(remoteSkillsDir)} && cp -a ${JSON.stringify(preparedExecutionTargetRuntime.assetDirs.skills)} ${JSON.stringify(remoteSkillsDir)}`,
           { cwd, env: preparedRuntimeConfig.env, timeoutSec, graceSec, onLog },
         );
+        const remoteOperationalSkillDir = operationalPaperclipSkill
+          ? path.posix.join(remoteSkillsDir, operationalPaperclipSkill.runtimeName)
+          : "";
+        if (canLoadOperationalPaperclipSkill && remoteOperationalSkillDir) {
+          operationalPaperclipSkillDir = await verifyRemoteOperationalSkillDir({
+            runId,
+            target: executionTarget,
+            skillDir: remoteOperationalSkillDir,
+            copyResult,
+            cwd,
+            env: preparedRuntimeConfig.env,
+            timeoutSec,
+            graceSec,
+            onLog,
+          });
+        }
       }
       await ensureRemoteOpenCodeModelConfiguredAndAvailable({
         runId,
@@ -518,6 +604,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         });
       }
     }
+
+    const artifactHandoffGuidance =
+      preparedRuntimeConfig.env.PAPERCLIP_API_URL &&
+      preparedRuntimeConfig.env.PAPERCLIP_API_KEY &&
+      preparedRuntimeConfig.env.PAPERCLIP_TASK_ID &&
+      operationalPaperclipSkillDir
+        ? [
+            "Paperclip artifact handoff for this non-native OpenCode run:",
+            "When the task requires an inspectable file deliverable, use the existing run-scoped Paperclip API authority through the operational Paperclip skill. The absence of an MCP tool named for uploading files does not mean this authorized path is unavailable.",
+            `The loaded operational skill directory is ${operationalPaperclipSkillDir}. Resolve its scripts/paperclip-upload-artifact.sh helper and references/artifacts.md relative to that directory, not the task workspace or cwd/scripts. Use the helper and verify the resulting attachment or work product through Paperclip readback; consult the reference if the helper is missing, fails, or its result is ambiguous, and report the concrete operation/error before claiming a capability blocker.`,
+            "Do not print or copy credentials. This adapter does not support the native-only register_deliverable tool. Follow the existing status, review, approval, stop, and budget requirements; this guidance grants no additional authority.",
+          ].join("\n")
+        : "";
 
     const runtimeSessionParams = parseObject(runtime.sessionParams);
     const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
@@ -604,6 +703,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const basePrompt = joinPromptSections([
         instructionsPrefix,
         deferredCheckGuidance,
+        artifactHandoffGuidance,
         renderedBootstrapPrompt,
         wakePrompt,
         taskContextNote,
