@@ -21,7 +21,7 @@ import {
 // These results isolate the factory binding and preparation query order.
 function databaseWithResults(...results: unknown[][]) {
   const scopes: unknown[][] = [];
-  const select = vi.fn(() => {
+  const select = vi.fn((_selection: unknown) => {
     const rows = results.shift() ?? [];
     const query = {
       from: () => query,
@@ -105,7 +105,7 @@ describe("heartbeat run preparation module", () => {
   });
 
   it("binds each context loader to its database and company scope", async () => {
-    const first = databaseWithResults([{ id: "issue-one", title: "First company" }]);
+    const first = databaseWithResults([{ id: "issue-one", title: "First company", assigneeAgentId: "agent-one", assigneeUserId: null }]);
     const second = databaseWithResults([{ id: "issue-two", title: "Second company" }]);
     const firstPreparation = createHeartbeatRunPreparation(first.db);
     const secondPreparation = createHeartbeatRunPreparation(second.db);
@@ -116,6 +116,8 @@ describe("heartbeat run preparation module", () => {
       secondPreparation.getIssueExecutionContext("company-two", "issue-two"),
     ]);
     expect(firstIssue).toMatchObject({ id: "issue-one", title: "First company" });
+    expect(firstIssue).toMatchObject({ assigneeAgentId: "agent-one", assigneeUserId: null });
+    expect(first.select.mock.calls[0]?.[0]).toHaveProperty("assigneeUserId");
     expect(secondIssue).toMatchObject({ id: "issue-two", title: "Second company" });
     expect(first.scopes[0]).toEqual(expect.arrayContaining(["company-one", "issue-one"]));
     expect(second.scopes[0]).toEqual(expect.arrayContaining(["company-two", "issue-two"]));
