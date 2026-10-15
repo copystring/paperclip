@@ -19,6 +19,7 @@ import { captureRunIdentity } from "./run-identity.js";
 import { emitConnectionInvoked } from "./connector-telemetry.js";
 import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
 import { extractRemoteMcpPending } from "./remote-mcp-pending.js";
+import { searchOnDemandTools } from "./on-demand-tool-search.js";
 import { logger } from "../middleware/logger.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -2984,20 +2985,11 @@ export function createToolGatewayService(
     const query =
       typeof params.query === "string" ? params.query.trim().toLowerCase() : "";
     const limit = Math.max(1, Math.min(50, Number(params.limit ?? 10) || 10));
-    const tools = (await searchableOnDemandTools(session))
-      .filter((tool) => {
-        if (!query) return true;
-        return [
-          tool.name,
-          tool.displayName,
-          tool.description,
-          tool.applicationKey,
-          tool.upstreamToolName,
-        ]
-          .filter((value): value is string => typeof value === "string")
-          .some((value) => value.toLowerCase().includes(query));
-      })
-      .slice(0, limit)
+    const tools = searchOnDemandTools(
+      await searchableOnDemandTools(session),
+      query,
+      limit,
+    )
       .map((tool) => ({
         name: tool.name,
         displayName: tool.displayName ?? tool.name,
