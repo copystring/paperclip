@@ -151,6 +151,81 @@ describe("OpenCode local skill injection", () => {
     expect(prompts[1]).toContain("Connection tools:");
   });
 
+  it("fails a fresh-session retry that exits cleanly without assistant output or a completed tool action", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-empty-retry");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const emptyStdout = [
+      JSON.stringify({ type: "step_start", sessionID: "fresh-session" }),
+      JSON.stringify({ type: "step_finish", sessionID: "fresh-session", part: {
+        reason: "stop", cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      } }),
+    ].join("\n");
+    runProcessMock.mockReset()
+      .mockResolvedValueOnce(probeResult({ stdout: JSON.stringify({ type: "error", error: "Session not found: previous-session" }) }))
+      .mockResolvedValueOnce(probeResult({ stdout: emptyStdout }));
+
+    const result = await execute({
+      runId: "run-empty-fresh-session-retry",
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: { sessionId: "previous-session", sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: commandPath, cwd: configHome, model: "openai/gpt-5", env: { OPENCODE_ALLOW_ALL_MODELS: "1" } },
+      context: {},
+      onLog: async () => {},
+    });
+
+    expect(runProcessMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      exitCode: 1,
+      errorCode: "opencode_empty_response",
+      errorMessage: "OpenCode completed without an assistant response or completed tool action",
+      sessionId: "fresh-session",
+      summary: "",
+      resultJson: { stdout: emptyStdout },
+    });
+  });
+
+  it("fails a whitespace-only assistant completion", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-whitespace");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    runProcessMock.mockReset().mockResolvedValueOnce(probeResult({ stdout: [
+      JSON.stringify({ type: "text", sessionID: "whitespace-session", part: { text: "  \n  " } }),
+      JSON.stringify({ type: "step_finish", sessionID: "whitespace-session", part: { reason: "stop", tokens: { input: 3, output: 0 } } }),
+    ].join("\n") }));
+
+    const result = await execute({
+      runId: "run-whitespace-completion",
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: commandPath, cwd: configHome, model: "openai/gpt-5", env: { OPENCODE_ALLOW_ALL_MODELS: "1" } },
+      context: {},
+      onLog: async () => {},
+    });
+
+    expect(result).toMatchObject({ exitCode: 1, errorCode: "opencode_empty_response", summary: "" });
+  });
+
+  it("keeps a completed tool-only run successful", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-tool-only");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const stdout = JSON.stringify({
+      type: "tool_use",
+      sessionID: "tool-only-session",
+      part: { tool: "bash", state: { status: "completed", output: "updated the workspace" } },
+    });
+    runProcessMock.mockReset().mockResolvedValueOnce(probeResult({ stdout }));
+
+    const result = await execute({
+      runId: "run-tool-only",
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: commandPath, cwd: configHome, model: "openai/gpt-5", env: { OPENCODE_ALLOW_ALL_MODELS: "1" } },
+      context: {},
+      onLog: async () => {},
+    });
+
+    expect(result).toMatchObject({ exitCode: 0, errorMessage: null, errorCode: null, summary: "" });
+  });
+
   it("injects runtime skills into the configured child HOME", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-configured-home-"));
     const processHome = path.join(root, "process-home");
@@ -233,9 +308,13 @@ describe("OpenCode local skill injection", () => {
     runProcessMock.mockReset();
     const usageLine = JSON.stringify({ type: "step_finish", sessionID: "session-openrouter",
       part: { cost: 0.0025, tokens: { input: 10, output: 2, cache: { read: 100, write: 0 } } } });
+    const stdout = [
+      ...(timedOut ? [] : [JSON.stringify({ type: "text", sessionID: "session-openrouter", part: { text: "done" } })]),
+      usageLine,
+    ].join("\n");
     runProcessMock.mockImplementationOnce(async (...args) => {
-      await args[4].onLog("stdout", `${usageLine}\n`);
-      return probeResult({ stdout: usageLine, timedOut, exitCode: timedOut ? 143 : 0, signal: timedOut ? "SIGTERM" : null });
+      await args[4].onLog("stdout", `${stdout}\n`);
+      return probeResult({ stdout, timedOut, exitCode: timedOut ? 143 : 0, signal: timedOut ? "SIGTERM" : null });
     });
     const logs: string[] = [];
     const metadata: unknown[] = [];
@@ -279,6 +358,7 @@ describe("OpenCode local skill injection", () => {
       });
 
       expect(result.exitCode).toBe(timedOut ? 143 : 0);
+      expect(result.errorMessage).toBe(timedOut ? "OpenCode execution timed out" : null);
       expect(result.usageComplete).toBe(!timedOut);
       expect(result.model).toBe(model);
       expect(result.billingType).toBe("metered_api");

@@ -759,9 +759,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const parsedError = typeof attempt.parsed.errorMessage === "string" ? attempt.parsed.errorMessage.trim() : "";
       const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
       const rawExitCode = attempt.proc.exitCode;
-      const synthesizedExitCode = parsedError && (rawExitCode ?? 0) === 0 ? 1 : rawExitCode;
+      const emptyCompletion = rawExitCode === 0 && !attempt.proc.signal && !parsedError
+        && !attempt.parsed.summary.trim() && !attempt.parsed.hasCompletedToolAction;
+      const synthesizedExitCode = (parsedError || emptyCompletion) && (rawExitCode ?? 0) === 0 ? 1 : rawExitCode;
       const fallbackErrorMessage =
         parsedError ||
+        (emptyCompletion ? "OpenCode completed without an assistant response or completed tool action" : "") ||
         stderrLine ||
         `OpenCode exited with code ${synthesizedExitCode ?? -1}`;
       const modelId = model || null;
@@ -775,9 +778,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         usageBasis: "per_run",
         errorMessage: (synthesizedExitCode ?? 0) === 0 ? null : fallbackErrorMessage,
         // Forward the transport-level error code from the run-disposition seam.
-        // A lost duplex control channel surfaces the typed `duplex_channel_lost`
-        // code; every other result carries no code here.
-        errorCode: attempt.proc.errorCode ?? null,
+        // Preserve transport failures; otherwise identify empty completions
+        // separately so recovery never mistakes a silent provider for success.
+        errorCode: attempt.proc.errorCode ?? (emptyCompletion ? "opencode_empty_response" : null),
         usage: attempt.parsed.usageReported ? attempt.parsed.usage : undefined,
         sessionId: resolvedSessionId,
         sessionParams: resolvedSessionParams,
