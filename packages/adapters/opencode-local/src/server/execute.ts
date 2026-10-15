@@ -416,6 +416,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     config,
     runtimeMcp: ctx.runtimeMcp?.getServers(),
   });
+  const taskToolsGuidance = !executionTargetIsRemote && preparedRuntimeConfig.taskToolsPath
+    && env.PAPERCLIP_API_URL && env.PAPERCLIP_API_KEY && env.PAPERCLIP_TASK_ID
+    ? [
+        "Paperclip prepared task tools (use these instead of reconstructing API JSON):",
+        `Run ${JSON.stringify(process.execPath)} ${JSON.stringify(preparedRuntimeConfig.taskToolsPath)} with one of the following commands. Credentials are taken from the existing run environment, never command arguments.`,
+        "read-document --issue-id ID --key KEY: fetches the complete authorized document body into a private UTF-8 snapshot and returns its revision, hash, first bounded body page, nextOffset and complete. Continue with read-snapshot --file FILE --sha256 HASH --offset NEXT until complete=true. This avoids JSON/display truncation; a first page alone is not a complete read.",
+        "set-monitor --at ISO_TIME --timeout-at ISO_TIME --max-attempts N --notes TEXT: schedules one monitor on the current eligible task, preserving other execution-policy fields and tighter existing budgets, then confirms by readback. It never changes status or automatically retries. After a conflict or uncertain transport outcome inspect current state before any further write. If no useful independent work remains, use this durable path and end the run instead of sleeping or polling.",
+        "These helpers do not validate result claims or grant additional authority. Trace success criteria to the authorized task or primary source. Compute/check derived values with an actual tool invocation; an earlier agent document or a succeeded run is not independent proof.",
+      ].join("\n") : "";
   const localRuntimeConfigHome =
     preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
   try {
@@ -714,6 +723,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         instructionsPrefix,
         deferredCheckGuidance,
         artifactHandoffGuidance,
+        taskToolsGuidance,
         renderedBootstrapPrompt,
         wakePrompt,
         taskContextNote,

@@ -33,6 +33,15 @@ async function makeConfigHome(initialConfig?: Record<string, unknown>) {
 }
 
 describe("prepareOpenCodeRuntimeConfig", () => {
+  it("ships task tools privately and removes them with the runtime configuration", async () => {
+    const configHome = await makeConfigHome();
+    const prepared = await prepareOpenCodeRuntimeConfig({ env: { XDG_CONFIG_HOME: configHome }, config: {} });
+    expect(prepared.taskToolsPath).toBeTruthy();
+    expect(await fs.readFile(prepared.taskToolsPath!, "utf8")).toContain("expectedExecutionPolicy");
+    if (process.platform !== "win32") expect((await fs.stat(prepared.taskToolsPath!)).mode & 0o777).toBe(0o600);
+    await prepared.cleanup();
+    await expect(fs.access(prepared.taskToolsPath!)).rejects.toMatchObject({ code: "ENOENT" });
+  });
   it("adds a private provider timeout hook only when the configured provider credential is available", async () => {
     const apiKey = "fixture-config-provider-key-never-a-real-secret";
     const configHome = await makeConfigHome({
