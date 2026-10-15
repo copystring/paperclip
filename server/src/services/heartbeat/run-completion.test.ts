@@ -267,6 +267,21 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
     expect(f.deps.finalizeAgentStatus).toHaveBeenCalledOnce();
   });
 
+  it.each(["failed", "timed_out"])("does not publish unfinished prose when settlement is %s", async (expected) => {
+    const f = await fixture();
+    const [issue] = await db.insert(issues).values({ companyId: f.run.companyId, title: "Interrupted result" }).returning();
+    f.input.issueId = issue.id;
+    f.input.issueRef = issue;
+    f.input.issueContext = await createHeartbeatRunPreparation(db).getIssueExecutionContext(f.run.companyId, issue.id);
+    Object.assign(f.input.adapterResult, { exitCode: 1, timedOut: expected === "timed_out", resultJson: { summary: "CTO acceptance saved" } });
+    await f.completion.completeRun(f.input);
+    const saved = await read(f.run.id);
+    expect(saved.status).toBe(expected);
+    expect(saved.resultJson).toMatchObject({ summary: "CTO acceptance saved", presentationDecision: { commentAction: "none", reasonCodes: ["run_not_succeeded"] } });
+    expect(f.deps.issuesSvc.addComment).not.toHaveBeenCalled();
+    expect(f.deps.releaseIssueExecutionAndPromote).toHaveBeenCalledOnce();
+  });
+
   it("clears only the completed task session when the adapter requests a reset", async () => {
     const f = await fixture();
     f.input.adapterResult.clearSession = true;
