@@ -29,6 +29,7 @@ export function createOpenCodeJsonlParser() {
   const messages: string[] = [];
   const errors: string[] = [];
   const toolErrors: string[] = [];
+  let hasCompletedToolAction = false;
   const usage = {
     inputTokens: 0,
     cachedInputTokens: 0,
@@ -79,7 +80,9 @@ export function createOpenCodeJsonlParser() {
       if (type === "tool_use") {
         const part = parseObject(event.part);
         const state = parseObject(part.state);
-        if (asString(state.status, "") === "error") {
+        const status = asString(state.status, "");
+        if (status === "completed") hasCompletedToolAction = true;
+        if (status === "error") {
           const text = asString(state.error, "").trim();
           if (text) toolErrors.push(text);
         }
@@ -96,6 +99,7 @@ export function createOpenCodeJsonlParser() {
     return {
       sessionId,
       summary: messages.join("\n\n").trim(),
+      hasCompletedToolAction,
       usage: { ...usage },
       usageReported,
       usageComplete: usageReported && !missingUsage,

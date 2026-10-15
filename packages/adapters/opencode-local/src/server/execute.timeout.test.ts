@@ -23,6 +23,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async (importOriginal) =>
 import { execute } from "./execute.js";
 
 const rawOutput = "private-output-canary";
+const successfulOutput = JSON.stringify({ type: "text", sessionID: "fixture", part: { text: "fixture response" } });
 const rawError = "<html>504 Gateway Time-out private-provider-token-canary</html>";
 const failed: RunProcessResult = {
   timedOut: true, exitCode: null, signal: null, stdout: rawOutput, stderr: rawError,
@@ -69,11 +70,12 @@ describe("OpenCode timeout reporting", () => {
   });
 
   it.each([0, 7])("retains output and completion semantics for a non-timeout exit %s", async (exitCode) => {
-    mocks.process.mockResolvedValue({ ...failed, timedOut: false, exitCode, stderr: "fixture failure" });
+    const stdout = exitCode === 0 ? successfulOutput : rawOutput;
+    mocks.process.mockResolvedValue({ ...failed, timedOut: false, exitCode, stdout, stderr: "fixture failure" });
     const result = await execute(context(0));
     expect(result).toMatchObject({ timedOut: false, exitCode, signal: null,
       errorMessage: exitCode === 0 ? null : "fixture failure",
-      resultJson: { stdout: rawOutput, stderr: "fixture failure",
+      resultJson: { stdout, stderr: "fixture failure",
         adapterExecutionTimeout: { timeoutSec: 14400, source: "sandbox_default" } } });
     expect(mocks.process).toHaveBeenCalledTimes(1);
     expect(mocks.restore).toHaveBeenCalledTimes(1);
@@ -90,8 +92,8 @@ describe("OpenCode timeout reporting", () => {
         // configured deadline. Session dispatch must keep that request off the
         // main CLI path; it must not replay the agent to recover the response.
         if (!input.useSession) return failed;
-        await input.onLog?.("stdout", "streamed fixture output");
-        return { ...failed, timedOut: false, exitCode: 0, stdout: "streamed fixture output", stderr: "" };
+        await input.onLog?.("stdout", successfulOutput);
+        return { ...failed, timedOut: false, exitCode: 0, stdout: successfulOutput, stderr: "" };
       }),
     };
     const ctx = context(0);
@@ -99,10 +101,10 @@ describe("OpenCode timeout reporting", () => {
     ctx.executionTarget = { kind: "remote", transport: "sandbox", providerKey: "daytona", remoteCwd: "/workspace", runner };
     const result = await execute(ctx);
     expect(result).toMatchObject({ timedOut: false, exitCode: 0, errorMessage: null,
-      resultJson: { stdout: "streamed fixture output", adapterExecutionTimeout: { timeoutSec: 14400, source: "sandbox_default" } } });
+      resultJson: { stdout: successfulOutput, adapterExecutionTimeout: { timeoutSec: 14400, source: "sandbox_default" } } });
     expect(runner.execute).toHaveBeenCalledTimes(1);
     expect(runner.execute.mock.calls[0]![0]).toMatchObject({ command: "opencode", useSession: true, timeoutMs: 14400000, commandTimeoutMs: 14400000 });
-    expect(logs).toHaveBeenCalledWith("stdout", "streamed fixture output");
+    expect(logs).toHaveBeenCalledWith("stdout", successfulOutput);
     expect(mocks.restore).toHaveBeenCalledTimes(1);
     expect(mocks.stop).toHaveBeenCalledTimes(1);
   });
