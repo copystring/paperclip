@@ -776,6 +776,16 @@ type PaperclipWakeRecovery = {
   routingFallbackReason: string | null;
 };
 
+type PaperclipWakeIssueMonitor = {
+  nextCheckAt: string | null;
+  notes: string | null;
+  attemptCount: number | null;
+  serviceName: string | null;
+  timeoutAt: string | null;
+  maxAttempts: number | null;
+  recoveryPolicy: string | null;
+};
+
 export type PaperclipExternalChatProvider =
   "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "imessage-photon" | "speko";
 
@@ -783,6 +793,7 @@ type PaperclipWakePayload = {
   executionContinuation: ExecutionContinuationEnvelope | null;
   reason: string | null;
   recovery: PaperclipWakeRecovery | null;
+  issueMonitor: PaperclipWakeIssueMonitor | null;
   issue: PaperclipWakeIssue | null;
   checkedOutByHarness: boolean;
   externalChatExecutionBound: boolean;
@@ -851,6 +862,28 @@ function normalizePaperclipWakeRecovery(
     routingFallbackReason:
       asString(recovery.routingFallbackReason, "").trim() || null,
   };
+}
+
+function normalizePaperclipWakeIssueMonitor(
+  value: unknown,
+): PaperclipWakeIssueMonitor | null {
+  const monitor = parseObject(value);
+  const nextCheckAt = asString(monitor.nextCheckAt, "").trim() || null;
+  const notes = asString(monitor.notes, "").trim().slice(0, 500) || null;
+  const serviceName = asString(monitor.serviceName, "").trim().slice(0, 120) || null;
+  const timeoutAt = asString(monitor.timeoutAt, "").trim() || null;
+  const attemptCount = Number.isSafeInteger(monitor.attemptCount) && (monitor.attemptCount as number) >= 0
+    ? monitor.attemptCount as number
+    : null;
+  const maxAttempts = Number.isSafeInteger(monitor.maxAttempts) && (monitor.maxAttempts as number) > 0
+    ? monitor.maxAttempts as number
+    : null;
+  const recoveryPolicy = ["wake_owner", "create_recovery_issue", "escalate_to_board"].includes(String(monitor.recoveryPolicy))
+    ? String(monitor.recoveryPolicy)
+    : null;
+  if (!nextCheckAt && !notes && !serviceName && !timeoutAt && attemptCount === null && maxAttempts === null && !recoveryPolicy)
+    return null;
+  return { nextCheckAt, notes, attemptCount, serviceName, timeoutAt, maxAttempts, recoveryPolicy };
 }
 
 function normalizePaperclipWakeAgentMessage(
@@ -1753,6 +1786,7 @@ export function normalizePaperclipWakePayload(
   );
   const taskWatchdog = normalizePaperclipWakeTaskWatchdog(payload.taskWatchdog);
   const recovery = normalizePaperclipWakeRecovery(payload.recovery);
+  const issueMonitor = normalizePaperclipWakeIssueMonitor(payload.issueMonitor);
   const childIssueSummaries = Array.isArray(payload.childIssueSummaries)
     ? payload.childIssueSummaries
         .map((entry) => normalizePaperclipWakeChildIssueSummary(entry))
@@ -1834,6 +1868,7 @@ export function normalizePaperclipWakePayload(
     !executionWorkspace &&
     !agentMessage &&
     !recovery &&
+    !issueMonitor &&
     !issue
   ) {
     return null;
@@ -1843,6 +1878,7 @@ export function normalizePaperclipWakePayload(
     reason: asString(payload.reason, "").trim() || null,
     executionContinuation: parseObject(payload.executionContinuation).version === 1 ? payload.executionContinuation as ExecutionContinuationEnvelope : null,
     recovery,
+    issueMonitor,
     issue,
     checkedOutByHarness: asBoolean(payload.checkedOutByHarness, false),
     externalChatExecutionBound: payload.externalChatExecutionBound === true,
@@ -2429,6 +2465,32 @@ function renderPaperclipWakePromptBody(
           "",
         ]
       : [];
+  const issueMonitorLines = normalized.reason === "issue_monitor_due" && normalized.issueMonitor
+    ? [
+        "## One-shot issue monitor check",
+        "This is the scheduled one-shot check. Its timer has been consumed for this wake; the current issue may no longer show an active monitor.",
+        ...(normalized.issueMonitor.nextCheckAt
+          ? [`- scheduled check time: ${normalized.issueMonitor.nextCheckAt}`]
+          : []),
+        ...(normalized.issueMonitor.attemptCount !== null
+          ? [`- monitor attempt: ${normalized.issueMonitor.attemptCount}${normalized.issueMonitor.maxAttempts !== null ? `/${normalized.issueMonitor.maxAttempts}` : ""}`]
+          : []),
+        ...(normalized.issueMonitor.serviceName
+          ? [`- service: ${normalized.issueMonitor.serviceName}`]
+          : []),
+        ...(normalized.issueMonitor.timeoutAt
+          ? [`- timeout bound: ${normalized.issueMonitor.timeoutAt}`]
+          : []),
+        ...(normalized.issueMonitor.recoveryPolicy
+          ? [`- recovery policy: ${normalized.issueMonitor.recoveryPolicy}`]
+          : []),
+        ...(normalized.issueMonitor.notes
+          ? ["- check requested by the saved monitor note:", markdownFencedText(normalized.issueMonitor.notes)]
+          : []),
+        "Check the current external result and report what it shows. A monitor is not recurring: if the check is still pending, schedule another one-shot only when current policy and bounds allow it. Preserve all existing task, review, and approval gates.",
+        "",
+      ]
+    : [];
   const wakeSummaryLines = [
     `- reason: ${normalized.reason ?? "unknown"}`,
     `- issue: ${normalized.issue?.identifier ?? normalized.issue?.id ?? "unknown"}${normalized.issue?.title ? ` ${normalized.issue.title}` : ""}`,
@@ -2451,6 +2513,7 @@ function renderPaperclipWakePromptBody(
             : []),
         ]
       : []),
+    ...issueMonitorLines,
     ...(normalized.reason === "issue_recovery_action_restored"
       ? [
           "- instruction: Do not narrate the recovery in your next comment — at most one short sentence; lead with the work.",

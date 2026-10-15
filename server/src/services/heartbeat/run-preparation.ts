@@ -2643,8 +2643,23 @@ export async function buildPaperclipWakePayload(input: {
           notice: externalAttachmentOmissionNotice(omission),
         }))
     : [];
+  // The issue scheduler consumes its one-shot timer when it queues the wake.
+  // Carry only the safe, useful check context from the immutable wake snapshot;
+  // in particular, never copy monitor.externalRef into a prompt payload.
+  const issueMonitor = input.contextSnapshot.wakeReason === "issue_monitor_due"
+    ? {
+        nextCheckAt: input.contextSnapshot.nextCheckAt ?? null,
+        notes: input.contextSnapshot.monitorNotes ?? null,
+        attemptCount: input.contextSnapshot.monitorAttemptCount ?? null,
+        serviceName: input.contextSnapshot.serviceName ?? null,
+        timeoutAt: input.contextSnapshot.timeoutAt ?? null,
+        maxAttempts: input.contextSnapshot.maxAttempts ?? null,
+        recoveryPolicy: input.contextSnapshot.recoveryPolicy ?? null,
+      }
+    : null;
   const payload = {
     reason: readNonEmptyString(input.contextSnapshot.wakeReason),
+    issueMonitor,
     executionContinuation: input.contextSnapshot.executionContinuation ?? null,
     chatCompletionUpdates: input.contextSnapshot.chatCompletionUpdates ?? null,
     attachmentOmissions,
