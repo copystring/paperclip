@@ -151,6 +151,50 @@ describe("OpenCode local skill injection", () => {
     expect(prompts[1]).toContain("Connection tools:");
   });
 
+  it.each(["fresh", "resumed", "recovery"] as const)(
+    "includes durable deferred-check guidance in the %s prompt",
+    async (mode) => {
+      const commandPath = path.join(configHome, `fake-opencode-monitor-${mode}`);
+      await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      runProcessMock.mockReset().mockResolvedValueOnce(probeResult({
+        stdout: JSON.stringify({ type: "text", sessionID: "monitor-session", part: { text: "done" } }),
+      }));
+      const context = mode === "resumed"
+        ? { ...createPromptContextFixture(), issueId: "issue-1" }
+        : {
+            issueId: "issue-1",
+            ...(mode === "recovery" ? {
+              paperclipWake: {
+                reason: "source_scoped_recovery_action",
+                issue: { id: "issue-1", status: "in_progress" },
+                recovery: { cause: "process_lost" },
+              },
+            } : {}),
+          };
+      let prompt = "";
+
+      const result = await execute({
+        runId: `run-monitor-${mode}`,
+        agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+        runtime: { sessionId: mode === "resumed" ? "prior-session" : null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: { command: commandPath, cwd: configHome, model: "openai/gpt-5", env: { OPENCODE_ALLOW_ALL_MODELS: "1" } },
+        context,
+        authToken: "run-token-must-not-appear-in-prompt",
+        onLog: async () => {},
+        onMeta: async (meta) => { prompt = String(meta.prompt ?? ""); },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(prompt).toContain("Paperclip durable deferred-check contract:");
+      expect(prompt).toContain("expectedExecutionPolicy is exactly that snapshot");
+      expect(prompt).toContain("X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID");
+      expect(prompt).toContain("Read the issue back and verify the persisted monitor");
+      expect(prompt).toContain("Do not change task status, assignee, reviewer, or approval state.");
+      expect(prompt).toContain("repeated identical remote PowerShell tool call may return its prior receipt");
+      expect(prompt).not.toContain("run-token-must-not-appear-in-prompt");
+    },
+  );
+
   it("fails a fresh-session retry that exits cleanly without assistant output or a completed tool action", async () => {
     const commandPath = path.join(configHome, "fake-opencode-empty-retry");
     await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
