@@ -191,7 +191,7 @@ const support = await getEmbeddedPostgresTestSupport();
       const packet = JSON.parse(rendered!.split("\n").at(-1)!);
       const refs = packet.entries.filter((e: any) => e.kind === "prior_workspace").map((e: any) => JSON.parse(e.body));
       expect(refs).toHaveLength(2);
-      expect(refs).toContainEqual({ cwd: original, availability: "directory_readable", topLevelEntries: ["source-for-this-task"], listingTruncated: false });
+      expect(refs).toContainEqual({ cwd: original, availability: "not_checked" });
       expect(rendered).not.toContain("OTHER_TASK"); expect(rendered).not.toContain("REMOTE_ROOT");
       expect(rendered).not.toContain("PRIVATE_PROJECT"); expect(rendered).not.toContain("QUARANTINED_ROOT");
       expect(await fs.readdir(current)).toEqual([]);
@@ -230,6 +230,40 @@ const support = await getEmbeddedPostgresTestSupport();
       const refs = JSON.parse(rendered!.split("\n").at(-1)!).entries.filter((e: any) => e.kind === "prior_workspace");
       expect(refs).toHaveLength(1);
       expect(JSON.parse(refs[0].body).cwd).toBe(path.join(root, "CURRENT"));
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it("selects recent distinct locations before the output limit and never reads symlink targets or filenames", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "handoff-reference-only-"));
+    try {
+      const task = randomUUID(), linkedTask = randomUUID();
+      await db.insert(issues).values([task, linkedTask].map(id => ({ id, companyId, title: "References", status: "in_progress", assigneeAgentId: agentId })));
+      for (const [index, name] of ["a-oldest", "b-second", "c-third", "d-fourth", "z-newest", "a-quarantined"].entries()) {
+        await db.insert(heartbeatRuns).values({ companyId, agentId, status: "cancelled", nativeIssueId: task,
+          contextSnapshot: { issueId: task, paperclipWorkspace: { cwd: path.join(root, name), source: "agent_home", realization: { provider: "local" } },
+            ...(index === 5 ? { executionPolicy: { trustPreset: "low_trust_review", authorizationPolicy: { trustPreset: "low_trust_review", trustBoundary: { mode: "low_trust_review", companyId, issueIds: [task] } } } } : {}) },
+          createdAt: new Date(1_000 + index), finishedAt: new Date(2_000 + index) });
+      }
+      const rendered = await buildNativeSessionHandoff({ db, companyId, issueId: task, agentId, before: new Date(10_000) });
+      const refs = JSON.parse(rendered!.split("\n").at(-1)!).entries.filter((e: any) => e.kind === "prior_workspace").map((e: any) => JSON.parse(e.body).cwd);
+      expect(refs).toEqual(["z-newest", "d-fourth", "c-third", "b-second"].map(name => path.join(root, name)));
+      expect(rendered).not.toContain("a-oldest"); expect(rendered).not.toContain("a-quarantined");
+      expect(JSON.parse(rendered!.split("\n").at(-1)!).omittedEntriesAtLeast).toBeGreaterThanOrEqual(1);
+      const target = path.join(root, "private"), alias = path.join(root, "alias");
+      await fs.mkdir(path.join(target, "sub"), { recursive: true });
+      await fs.writeFile(path.join(target, "sub", "SECRET_DIRECTORY_ENTRY"), "SECRET_FILE_CONTENT");
+      await fs.symlink(target, alias, process.platform === "win32" ? "junction" : "dir");
+      await db.insert(heartbeatRuns).values({ companyId, agentId, status: "cancelled", nativeIssueId: linkedTask,
+        contextSnapshot: { issueId: linkedTask, paperclipWorkspace: { cwd: path.join(alias, "sub"), source: "agent_home", realization: { provider: "local" } } },
+        createdAt: new Date(1_000), finishedAt: new Date(2_000) });
+      const list = vi.spyOn(fs, "opendir"), stat = vi.spyOn(fs, "lstat");
+      try {
+        const linked = await buildNativeSessionHandoff({ db, companyId, issueId: linkedTask, agentId, before: new Date(10_000) });
+        const ref = JSON.parse(linked!.split("\n").at(-1)!).entries.find((e: any) => e.kind === "prior_workspace");
+        expect(JSON.parse(ref.body).availability).toBe("not_checked");
+        expect(linked).not.toContain("SECRET_DIRECTORY_ENTRY"); expect(linked).not.toContain("SECRET_FILE_CONTENT");
+        expect(list).not.toHaveBeenCalled(); expect(stat).not.toHaveBeenCalled();
+      } finally { list.mockRestore(); stat.mockRestore(); }
     } finally { await fs.rm(root, { recursive: true, force: true }); }
   });
 
