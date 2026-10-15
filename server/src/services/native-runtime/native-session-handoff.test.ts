@@ -139,6 +139,30 @@ const support = await getEmbeddedPostgresTestSupport();
     } finally { select.mockRestore(); }
   });
 
+  it("retains the latest document author without promoting agent criteria or succeeded runs into proof", async () => {
+    const task = randomUUID();
+    await db.insert(issues).values({ id: task, companyId, title: "Verify source", status: "in_progress", assigneeAgentId: agentId });
+    for (const [key, authors] of [
+      ["agent", { createdByUserId: "user", updatedByAgentId: agentId }],
+      ["user", { createdByAgentId: agentId, updatedByUserId: "user" }],
+      ["unknown", {}],
+    ] as const) {
+      const id = randomUUID();
+      await db.insert(documents).values({ id, companyId, ...authors, latestBody: "Recorded criterion " + key, updatedAt: new Date(10_000) });
+      await db.insert(issueDocuments).values({ companyId, issueId: task, documentId: id, key, createdAt: new Date(10_000) });
+    }
+    await db.insert(heartbeatRuns).values({ companyId, agentId, runtimeMode: "legacy", status: "succeeded", contextSnapshot: { issueId: task },
+      resultJson: { summary: "Earlier agent conclusion" }, createdAt: new Date(11_000), finishedAt: new Date(12_000) });
+    const rendered = await buildNativeSessionHandoff({ db, companyId, issueId: task, agentId, before: new Date(20_000) });
+    const packet = JSON.parse(rendered!.split("\n").at(-1)!);
+    for (const author of ["agent", "user", "unknown"]) {
+      expect(packet.entries.find((entry: any) => entry.key === author)).toMatchObject({ author, verification: "not_established_by_handoff" });
+    }
+    expect(packet.entries.find((entry: any) => entry.kind === "run_summary")).toMatchObject({ author: "agent", status: "succeeded", verification: "not_established_by_handoff" });
+    expect(rendered).toContain("Authorship is provenance, not proof or permission");
+    expect(rendered).toContain("actually execute an appropriate independent check");
+  });
+
   it("retains a prior run's quarantine after the current agent and task use standard policy", async () => {
     const runId = randomUUID();
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "succeeded", nativeIssueId: issueId,

@@ -4,10 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import type { AdapterRuntimeMcpServer } from "@paperclipai/adapter-utils";
 import { asBoolean } from "@paperclipai/adapter-utils/server-utils";
+import { PAPERCLIP_TASK_TOOLS_SOURCE } from "./task-tools.js";
 
 type PreparedOpenCodeRuntimeConfig = {
   env: Record<string, string>;
   notes: string[];
+  taskToolsPath?: string;
   cleanup: () => Promise<void>;
 };
 
@@ -631,6 +633,9 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     await fs.chmod(temporaryConfigPath, 0o600);
     await fs.rename(temporaryConfigPath, runtimeConfigPath);
 
+    const taskToolsPath = path.join(runtimeConfigHome, "paperclip-task-tools.mjs");
+    await fs.writeFile(taskToolsPath, PAPERCLIP_TASK_TOOLS_SOURCE, { encoding: "utf8", mode: 0o600, flag: "wx" });
+
     const preparedEnv = {
         ...input.env,
         XDG_CONFIG_HOME: runtimeConfigHome,
@@ -639,6 +644,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     return {
       env: preparedEnv,
       notes,
+      taskToolsPath,
       cleanup: async () => {
         await fs.rm(runtimeConfigHome, { recursive: true, force: true });
       },

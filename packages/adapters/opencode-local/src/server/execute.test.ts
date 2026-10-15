@@ -267,6 +267,9 @@ describe("OpenCode local skill injection", () => {
 
       expect(result.exitCode).toBe(0);
       if (hasAuth) {
+        expect(prompt).toContain("Paperclip prepared task tools");
+        expect(prompt).toContain("read-snapshot --file FILE --sha256 HASH --offset NEXT until complete=true");
+        expect(prompt).toContain("set-monitor --at ISO_TIME");
         expect(prompt).toContain("Paperclip artifact handoff for this non-native OpenCode run:");
         expect(prompt).toContain("absence of an MCP tool named for uploading files does not mean");
         expect(prompt).toContain(skillDir);
@@ -275,6 +278,7 @@ describe("OpenCode local skill injection", () => {
         expect(prompt).toContain("does not support the native-only register_deliverable tool");
         expect(prompt).not.toContain(secret);
       } else {
+        expect(prompt).not.toContain("Paperclip prepared task tools");
         expect(prompt).not.toContain("Paperclip artifact handoff for this non-native OpenCode run:");
         expect(prompt).not.toContain(skillDir);
       }
