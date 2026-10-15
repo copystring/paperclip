@@ -5,14 +5,19 @@ import path from "node:path";
 
 vi.mock("@paperclipai/adapter-utils/execution-target", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
-  return { ...actual, runAdapterExecutionTargetProcess: vi.fn() };
+  return {
+    ...actual,
+    runAdapterExecutionTargetProcess: vi.fn(),
+    runAdapterExecutionTargetShellCommand: vi.fn(),
+  };
 });
 
-import { ensureRemoteOpenCodeModelConfiguredAndAvailable, execute } from "./execute.js";
-import { runAdapterExecutionTargetProcess } from "@paperclipai/adapter-utils/execution-target";
+import { ensureRemoteOpenCodeModelConfiguredAndAvailable, execute, verifyRemoteOperationalSkillDir } from "./execute.js";
+import { runAdapterExecutionTargetProcess, runAdapterExecutionTargetShellCommand } from "@paperclipai/adapter-utils/execution-target";
 import { createPromptContextFixture } from "@paperclipai/adapter-utils/test-fixtures/prompt-context";
 
 const runProcessMock = vi.mocked(runAdapterExecutionTargetProcess);
+const runShellCommandMock = vi.mocked(runAdapterExecutionTargetShellCommand);
 
 async function createSkillDir(root: string, name: string): Promise<string> {
   const skillDir = path.join(root, name);
@@ -194,6 +199,149 @@ describe("OpenCode local skill injection", () => {
       expect(prompt).not.toContain("run-token-must-not-appear-in-prompt");
     },
   );
+
+  it.each([true, false])(
+    "adds legacy artifact handoff guidance only with run-scoped authority (auth=%s)",
+    async (hasAuth) => {
+      const commandPath = path.join(configHome, `fake-opencode-artifact-guidance-${hasAuth}`);
+      const skillSource = await createSkillDir(configHome, `operational-paperclip-skill-${hasAuth}`);
+      await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      runProcessMock.mockReset().mockResolvedValueOnce(probeResult({
+        stdout: JSON.stringify({ type: "text", sessionID: "artifact-guidance", part: { text: "done" } }),
+      }));
+      let prompt = "";
+      const skillDir = path.join(configHome, "agent-home", ".claude", "skills", "paperclip");
+      const secret = "run-token-must-not-appear-in-prompt";
+
+      const result = await execute({
+        runId: "run-artifact-guidance",
+        agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: configHome,
+          model: "openai/gpt-5",
+          env: { OPENCODE_ALLOW_ALL_MODELS: "1", HOME: path.join(configHome, "agent-home"), PAPERCLIP_API_URL: "http://paperclip.test" },
+          paperclipRuntimeSkills: [{ key: "paperclipai/paperclip/paperclip", runtimeName: "paperclip", source: skillSource }],
+        },
+        context: { issueId: "issue-artifact-guidance" },
+        ...(hasAuth ? { authToken: secret } : {}),
+        onLog: async () => {},
+        onMeta: async (meta) => { prompt = String(meta.prompt ?? ""); },
+      });
+
+      expect(result.exitCode).toBe(0);
+      if (hasAuth) {
+        expect(prompt).toContain("Paperclip artifact handoff for this non-native OpenCode run:");
+        expect(prompt).toContain("absence of an MCP tool named for uploading files does not mean");
+        expect(prompt).toContain(skillDir);
+        expect(prompt).toContain("scripts/paperclip-upload-artifact.sh");
+        expect(prompt).toContain("references/artifacts.md");
+        expect(prompt).toContain("does not support the native-only register_deliverable tool");
+        expect(prompt).not.toContain(secret);
+      } else {
+        expect(prompt).not.toContain("Paperclip artifact handoff for this non-native OpenCode run:");
+        expect(prompt).not.toContain(skillDir);
+      }
+    },
+  );
+
+  it.each(["existing-target-collision", "deleted-source", "unreadable-skill-file"] as const)(
+    "omits artifact guidance when the operational skill was not actually injected (%s)",
+    async (failureMode) => {
+      const commandPath = path.join(configHome, `fake-opencode-skill-not-loaded-${failureMode}`);
+      const agentHome = path.join(configHome, `agent-home-${failureMode}`);
+      const source = path.join(configHome, `skill-source-${failureMode}`);
+      if (failureMode === "existing-target-collision") {
+        await createSkillDir(configHome, `skill-source-${failureMode}`);
+        const collision = path.join(agentHome, ".claude", "skills", "paperclip");
+        await fs.mkdir(collision, { recursive: true });
+        await fs.writeFile(path.join(collision, "SKILL.md"), "unrelated skill", "utf8");
+      } else if (failureMode === "unreadable-skill-file") {
+        await createSkillDir(configHome, `skill-source-${failureMode}`);
+      }
+      await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      runProcessMock.mockReset().mockResolvedValueOnce(probeResult({
+        stdout: JSON.stringify({ type: "text", sessionID: "skill-not-loaded", part: { text: "done" } }),
+      }));
+      let prompt = "";
+      const readFileSpy = failureMode === "unreadable-skill-file"
+        ? vi.spyOn(fs, "readFile").mockRejectedValueOnce(new Error("read denied"))
+        : null;
+
+      let result;
+      try {
+        result = await execute({
+          runId: `run-skill-not-loaded-${failureMode}`,
+          agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+          runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+          config: {
+            command: commandPath,
+            cwd: configHome,
+            model: "openai/gpt-5",
+            env: { OPENCODE_ALLOW_ALL_MODELS: "1", HOME: agentHome, PAPERCLIP_API_URL: "http://paperclip.test" },
+            paperclipRuntimeSkills: [{
+              key: "paperclipai/paperclip/paperclip",
+              runtimeName: "paperclip",
+              source,
+            }],
+          },
+          context: { issueId: "issue-skill-not-loaded" },
+          authToken: "run-token-must-not-appear-in-prompt",
+          onLog: async () => {},
+          onMeta: async (meta) => { prompt = String(meta.prompt ?? ""); },
+        });
+      } finally {
+        readFileSpy?.mockRestore();
+      }
+
+      expect(result.exitCode).toBe(0);
+      expect(prompt).not.toContain("Paperclip artifact handoff for this non-native OpenCode run:");
+      if (failureMode === "existing-target-collision") {
+        expect(await fs.readFile(path.join(agentHome, ".claude", "skills", "paperclip", "SKILL.md"), "utf8"))
+          .toBe("unrelated skill");
+      }
+    },
+  );
+
+  it("requires successful remote copy and a readable operational SKILL.md before adding its path", async () => {
+    const input = {
+      runId: "run-remote-skill-proof",
+      target: { kind: "remote", transport: "ssh" } as never,
+      skillDir: "/remote/home/.claude/skills/paperclip",
+      cwd: "/remote/workspace",
+      env: {},
+      timeoutSec: 10,
+      graceSec: 2,
+      onLog: async () => {},
+    };
+    runShellCommandMock.mockReset().mockResolvedValueOnce(probeResult({ exitCode: 1 }));
+    await expect(verifyRemoteOperationalSkillDir({ ...input, copyResult: { exitCode: 1, timedOut: false } }))
+      .resolves.toBe("");
+    expect(runShellCommandMock).not.toHaveBeenCalled();
+
+    runShellCommandMock.mockReset().mockResolvedValueOnce(probeResult({ exitCode: 1 }));
+    await expect(verifyRemoteOperationalSkillDir({ ...input, copyResult: { exitCode: 0, timedOut: false } }))
+      .resolves.toBe("");
+    expect(runShellCommandMock).toHaveBeenCalledWith(
+      input.runId,
+      input.target,
+      "test -f '/remote/home/.claude/skills/paperclip/SKILL.md' && test -r '/remote/home/.claude/skills/paperclip/SKILL.md'",
+      expect.objectContaining({ cwd: input.cwd }),
+    );
+
+    runShellCommandMock.mockReset().mockResolvedValueOnce(probeResult({ exitCode: 0 }));
+    await expect(verifyRemoteOperationalSkillDir({ ...input, copyResult: { exitCode: 0, timedOut: false } }))
+      .resolves.toBe(input.skillDir);
+
+    runShellCommandMock.mockReset().mockRejectedValueOnce(new Error("transport unavailable"));
+    await expect(verifyRemoteOperationalSkillDir({ ...input, copyResult: { exitCode: 0, timedOut: false } }))
+      .resolves.toBe("");
+
+    runShellCommandMock.mockReset().mockResolvedValueOnce(probeResult({ exitCode: null, timedOut: true }));
+    await expect(verifyRemoteOperationalSkillDir({ ...input, copyResult: { exitCode: 0, timedOut: false } }))
+      .resolves.toBe("");
+  });
 
   it("fails a fresh-session retry that exits cleanly without assistant output or a completed tool action", async () => {
     const commandPath = path.join(configHome, "fake-opencode-empty-retry");
