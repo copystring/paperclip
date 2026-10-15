@@ -2,7 +2,7 @@ import type { Db } from "@paperclipai/db";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
-import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
+import { selectPaperclipPromptSections } from "@paperclipai/adapter-utils/server-utils";
 import {
   buildPaperclipRuntimeMcpServers as legacyBuildRuntimeMcpServers,
   buildPaperclipWakePayload as legacyBuildWakePayload,
@@ -92,7 +92,10 @@ describe("heartbeat run preparation module", () => {
       recoveryPolicy: "wake_owner",
     });
     for (const resumedSession of [false, true]) {
-      const prompt = renderPaperclipWakePrompt(payload, { resumedSession });
+      const { wakePrompt: prompt } = selectPaperclipPromptSections(
+        { paperclipTaskMarkdown: "Complete the assigned task.", paperclipWake: payload },
+        { resumedSession },
+      );
       expect(prompt).toContain("## One-shot issue monitor check");
       expect(prompt).toContain("monitor attempt: 2/4");
       expect(prompt).toContain("Check whether platform runtime-verification is green and report the result.");
