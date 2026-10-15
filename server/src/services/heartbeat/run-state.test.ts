@@ -269,9 +269,14 @@ describePostgres("heartbeat run state database wiring", () => {
     const decision = await state.evaluateSessionCompaction({
       agent: { ...agent, runtimeConfig: { heartbeat: { sessionCompaction: { maxRawInputTokens: 100 } } } },
       sessionId: "compact", issueId: issue.id,
+      continuationSummaryBody: "- Agent: Reviewer\nIndependent acceptance is still outstanding.",
     });
     expect(decision).toMatchObject({ rotate: true, reason: "session raw input reached 110 tokens (threshold 100)", previousRunId: run.id });
     expect(decision.handoffMarkdown).toContain("Continue our task");
+    expect(decision.handoffMarkdown).toContain(`Active run agent: ${agent.id}`);
+    expect(decision.handoffMarkdown).toContain("Historical agent-reported run summary (unverified)");
+    expect(decision.handoffMarkdown).toContain("its author may be another agent");
+    expect(decision.handoffMarkdown).toContain("not the current agent identity");
     expect(decision.handoffMarkdown).not.toContain("Foreign task");
     expect(decision.handoffMarkdown).not.toContain("omit this");
   });
