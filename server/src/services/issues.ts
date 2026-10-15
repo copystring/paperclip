@@ -10785,6 +10785,7 @@ export function issueService(db: Db) {
         actorAgentId?: string | null;
         actorRunId?: string | null;
         actorRunStopId?: string | null;
+        actorRunHandoffId?: string | null;
         actorUserId?: string | null;
         companyGuard?: string;
         workspaceSelectionActor?: AuthorizationActor;
@@ -10834,6 +10835,7 @@ export function issueService(db: Db) {
         actorAgentId,
         actorRunId,
         actorRunStopId,
+        actorRunHandoffId,
         actorUserId,
         companyGuard,
         workspaceSelectionActor,
@@ -10907,6 +10909,19 @@ export function issueService(db: Db) {
         ...issueData,
         updatedAt: new Date(),
       };
+      const preserveCooperativeRunLock = Boolean(
+        actorRunHandoffId && actorRunHandoffId === actorRunId && actorRunId &&
+        actorAgentId === existing.assigneeAgentId && existing.executionRunId === actorRunId &&
+        (!existing.checkoutRunId || existing.checkoutRunId === actorRunId) &&
+        issueData.assigneeAgentId && issueData.assigneeAgentId !== actorAgentId &&
+        issueData.assigneeUserId === null && issueData.executionState &&
+        (issueData.status === "in_review" || issueData.status === "in_progress"),
+      );
+      if (actorRunHandoffId && !preserveCooperativeRunLock) {
+        throw conflict("The active run no longer owns this workflow handoff", {
+          code: "issue_handoff_owner_changed",
+        });
+      }
       if (issueData.visibility === "private") {
         patch.privacyRootIssueId = existing.privacyRootIssueId ?? existing.id;
       } else if (issueData.visibility === "open") {
@@ -11061,17 +11076,18 @@ export function issueService(db: Db) {
       if (issueData.status && issueData.status !== "cancelled") {
         patch.cancelledAt = null;
       }
-      if (issueData.status && issueData.status !== "in_progress") {
+      if (issueData.status && issueData.status !== "in_progress" && !preserveCooperativeRunLock) {
         patch.checkoutRunId = null;
         patch.executionRunId = null;
         patch.executionAgentNameKey = null;
         patch.executionLockedAt = null;
       }
       if (
-        (issueData.assigneeAgentId !== undefined &&
+        !preserveCooperativeRunLock &&
+        ((issueData.assigneeAgentId !== undefined &&
           issueData.assigneeAgentId !== existing.assigneeAgentId) ||
-        (issueData.assigneeUserId !== undefined &&
-          issueData.assigneeUserId !== existing.assigneeUserId)
+          (issueData.assigneeUserId !== undefined &&
+          issueData.assigneeUserId !== existing.assigneeUserId))
       ) {
         patch.checkoutRunId = null;
         patch.executionRunId = null;
@@ -11139,6 +11155,20 @@ export function issueService(db: Db) {
             agentId: actorAgentId, runId: actorRunId, stopId: actorRunStopId,
           });
           assertLegacyRunTaskOwnership(actorRun, receiptExisting);
+          if (actorRunHandoffId && (
+            !actorRun || actorRunHandoffId !== actorRunId ||
+            actorRun.runtimeMode !== "legacy" || actorRun.companyId !== receiptExisting.companyId ||
+            receiptExisting.assigneeAgentId !== actorAgentId ||
+            receiptExisting.executionRunId !== actorRunId ||
+            (receiptExisting.checkoutRunId && receiptExisting.checkoutRunId !== actorRunId) ||
+            !issueData.assigneeAgentId || issueData.assigneeAgentId === actorAgentId ||
+            issueData.assigneeUserId !== null || !issueData.executionState ||
+            (issueData.status !== "in_review" && issueData.status !== "in_progress")
+          )) {
+            throw conflict("The active run no longer owns this workflow handoff", {
+              code: "issue_handoff_owner_changed",
+            });
+          }
         }
         if (actorAgentId && patch.status === "done") {
           const [review] = await tx.select({ id: toolActionRequests.id }).from(toolActionRequests).where(and(eq(toolActionRequests.companyId, existing.companyId), eq(toolActionRequests.issueId, id), inArray(toolActionRequests.status, ["pending", "approved", "executing"]))).limit(1);

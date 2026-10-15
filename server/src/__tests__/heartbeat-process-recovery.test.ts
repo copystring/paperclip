@@ -1667,6 +1667,86 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     },
   );
 
+  it("starts a different workflow reviewer exactly once after real legacy executor cleanup", async () => {
+    const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    const reviewerId = randomUUID(), stageId = randomUUID();
+    await db.insert(agents).values({ id: reviewerId, companyId, name: "Independent reviewer", role: "engineer",
+      status: "idle", adapterType: "codex_local", adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {} });
+    const executionStage = { wakeRole: "reviewer", stageId, stageType: "review",
+      currentParticipant: { type: "agent", agentId: reviewerId, userId: null },
+      allowedActions: ["approve", "request_changes"] };
+    let cleanupEntered = false, sourceAdapterFinished = false;
+    let allowCleanup!: () => void;
+    const cleanupAllowed = new Promise<void>(resolve => { allowCleanup = resolve; });
+    const originalFactory = environmentOrchestrator.environmentRunOrchestrator;
+    const factory = vi.spyOn(environmentOrchestrator, "environmentRunOrchestrator").mockImplementation((...args) => {
+      const actual = originalFactory(...args);
+      return { ...actual, releaseForRun: async input => {
+        if (input.heartbeatRunId === runId && sourceAdapterFinished) {
+          cleanupEntered = true;
+          await cleanupAllowed;
+        }
+        return actual.releaseForRun(input);
+      } };
+    });
+    const heartbeat = heartbeatService(db);
+    mockAdapterExecute.mockImplementationOnce(async (input?: unknown) => {
+      const invocation = input as { onCancellationReady: () => Promise<void>; onDispatch: () => void };
+      await invocation.onCancellationReady();
+      invocation.onDispatch();
+      // Route/service tests cover authentication and lock preservation. Here a
+      // completed valid handoff keeps the old owner while the real executor
+      // runs terminalization and its asynchronous resource cleanup.
+      await db.update(issues).set({ status: "in_review", assigneeAgentId: reviewerId,
+        executionState: { status: "pending", currentStageId: stageId, currentStageIndex: 0,
+          currentStageType: "review", currentParticipant: executionStage.currentParticipant,
+          returnAssignee: { type: "agent", agentId, userId: null }, reviewRequest: null,
+          completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null } })
+        .where(eq(issues.id, issueId));
+      await heartbeat.wakeup(reviewerId, { source: "assignment", reason: "execution_review_requested",
+        requestedByActorType: "agent", requestedByActorId: agentId,
+        payload: { issueId, mutation: "update", executionStage },
+        contextSnapshot: { issueId, taskId: issueId, source: "issue.execution_stage",
+          wakeReason: "execution_review_requested", executionStage } });
+      sourceAdapterFinished = true;
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Delivered to the independent reviewer.", provider: "test", model: "test-model" };
+    });
+    mockAdapterExecute.mockImplementation(async () => {
+      await db.update(issues).set({ status: "done", executionState: null }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Review completed.", provider: "test", model: "test-model" };
+    });
+    try {
+      await heartbeat.resumeQueuedRuns();
+      expect(await waitForValue(async () => cleanupEntered || null, 10_000)).toBe(true);
+      const owner = await heartbeat.getRun(runId);
+      expect(owner).toMatchObject({ status: "succeeded", runtimeMode: "legacy", executionStage: "settling" });
+      expect(owner!.controllerLeaseExpiresAt!.getTime()).toBeGreaterThan(Date.now());
+      const [locked] = await db.select().from(issues).where(eq(issues.id, issueId));
+      expect(locked).toMatchObject({ executionRunId: runId, checkoutRunId: runId, assigneeAgentId: reviewerId });
+      const reviewerRuns = () => db.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, reviewerId)));
+      expect(await reviewerRuns()).toHaveLength(0);
+      const [wake] = await db.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, reviewerId)));
+      expect(wake).toMatchObject({ status: "deferred_issue_execution", runId: null });
+      allowCleanup();
+      await heartbeat.waitForRunExecutionDrain(runId);
+      expect(await waitForValue(async () => (await reviewerRuns()).length === 1 || null, 10_000)).toBe(true);
+      await heartbeat.drainActiveRunExecutions();
+      expect(await reviewerRuns()).toHaveLength(1);
+      expect(await heartbeat.getRun(runId)).toMatchObject({ executionStage: "settled", controllerLeaseExpiresAt: null });
+      const [delivered] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake!.id));
+      expect(delivered!.runId).toBe((await reviewerRuns())[0]!.id);
+    } finally {
+      allowCleanup();
+      await heartbeat.drainActiveRunExecutions();
+      factory.mockRestore();
+    }
+  });
+
   it.each(["timeout", "upstream", "cleanup_pending", "cleanup_pending_edited", "cleanup_pending_exhausted", "edited", "exhausted", "new_message", "no_claim", "reassigned", "superseded", "stopped"])(
     "settles explicit retry admission through real executor cleanup: %s", async scenario => {
       const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();

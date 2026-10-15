@@ -156,6 +156,8 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     companyId: string;
     agentId: string;
     issueId: string;
+    source?: string;
+    reason?: string;
     requestedByActorType?: string;
     requestedByActorId?: string | null;
     payload?: Record<string, unknown>;
@@ -165,8 +167,8 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
       id,
       companyId: input.companyId,
       agentId: input.agentId,
-      source: "automation",
-      reason: "issue_commented",
+      source: input.source ?? "automation",
+      reason: input.reason ?? "issue_commented",
       status: "deferred_issue_execution",
       requestedByActorType: input.requestedByActorType ?? "user",
       requestedByActorId: input.requestedByActorId ?? null,
@@ -288,6 +290,257 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     } finally {
       await settings.updateExperimental({ enableAgentChat: original });
     }
+  });
+
+  it("keeps a workflow-stage wake behind the terminal legacy owner until its controller lease settles", async () => {
+    const companyId = await seedCompany();
+    const implementerId = await seedAgent({ companyId, name: "Implementer" });
+    const reviewerId = await seedAgent({ companyId, name: "Reviewer" });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: reviewerId, status: "in_review" });
+    const runId = await seedRun({ companyId, agentId: implementerId, status: "succeeded", contextSnapshot: { issueId } });
+    const stageId = randomUUID();
+    const stage = {
+      wakeRole: "reviewer",
+      stageId,
+      stageType: "review",
+      currentParticipant: { type: "agent", agentId: reviewerId },
+      allowedActions: ["approve", "request_changes"],
+    };
+    await db.update(issues).set({
+      executionRunId: runId,
+      checkoutRunId: runId,
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: reviewerId },
+      },
+    }).where(eq(issues.id, issueId));
+    await db.update(heartbeatRuns).set({
+      runtimeMode: "legacy",
+      executionStage: "settling",
+      controllerBootId: randomUUID(),
+      controllerLeaseExpiresAt: new Date(Date.now() + 60_000),
+    }).where(eq(heartbeatRuns.id, runId));
+    const wakeId = await seedDeferredWake({
+      companyId,
+      agentId: reviewerId,
+      issueId,
+      source: "assignment",
+      reason: "execution_review_requested",
+      requestedByActorType: "agent",
+      requestedByActorId: implementerId,
+      payload: {
+        mutation: "update",
+        executionStage: stage,
+        _paperclipWakeContext: {
+          issueId,
+          taskId: issueId,
+          source: "issue.execution_stage",
+          wakeReason: "execution_review_requested",
+          executionStage: stage,
+        },
+      },
+    });
+    const release = createReleaseIssueExecution({
+      issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+      recovery: { escalateStrandedAssignedIssue: async () => {}, escalateStrandedRecoveryIssueInPlace: async () => {} },
+    });
+
+    const beforeCleanup = await release({ companyId, runId, now: new Date() });
+    expect(beforeCleanup.outcome.kind).toBe("released");
+    const [lockedIssue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(lockedIssue).toMatchObject({ executionRunId: runId, checkoutRunId: runId });
+    const [stillDeferred] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+    expect(stillDeferred.status).toBe("deferred_issue_execution");
+    expect(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(eq(heartbeatRuns.agentId, reviewerId))).toHaveLength(0);
+
+    await db.update(heartbeatRuns).set({ executionStage: "settled", controllerLeaseExpiresAt: null }).where(eq(heartbeatRuns.id, runId));
+    const afterCleanup = await release({ companyId, runId, now: new Date() });
+    expect(afterCleanup.outcome.kind).toBe("promoted");
+    const [releasedIssue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(releasedIssue?.executionRunId).not.toBe(runId);
+    const reviewerRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, reviewerId));
+    expect(reviewerRuns).toHaveLength(1);
+    expect(reviewerRuns[0]).toMatchObject({ status: "queued", contextSnapshot: { issueId, executionStage: { stageId } } });
+  });
+
+  it("returns a requested-changes stage to its current implementer after owner cleanup", async () => {
+    const companyId = await seedCompany();
+    const implementerId = await seedAgent({ companyId, name: "Implementer" });
+    const reviewerId = await seedAgent({ companyId, name: "Reviewer" });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: implementerId, status: "in_progress" });
+    const runId = await seedRun({ companyId, agentId: reviewerId, status: "succeeded", contextSnapshot: { issueId } });
+    const stageId = randomUUID();
+    const stage = {
+      wakeRole: "executor",
+      stageId,
+      stageType: "review",
+      currentParticipant: { type: "agent", agentId: reviewerId },
+      returnAssignee: { type: "agent", agentId: implementerId },
+    };
+    await db.update(issues).set({
+      executionRunId: runId,
+      checkoutRunId: runId,
+      executionState: {
+        status: "changes_requested",
+        currentStageId: stageId,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: reviewerId },
+        returnAssignee: { type: "agent", agentId: implementerId },
+      },
+    }).where(eq(issues.id, issueId));
+    await db.update(heartbeatRuns).set({
+      runtimeMode: "legacy",
+      executionStage: "settling",
+      controllerBootId: randomUUID(),
+      controllerLeaseExpiresAt: new Date(Date.now() + 60_000),
+    }).where(eq(heartbeatRuns.id, runId));
+    const wakeId = await seedDeferredWake({
+      companyId,
+      agentId: implementerId,
+      issueId,
+      source: "assignment",
+      reason: "execution_changes_requested",
+      requestedByActorType: "agent",
+      requestedByActorId: reviewerId,
+      payload: {
+        mutation: "update",
+        executionStage: stage,
+        _paperclipWakeContext: {
+          issueId,
+          taskId: issueId,
+          source: "issue.execution_stage",
+          wakeReason: "execution_changes_requested",
+          executionStage: stage,
+        },
+      },
+    });
+    const release = createReleaseIssueExecution({
+      issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+      recovery: { escalateStrandedAssignedIssue: async () => {}, escalateStrandedRecoveryIssueInPlace: async () => {} },
+    });
+
+    expect((await release({ companyId, runId, now: new Date() })).outcome.kind).toBe("released");
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, implementerId))).toHaveLength(0);
+    await db.update(heartbeatRuns).set({ executionStage: "settled", controllerLeaseExpiresAt: null }).where(eq(heartbeatRuns.id, runId));
+
+    expect((await release({ companyId, runId, now: new Date() })).outcome.kind).toBe("promoted");
+    const [promotedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, implementerId));
+    expect(promotedRun).toMatchObject({ status: "queued", contextSnapshot: { issueId, executionStage: { stageId, wakeRole: "executor" } } });
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+    expect(wake.status).toBe("queued");
+  });
+
+  it.each(["participant", "role", "type"] as const)(
+    "cancels a stale review wake whose seeded %s no longer matches current stage",
+    async mismatch => {
+      const companyId = await seedCompany();
+      const implementerId = await seedAgent({ companyId, name: "Implementer" });
+      const reviewerId = await seedAgent({ companyId, name: "Reviewer" });
+      const issueId = await seedIssue({ companyId, assigneeAgentId: reviewerId, status: "in_review" });
+      const runId = await seedRun({ companyId, agentId: implementerId, status: "succeeded", contextSnapshot: { issueId } });
+      const stageId = randomUUID();
+      const stage = {
+        wakeRole: mismatch === "role" ? "approver" : "reviewer",
+        stageId,
+        stageType: mismatch === "type" ? "approval" : "review",
+        currentParticipant: { type: "agent", agentId: mismatch === "participant" ? implementerId : reviewerId },
+        allowedActions: ["approve", "request_changes"],
+      };
+      await db.update(issues).set({
+        executionRunId: runId,
+        checkoutRunId: runId,
+        executionState: {
+          status: "pending",
+          currentStageId: stageId,
+          currentStageType: "review",
+          currentParticipant: { type: "agent", agentId: reviewerId },
+        },
+      }).where(eq(issues.id, issueId));
+      const wakeId = await seedDeferredWake({
+        companyId,
+        agentId: reviewerId,
+        issueId,
+        source: "assignment",
+        reason: "execution_review_requested",
+        payload: {
+          mutation: "update",
+          executionStage: stage,
+          _paperclipWakeContext: {
+            issueId,
+            taskId: issueId,
+            source: "issue.execution_stage",
+            wakeReason: "execution_review_requested",
+            executionStage: stage,
+          },
+        },
+      });
+      const release = createReleaseIssueExecution({
+        issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+        recovery: { escalateStrandedAssignedIssue: async () => {}, escalateStrandedRecoveryIssueInPlace: async () => {} },
+      });
+
+      expect((await release({ companyId, runId, now: new Date() })).outcome.kind).toBe("released");
+      const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+      expect(wake.status).toBe("cancelled");
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, reviewerId))).toHaveLength(0);
+    },
+  );
+
+  it("cancels a changes-requested wake when its seeded return assignee is stale", async () => {
+    const companyId = await seedCompany();
+    const implementerId = await seedAgent({ companyId, name: "Implementer" });
+    const reviewerId = await seedAgent({ companyId, name: "Reviewer" });
+    const staleAssigneeId = await seedAgent({ companyId, name: "Former implementer" });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: implementerId, status: "in_progress" });
+    const runId = await seedRun({ companyId, agentId: reviewerId, status: "succeeded", contextSnapshot: { issueId } });
+    const stageId = randomUUID();
+    const stage = {
+      wakeRole: "executor",
+      stageId,
+      stageType: "review",
+      currentParticipant: { type: "agent", agentId: reviewerId },
+      returnAssignee: { type: "agent", agentId: staleAssigneeId },
+    };
+    await db.update(issues).set({
+      executionRunId: runId,
+      checkoutRunId: runId,
+      executionState: {
+        status: "changes_requested",
+        currentStageId: stageId,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: reviewerId },
+        returnAssignee: { type: "agent", agentId: implementerId },
+      },
+    }).where(eq(issues.id, issueId));
+    const wakeId = await seedDeferredWake({
+      companyId,
+      agentId: implementerId,
+      issueId,
+      source: "assignment",
+      reason: "execution_changes_requested",
+      payload: {
+        mutation: "update",
+        executionStage: stage,
+        _paperclipWakeContext: {
+          issueId,
+          taskId: issueId,
+          source: "issue.execution_stage",
+          wakeReason: "execution_changes_requested",
+          executionStage: stage,
+        },
+      },
+    });
+    const release = createReleaseIssueExecution({
+      issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+      recovery: { escalateStrandedAssignedIssue: async () => {}, escalateStrandedRecoveryIssueInPlace: async () => {} },
+    });
+
+    expect((await release({ companyId, runId, now: new Date() })).outcome.kind).toBe("released");
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+    expect(wake.status).toBe("cancelled");
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, implementerId))).toHaveLength(0);
   });
 
   for (const hasDeferredMessage of [false, true]) {
