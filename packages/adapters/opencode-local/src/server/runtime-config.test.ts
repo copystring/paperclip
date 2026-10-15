@@ -1,10 +1,12 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
 
 const cleanupPaths = new Set<string>();
+const encoder = new TextEncoder();
 
 afterEach(async () => {
   await Promise.all(
@@ -31,6 +33,406 @@ async function makeConfigHome(initialConfig?: Record<string, unknown>) {
 }
 
 describe("prepareOpenCodeRuntimeConfig", () => {
+  it("adds a private provider timeout hook only when the configured provider credential is available", async () => {
+    const apiKey = "fixture-config-provider-key-never-a-real-secret";
+    const configHome = await makeConfigHome({
+      provider: {
+        paperclip: {
+          npm: "@ai-sdk/openai-compatible",
+          options: { apiKey },
+          models: { simple: {} },
+        },
+      },
+    });
+    const dataHome = await makeConfigHome();
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: dataHome },
+      config: { model: "paperclip/simple" },
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+
+    const runtimeConfig = JSON.parse(
+      await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+    ) as { provider: Record<string, { options?: Record<string, unknown>; models?: Record<string, { options?: Record<string, unknown> }> }> };
+    expect(runtimeConfig.provider.paperclip.options?.timeout).toBeUndefined();
+    expect(runtimeConfig.provider.paperclip.models?.simple?.options?.timeout).toBeUndefined();
+    expect(prepared.env.XDG_DATA_HOME).toBe(dataHome);
+    const auth = JSON.parse(prepared.env.OPENCODE_AUTH_CONTENT!) as Record<string, { type: string; key: string }>;
+    expect(auth).toEqual({ paperclip: { type: "api", key: apiKey } });
+    const pluginDir = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "plugins");
+    const [pluginName] = await fs.readdir(pluginDir);
+    const pluginSource = await fs.readFile(path.join(pluginDir, pluginName), "utf8");
+    expect(pluginSource).toContain('provider: providerName');
+    expect(pluginSource).toContain('"tool.execute.before"');
+    expect(pluginSource).toContain('finish_reason === "tool_calls"');
+    expect(pluginSource).toContain("MAX_PENDING_CHARS");
+    expect(pluginSource).toContain("parserUncertain");
+    expect(pluginSource).toContain('requestBody.model');
+    expect(pluginSource).toContain("normalizedTimeoutRetries >= retryBudget");
+    expect(pluginSource).toContain("const retryBudget = 2;");
+    expect(pluginSource).not.toContain(apiKey);
+    expect(prepared.notes.join("\n")).not.toContain(apiKey);
+    if (process.platform !== "win32") {
+      expect((await fs.stat(path.join(pluginDir, pluginName)).then((s) => s.mode & 0o777))).toBe(0o600);
+    }
+
+    await prepared.cleanup();
+    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
+    await expect(fs.access(prepared.env.XDG_DATA_HOME!)).resolves.toBeUndefined();
+    expect(await fs.readFile(path.join(configHome, "opencode", "opencode.json"), "utf8")).toContain(apiKey);
+  });
+
+  it("fails the optional timeout feature closed for a copied plugins-directory symlink", async () => {
+    const apiKey = "fixture-private-plugin-key";
+    const configHome = await makeConfigHome({
+      provider: { paperclip: { npm: "@ai-sdk/openai-compatible", options: { apiKey } } },
+    });
+    const outsidePlugins = path.join(configHome, "user-plugins");
+    await fs.mkdir(outsidePlugins);
+    const userPlugin = path.join(outsidePlugins, "user-plugin.js");
+    await fs.writeFile(userPlugin, "export const UserPlugin = async () => ({});", "utf8");
+    await fs.symlink(outsidePlugins, path.join(configHome, "opencode", "plugins"), "junction");
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: { model: "paperclip/simple" },
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+
+    const runtimePluginDir = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "plugins");
+    expect((await fs.lstat(runtimePluginDir)).isSymbolicLink()).toBe(true);
+    expect(prepared.notes.join("\n")).toContain("plugins directory is a symlink");
+    expect(await fs.readFile(userPlugin, "utf8")).toContain("UserPlugin");
+    expect(await fs.readdir(outsidePlugins)).toEqual(["user-plugin.js"]);
+    await prepared.cleanup();
+  });
+
+  it("preserves existing plugin files and omits timeout-hook composition when hooks may conflict", async () => {
+    const configHome = await makeConfigHome({
+      provider: { paperclip: { npm: "@ai-sdk/openai-compatible", options: { apiKey: "fixture-key" } } },
+    });
+    const pluginDir = path.join(configHome, "opencode", "plugins");
+    await fs.mkdir(pluginDir);
+    const userPluginPath = path.join(pluginDir, "user-plugin.js");
+    await fs.writeFile(userPluginPath, "export const UserPlugin = async () => ({});", "utf8");
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: { model: "paperclip/simple" },
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+    const copiedPluginDir = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "plugins");
+    expect(await fs.readFile(path.join(copiedPluginDir, "user-plugin.js"), "utf8")).toContain("UserPlugin");
+    expect(await fs.readdir(copiedPluginDir)).toEqual(["user-plugin.js"]);
+    expect(prepared.notes.join("\n")).toContain("existing plugins prevent safe fetch-hook composition");
+    await prepared.cleanup();
+    expect(await fs.readFile(userPluginPath, "utf8")).toContain("UserPlugin");
+  });
+
+  it("uses the supported auth-content override while preserving other existing provider auth", async () => {
+    const configHome = await makeConfigHome({
+      provider: { paperclip: { npm: "@ai-sdk/openai-compatible", models: { simple: {} } } },
+    });
+    const dataHome = await makeConfigHome();
+    const sourceAuthDir = path.join(dataHome, "opencode");
+    await fs.mkdir(sourceAuthDir, { recursive: true });
+    const selectedAuth = { type: "api", key: "fixture-static-auth-key" };
+    await fs.writeFile(path.join(sourceAuthDir, "auth.json"), JSON.stringify({ paperclip: selectedAuth, unrelated: { type: "api", key: "fixture-other-key" } }));
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: dataHome },
+      config: { model: "paperclip/simple" },
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+
+    const runtimeAuth = JSON.parse(prepared.env.OPENCODE_AUTH_CONTENT!) as Record<string, unknown>;
+    expect(runtimeAuth).toEqual({ paperclip: selectedAuth, unrelated: { type: "api", key: "fixture-other-key" } });
+    expect(prepared.env.XDG_DATA_HOME).toBe(dataHome);
+    await prepared.cleanup();
+    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
+    expect(JSON.parse(await fs.readFile(path.join(sourceAuthDir, "auth.json"), "utf8"))).toHaveProperty("unrelated");
+  });
+
+  it("leaves OAuth-backed auth handling unchanged when no static provider key is configured", async () => {
+    const configHome = await makeConfigHome({
+      provider: { paperclip: { npm: "@ai-sdk/openai-compatible", models: { simple: {} } } },
+    });
+    const dataHome = await makeConfigHome();
+    const authDir = path.join(dataHome, "opencode");
+    await fs.mkdir(authDir, { recursive: true });
+    await fs.writeFile(path.join(authDir, "auth.json"), JSON.stringify({
+      paperclip: { type: "oauth", access: "fixture-access", refresh: "fixture-refresh", expires: 123 },
+    }));
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: dataHome },
+      config: { model: "paperclip/simple" },
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+    expect(prepared.env.OPENCODE_AUTH_CONTENT).toBeUndefined();
+    expect(prepared.env.XDG_DATA_HOME).toBe(dataHome);
+    expect(prepared.notes.join("\n")).toContain("no usable provider credential");
+    await prepared.cleanup();
+  });
+
+  it.each([0, false])("respects an explicit provider timeout opt-out (%s)", async (timeout) => {
+    const configHome = await makeConfigHome({
+      provider: { paperclip: { npm: "@ai-sdk/openai-compatible", options: { apiKey: "fixture-key", timeout } } },
+    });
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: { model: "paperclip/simple" },
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+    const runtimeConfig = JSON.parse(
+      await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+    ) as { provider: Record<string, { options?: Record<string, unknown> }> };
+    expect(runtimeConfig.provider.paperclip.options?.timeout).toBe(timeout);
+    expect(prepared.env.XDG_DATA_HOME).toBeUndefined();
+    await expect(fs.access(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "plugins"))).rejects.toThrow();
+    await prepared.cleanup();
+  });
+
+  it("preserves longer explicit timeouts and omits values outside the Node timer range", async () => {
+    const longTimeoutHome = await makeConfigHome({
+      provider: { paperclip: { npm: "@ai-sdk/openai-compatible", options: { apiKey: "fixture-key", timeout: 600_000 } } },
+    });
+    const longTimeout = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: longTimeoutHome },
+      config: { model: "paperclip/simple" },
+    });
+    cleanupPaths.add(longTimeout.env.XDG_CONFIG_HOME);
+    const longTimeoutPlugin = path.join(longTimeout.env.XDG_CONFIG_HOME, "opencode", "plugins", (await fs.readdir(path.join(longTimeout.env.XDG_CONFIG_HOME, "opencode", "plugins")))[0]);
+    expect(await fs.readFile(longTimeoutPlugin, "utf8")).toContain("const timeoutMs = 600000;");
+    await longTimeout.cleanup();
+    cleanupPaths.delete(longTimeout.env.XDG_CONFIG_HOME);
+
+    const unsupportedHome = await makeConfigHome({
+      provider: { paperclip: { npm: "@ai-sdk/openai-compatible", options: { apiKey: "fixture-key", timeout: 2_147_483_648 } } },
+    });
+    const unsupported = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: unsupportedHome },
+      config: { model: "paperclip/simple" },
+    });
+    cleanupPaths.add(unsupported.env.XDG_CONFIG_HOME);
+    await expect(fs.access(path.join(unsupported.env.XDG_CONFIG_HOME, "opencode", "plugins"))).rejects.toThrow();
+    expect(unsupported.notes.join("\n")).toContain("exceeds the supported Node.js timer range");
+    await unsupported.cleanup();
+    cleanupPaths.delete(unsupported.env.XDG_CONFIG_HOME);
+  });
+
+  it("caps only timeout-triggered retries at two and respects a tighter configured retry limit", async () => {
+    const configHome = await makeConfigHome({
+      provider: {
+        paperclip: {
+          npm: "@ai-sdk/openai-compatible",
+          options: { apiKey: "fixture-key", maxRetries: 1 },
+        },
+      },
+    });
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: { model: "paperclip/simple" },
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+    const pluginDir = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "plugins");
+    const [pluginName] = await fs.readdir(pluginDir);
+    const pluginSource = await fs.readFile(path.join(pluginDir, pluginName), "utf8");
+    expect(pluginSource).toContain("const retryBudget = 1;");
+    await prepared.cleanup();
+  });
+
+  it("normalizes only a timed-out target-model SSE stream with no completed or uncertain tool call", async () => {
+    const configHome = await makeConfigHome({
+      provider: {
+        paperclip: {
+          npm: "@ai-sdk/openai-compatible",
+          options: { apiKey: "fixture-timeout-key" },
+          models: { simple: { options: { timeout: 30 } }, auxiliary: {} },
+        },
+      },
+    });
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: { model: "paperclip/simple" },
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+    const pluginDir = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "plugins");
+    const pluginName = (await fs.readdir(pluginDir)).find((name) => name.startsWith("paperclip-model-timeout-"))!;
+    const pluginModule = await import(pathToFileURL(path.join(pluginDir, pluginName)).href) as {
+      PaperclipModelStepTimeout: () => Promise<Record<string, any>>;
+    };
+    const hooks = await pluginModule.PaperclipModelStepTimeout();
+    const authHooks = await hooks.auth.loader();
+    const previousFetch = globalThis.fetch;
+    let nextPayload = `data: ${JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "write", arguments: "" } }] }, finish_reason: null }],
+    })}\n\n`;
+    let nextStatus = 200;
+    let nextContentType = "text/event-stream";
+    let operatorAbortController: AbortController | undefined;
+    let releaseAuxiliary: (() => void) | undefined;
+    let signalAuxiliaryPull!: () => void;
+    const auxiliaryPullStarted = new Promise<void>((resolve) => { signalAuxiliaryPull = resolve; });
+    globalThis.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const requestModel = JSON.parse(String(init?.body)).model;
+      if (requestModel === "auxiliary") {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            setTimeout(() => { controller.enqueue(encoder.encode("auxiliary-ok")); controller.close(); }, 60);
+          },
+        }), { headers: { "content-type": "text/event-stream" } });
+      }
+      if (requestModel === "auxiliary-hold") {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) { controller.enqueue(encoder.encode("auxiliary-started")); },
+          pull(controller) {
+            signalAuxiliaryPull();
+            return new Promise<void>((resolve) => {
+              releaseAuxiliary = () => { controller.close(); resolve(); };
+            });
+          },
+        }), { headers: { "content-type": "text/event-stream" } });
+      }
+      if (requestModel === "simple" && operatorAbortController) {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) { controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "still waiting" }, finish_reason: null }] })}\n\n`)); },
+          pull() {
+            return new Promise<void>((_resolve, reject) => {
+              operatorAbortController!.signal.addEventListener("abort", () => {
+                setTimeout(() => reject(operatorAbortController!.signal.reason), 10);
+              }, { once: true });
+            });
+          },
+        }), { status: 200, headers: { "content-type": "text/event-stream" } });
+      }
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(encoder.encode(nextPayload)); },
+        pull() {
+          return new Promise<void>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (signal?.aborted) reject(signal.reason);
+            else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        },
+      }), { status: nextStatus, headers: { "content-type": nextContentType } });
+    }) as typeof fetch;
+    try {
+      // A tool completed in an earlier step must not prevent recovery of a later step.
+      await hooks["tool.execute.before"]();
+      const response = await authHooks.fetch("http://localhost/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "simple", messages: [] }),
+      });
+      await expect(response.text()).rejects.toMatchObject({ message: "response timeout" });
+
+      const completedToolEvent = `data: ${JSON.stringify({
+        choices: [{ delta: { tool_calls: [{ index: 0, id: "call-2", type: "function", function: { name: "write", arguments: JSON.stringify({ path: "x" }) } }] }, finish_reason: null }],
+      })}`;
+      nextPayload = completedToolEvent; // no event delimiter: timeout flush must detect the complete call
+      const completedCallResponse = await authHooks.fetch("http://localhost/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "simple", messages: [] }),
+      });
+      const completedCallError = await completedCallResponse.text().then(() => null, (error: unknown) => error);
+      expect(completedCallError).not.toMatchObject({ message: "response timeout" });
+
+      nextPayload = `data: ${JSON.stringify({ unsupported: true })}\n\n`;
+      const unknownEventResponse = await authHooks.fetch("http://localhost/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "simple", messages: [] }),
+      });
+      const unknownEventError = await unknownEventResponse.text().then(() => null, (error: unknown) => error);
+      expect(unknownEventError).not.toMatchObject({ message: "response timeout" });
+
+      nextPayload = `data: ${JSON.stringify({ choices: [{ delta: { function_call: { name: "write", arguments: "{}" } }, finish_reason: "function_call" }] })}\n\n`;
+      const legacyEventResponse = await authHooks.fetch("http://localhost/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "simple", messages: [] }),
+      });
+      const legacyEventError = await legacyEventResponse.text().then(() => null, (error: unknown) => error);
+      expect(legacyEventError).not.toMatchObject({ message: "response timeout" });
+
+      nextStatus = 401;
+      const unauthorizedResponse = await authHooks.fetch("http://localhost/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "simple", messages: [] }),
+      });
+      const unauthorizedError = await unauthorizedResponse.text().then(() => null, (error: unknown) => error);
+      expect(unauthorizedError).not.toMatchObject({ message: "response timeout" });
+
+      nextStatus = 200;
+      nextContentType = "text/plain";
+      const unknownContentTypeResponse = await authHooks.fetch("http://localhost/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "simple", messages: [] }),
+      });
+      const unknownContentTypeError = await unknownContentTypeResponse.text().then(() => null, (error: unknown) => error);
+      expect(unknownContentTypeError).not.toMatchObject({ message: "response timeout" });
+
+      nextContentType = "text/event-stream";
+      operatorAbortController = new AbortController();
+      setTimeout(() => operatorAbortController?.abort(new DOMException("operator stop", "AbortError")), 40);
+      const operatorAbortResponse = await authHooks.fetch("http://localhost/v1/chat/completions", {
+        method: "POST",
+        signal: operatorAbortController.signal,
+        body: JSON.stringify({ model: "simple", messages: [] }),
+      });
+      const operatorAbortError = await operatorAbortResponse.text().then(() => null, (error: unknown) => error);
+      expect(operatorAbortError).toMatchObject({ name: "AbortError", message: "operator stop" });
+      expect(operatorAbortError).not.toMatchObject({ message: "response timeout" });
+      operatorAbortController = undefined;
+
+      const auxiliaryResponse = await authHooks.fetch("http://localhost/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "auxiliary", messages: [] }),
+      });
+      expect(await auxiliaryResponse.text()).toBe("auxiliary-ok");
+
+      const heldAuxiliaryResponse = await authHooks.fetch("http://localhost/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "auxiliary-hold", messages: [] }),
+      });
+      const heldAuxiliaryText = heldAuxiliaryResponse.text();
+      await auxiliaryPullStarted;
+      nextPayload = `data: ${JSON.stringify({ choices: [{ delta: { content: "still waiting" }, finish_reason: null }] })}\n\n`;
+      const overlappedTargetResponse = await authHooks.fetch("http://localhost/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "simple", messages: [] }),
+      });
+      const overlappedTargetError = await overlappedTargetResponse.text().then(() => null, (error: unknown) => error);
+      expect(overlappedTargetError).not.toMatchObject({ message: "response timeout" });
+      releaseAuxiliary?.();
+      await expect(heldAuxiliaryText).resolves.toContain("auxiliary-started");
+      expect(globalThis.fetch).toHaveBeenCalledTimes(10);
+    } finally {
+      globalThis.fetch = previousFetch;
+      await prepared.cleanup();
+      cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
+    }
+  });
+
+  it("preserves OPENCODE_CONFIG_CONTENT and injects selected auth through the supported auth override", async () => {
+    const apiKey = "fixture-inline-key-never-a-real-secret";
+    const configHome = await makeConfigHome();
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: {
+        XDG_CONFIG_HOME: configHome,
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({
+          theme: "system",
+          provider: { paperclip: { npm: "@ai-sdk/openai-compatible", options: { apiKey } } },
+        }),
+      },
+      config: { model: "paperclip/simple" },
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+    const envContent = JSON.parse(prepared.env.OPENCODE_CONFIG_CONTENT!) as {
+      theme: string;
+      provider: Record<string, { options?: Record<string, unknown> }>;
+    };
+    expect(envContent.theme).toBe("system");
+    expect(envContent.provider.paperclip.options).toEqual({ apiKey });
+    expect(JSON.parse(prepared.env.OPENCODE_AUTH_CONTENT!)).toEqual({ paperclip: { type: "api", key: apiKey } });
+    expect(prepared.notes.join("\n")).not.toContain(apiKey);
+    await prepared.cleanup();
+  });
+
   it("allows all tools and connected tools by default", async () => {
     const configHome = await makeConfigHome({
       permission: {

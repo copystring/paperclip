@@ -131,6 +131,41 @@ describe("OpenCode local skill injection", () => {
     await expect(fs.access(runtimeConfigHome)).rejects.toThrow();
   });
 
+  it("does not expose provider config or auth-content credentials in run metadata", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-provider-secret");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", "utf8");
+    await fs.chmod(commandPath, 0o755);
+    const providerKey = "fixture-inline-provider-key-never-a-real-secret";
+    runProcessMock.mockReset().mockResolvedValueOnce(probeResult({
+      stdout: JSON.stringify({ type: "text", sessionID: "provider-secret", part: { text: "done" } }),
+    }));
+    let metadataEnv: Record<string, string> = {};
+    const result = await execute({
+      runId: "run-provider-secret-redaction",
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        command: commandPath,
+        cwd: configHome,
+        model: "paperclip/simple",
+        env: {
+          OPENCODE_ALLOW_ALL_MODELS: "1",
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({
+            provider: { paperclip: { npm: "@ai-sdk/openai-compatible", options: { apiKey: providerKey } } },
+          }),
+        },
+      },
+      context: {},
+      onLog: async () => {},
+      onMeta: async (meta) => { metadataEnv = (meta.env ?? {}) as Record<string, string>; },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(metadataEnv.OPENCODE_CONFIG_CONTENT).toBeUndefined();
+    expect(metadataEnv.OPENCODE_AUTH_CONTENT).toBeUndefined();
+    expect(JSON.stringify(metadataEnv)).not.toContain(providerKey);
+  });
+
   it("delivers assignment context on an ordinary task turn and rebuilds it after resume fallback", async () => {
     const commandPath = path.join(configHome, "fake-opencode-context");
     await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
