@@ -516,7 +516,9 @@ export async function prepareOpenCodeRuntimeConfig(input: {
         const sourceAuthPath = path.join(resolveXdgDataHome(input.env), "opencode", "auth.json");
         const sourceAuth = await readJsonObject(sourceAuthPath);
         const suppliedAuth = parseConfigContent(input.env.OPENCODE_AUTH_CONTENT ?? process.env.OPENCODE_AUTH_CONTENT);
-        const storedProviderAuth = suppliedAuth?.[selectedModel.provider] ?? sourceAuth[selectedModel.provider];
+        // Auth.all() treats a supplied record as the entire auth source, even
+        // when the selected provider is absent. Do not resurrect hidden file auth.
+        const storedProviderAuth = (suppliedAuth ?? sourceAuth)[selectedModel.provider];
         const authEntry = providerKey
           ? { type: "api", key: providerKey }
           : isStaticApiAuth(storedProviderAuth) ? storedProviderAuth : null;
