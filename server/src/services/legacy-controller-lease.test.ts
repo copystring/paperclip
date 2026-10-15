@@ -113,6 +113,19 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(await renewLegacyControllerLease(db, run)).toBe(false);
     expect(await revokeExpiredLegacyController(db, run)).toBe(false);
   });
+  it.each(["succeeded", "failed", "cancelled", "timed_out", "interrupted"])(
+    "renews cleanup ownership without authorizing another dispatch after %s", async status => {
+      const run = await seed();
+      await db.update(heartbeatRuns).set({ status, executionStage: "settling" }).where(eq(heartbeatRuns.id, run.id));
+      expect(await renewLegacyControllerLease(db, run)).toBe(true);
+      expect(await renewLegacyControllerLease(db, run, "dispatching")).toBe(false);
+      const [settling] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+      expect(settling).toMatchObject({ status, executionStage: "settling" });
+      await db.update(heartbeatRuns).set({ executionStage: "settled", controllerLeaseExpiresAt: null })
+        .where(eq(heartbeatRuns.id, run.id));
+      expect(await renewLegacyControllerLease(db, run)).toBe(false);
+    },
+  );
   it("rejects dispatch at the lease deadline even if the database query never settles", async () => {
     const run = await seed();
     const hungDb = { update: () => ({ set: () => ({ where: () => ({ returning: () => new Promise(() => {}) }) }) }) } as unknown as typeof db;

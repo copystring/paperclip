@@ -1051,7 +1051,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
     async withIssueExecutionLock(input, fn): Promise<ReleaseTransactionResult & { run: RunSnapshot }> {
       return db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
-        const run = await tx
+        let run = await tx
           .select()
           .from(heartbeatRuns)
           .where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId)))
@@ -1059,9 +1059,8 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
         if (!run) {
           throw new Error(`wake-queue: run ${input.runId} was not found while releasing issue execution`);
         }
-        const runSnapshot = toRunSnapshot(run);
         if (input.resumeStrandedQueue && (!run.finishedAt || !["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status))) {
-          return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
+          return { outcome: { kind: "released" }, postCommitEffects: [], run: toRunSnapshot(run) };
         }
         const contextIssueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
 
@@ -1090,6 +1089,22 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
               `,
         );
 
+        // A terminal status is written before the legacy controller has
+        // finished its resource cleanup. Keep the issue lock and deferred
+        // queue intact until that same controller settles its renewable lease.
+        // Lock in issue -> run order, matching issue writes and terminalization.
+        const [currentRun] = await tx.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),
+        )).for("update");
+        if (!currentRun) throw new Error(`wake-queue: run ${input.runId} disappeared while releasing issue execution`);
+        run = currentRun;
+        if (run.runtimeMode === "legacy" && run.executionStage === "settling" &&
+            run.controllerBootId && run.controllerLeaseExpiresAt &&
+            run.controllerLeaseExpiresAt > new Date() &&
+            ["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status)) {
+          return { outcome: { kind: "released" }, postCommitEffects: [], run: toRunSnapshot(run) };
+        }
+        const runSnapshot = toRunSnapshot(run);
         if (input.resumeStrandedQueue && run.runtimeMode === "native") {
           const [finalized] = contextIssueId && run.nativeIssueId === contextIssueId
             ? await tx.select({ runId: nativeRunFinalizations.runId }).from(nativeRunFinalizations).where(and(

@@ -6631,6 +6631,57 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
       .toHaveLength(0);
   });
 
+  it("revokes service-path writes from a legacy run after an agent handoff", async () => {
+    const seeded = await seedOwnershipIssue({ checkoutStatus: "failed" });
+    const original = await svc.getById(seeded.issueId);
+    const reviewerAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: reviewerAgentId,
+      companyId: original!.companyId,
+      name: "Reviewer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.update(heartbeatRuns).set({
+      contextSnapshot: { issueId: seeded.issueId },
+    }).where(eq(heartbeatRuns.id, seeded.actorRunId));
+    await db.update(issues).set({
+      executionRunId: seeded.actorRunId,
+      checkoutRunId: seeded.actorRunId,
+      executionLockedAt: new Date(),
+      executionAgentNameKey: "assignee",
+    }).where(eq(issues.id, seeded.issueId));
+
+    await svc.update(seeded.issueId, {
+      assigneeAgentId: reviewerAgentId,
+      assigneeUserId: null,
+      status: "in_review",
+      executionState: { status: "pending", currentParticipant: { type: "agent", agentId: reviewerAgentId } },
+      actorAgentId: seeded.actorAgentId,
+      actorRunId: seeded.actorRunId,
+      actorRunHandoffId: seeded.actorRunId,
+    });
+    expect(await svc.getById(seeded.issueId)).toMatchObject({
+      executionRunId: seeded.actorRunId,
+      checkoutRunId: seeded.actorRunId,
+    });
+
+    await expect(svc.update(seeded.issueId, {
+      title: "Late outgoing edit",
+      actorAgentId: seeded.actorAgentId,
+      actorRunId: seeded.actorRunId,
+    })).rejects.toMatchObject({ status: 403, details: { code: "issue_handed_off" } });
+    expect(await svc.getById(seeded.issueId)).toMatchObject({
+      title: "Checkout owner recovery",
+      status: "in_review",
+      assigneeAgentId: reviewerAgentId,
+    });
+  });
+
   it("lets the current assignee adopt a stale terminal checkout owner", async () => {
     const seeded = await seedOwnershipIssue({ checkoutStatus: "failed" });
 

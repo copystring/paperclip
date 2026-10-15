@@ -1423,6 +1423,7 @@ const ISSUE_WAKE_DIAGNOSTIC_KNOWN_SOURCES = new Set([
 
 const ISSUE_WAKE_DIAGNOSTIC_KNOWN_REASONS = new Set([
   "issue_execution_deferred",
+  "execution_reconciliation_required",
   "chat_task_completed",
   "issue_assigned",
   "issue_blockers_resolved",
@@ -1610,6 +1611,9 @@ function buildIssueWakeDiagnosis(input: {
     )} was deferred by an active issue-tree hold.`;
   }
   if (latest?.kind === "wake_request") {
+    if (latest.status === "skipped" && latest.reason === "execution_reconciliation_required") {
+      return `The most recent wake for ${blockerDiagnosticLabel(input.issue)} was skipped for execution_reconciliation_required: the previous execution must finish cleanup or be reconciled before another run can start.`;
+    }
     if (latest.status === "deferred_issue_execution") {
       return `The most recent wake for ${blockerDiagnosticLabel(input.issue)} is deferred${wakeDiagnosticReasonPhrase(
         latest.reason,
@@ -5612,8 +5616,7 @@ export function issueRoutes(
       res.status(403).json({ error: "Agent authentication required" });
       return false;
     }
-    if (req.actor.source === "agent_jwt" && req.actor.runId &&
-        issue.assigneeAgentId === null && issue.assigneeUserId) {
+    if (req.actor.source === "agent_jwt" && req.actor.runId) {
       const run = await heartbeat.getRun(req.actor.runId);
       if (run?.agentId === actorAgentId) assertLegacyRunTaskOwnership(run, issue);
     }
@@ -14261,6 +14264,7 @@ export function issueRoutes(
       // Only this request may finish a mutation that intentionally stops its
       // own run (for example handing work to a signoff reviewer).
       const issueMutationStopId = randomUUID();
+      let cooperativeExecutionHandoffRunId: string | null = null;
       if (req.actor.source !== "mcp_oauth" && assigneeWillChange && existing.assigneeAgentId) {
         await stopRunnerGoalForOwnershipChange({
           companyId: existing.companyId,
@@ -14279,7 +14283,36 @@ export function issueRoutes(
           runToStopForReassignment.agentId === req.actor.agentId &&
           runToStopForReassignment.companyId === existing.companyId &&
           runToStopForReassignment.contextSnapshot?.issueId === existing.id;
-        if (runToStopForReassignment && !isHumanSelfHandoff) {
+        const prospectiveExecutionStageWakeup = buildExecutionStageWakeup({
+          issueId: existing.id,
+          previousState: parseIssueExecutionState(existing.executionState),
+          nextState: parseIssueExecutionState(updateFields.executionState),
+          interruptedRunId: null,
+          requestedByActorType: actor.actorType,
+          requestedByActorId: actor.actorId,
+        });
+        const isWorkflowSelfHandoff = Boolean(
+          req.actor.type === "agent" &&
+          req.actor.source === "agent_jwt" &&
+          req.actor.runId &&
+          req.actor.agentId === existing.assigneeAgentId &&
+          nextAssigneeAgentId &&
+          nextAssigneeAgentId !== existing.assigneeAgentId &&
+          nextAssigneeUserId === null &&
+          transition.workflowControlledAssignment &&
+          existing.executionRunId === req.actor.runId &&
+          (!existing.checkoutRunId || existing.checkoutRunId === req.actor.runId) &&
+          runToStopForReassignment?.runtimeMode === "legacy" &&
+          runToStopForReassignment.id === req.actor.runId &&
+          runToStopForReassignment.agentId === req.actor.agentId &&
+          runToStopForReassignment.companyId === existing.companyId &&
+          runToStopForReassignment.contextSnapshot?.issueId === existing.id &&
+          prospectiveExecutionStageWakeup?.agentId === nextAssigneeAgentId,
+        );
+        if (isWorkflowSelfHandoff) {
+          cooperativeExecutionHandoffRunId = req.actor.runId!;
+        }
+        if (runToStopForReassignment && !isHumanSelfHandoff && !isWorkflowSelfHandoff) {
           const cancelled = await heartbeat.cancelRun(
             runToStopForReassignment.id,
             "Cancelled before issue reassignment",
@@ -14382,6 +14415,7 @@ export function issueRoutes(
         actorAgentId: actor.agentId ?? null,
         actorRunId: actor.agentId ? actor.runId : null,
         actorRunStopId: actor.agentId && interruptedRunId === actor.runId ? issueMutationStopId : null,
+        actorRunHandoffId: cooperativeExecutionHandoffRunId,
         actorUserId: actor.actorType === "user" ? actor.actorId : null,
       };
       const shouldCollectCompletionPublication =

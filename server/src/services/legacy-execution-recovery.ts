@@ -101,6 +101,11 @@ export async function terminalizeLegacyExecution(input: {
     )).for("update");
     if (!current || (current.runtimeMode !== "legacy" && !(input.recordRestoreFailureOnly && current.runtimeMode === "native")) ||
         (!input.recordRestoreFailureOnly && !(input.fromStatuses ?? [run.status]).includes(current.status))) return null;
+    const controllerStillOwnsSettlement = Boolean(
+      !input.recordRestoreFailureOnly && current.controllerBootId &&
+      current.controllerLeaseExpiresAt && current.controllerLeaseExpiresAt > new Date() &&
+      current.status === "running" && status !== "running",
+    );
     if (patch?.resultJson !== undefined) patch = { ...patch,
       resultJson: preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,
         input.recordRestoreFailureOnly ? { ...current.resultJson, ...patch.resultJson } : patch.resultJson),
@@ -110,6 +115,7 @@ export async function terminalizeLegacyExecution(input: {
       .set({
         status: input.recordRestoreFailureOnly ? current.status : status,
         ...patch,
+        ...(controllerStillOwnsSettlement ? { executionStage: "settling" } : {}),
         executionStatusDeliveryId: randomUUID(),
         updatedAt: new Date(),
       })
