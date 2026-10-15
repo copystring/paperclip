@@ -150,6 +150,29 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     expect(JSON.parse(await fs.readFile(path.join(sourceAuthDir, "auth.json"), "utf8"))).toHaveProperty("unrelated");
   });
 
+  it.each([{}, { unrelated: { type: "api", key: "fixture-visible-key" } }])(
+    "does not resurrect file credentials hidden by the supplied auth record (%j)", async (authOverride) => {
+      const configHome = await makeConfigHome({
+        provider: { paperclip: { npm: "@ai-sdk/openai-compatible", models: { simple: {} } } },
+      });
+      const dataHome = await makeConfigHome();
+      const authPath = path.join(dataHome, "opencode", "auth.json");
+      const hiddenAuth = JSON.stringify({ paperclip: { type: "api", key: "fixture-hidden-key" } });
+      await fs.writeFile(authPath, hiddenAuth);
+      const authContent = JSON.stringify(authOverride);
+      const prepared = await prepareOpenCodeRuntimeConfig({
+        env: { XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: dataHome, OPENCODE_AUTH_CONTENT: authContent },
+        config: { model: "paperclip/simple" },
+      });
+      cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+      expect(prepared.env.OPENCODE_AUTH_CONTENT).toBe(authContent);
+      expect(prepared.notes.join("\n")).toContain("no usable provider credential");
+      await expect(fs.access(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "plugins"))).rejects.toThrow();
+      expect(await fs.readFile(authPath, "utf8")).toBe(hiddenAuth);
+      await prepared.cleanup();
+    },
+  );
+
   it("leaves OAuth-backed auth handling unchanged when no static provider key is configured", async () => {
     const configHome = await makeConfigHome({
       provider: { paperclip: { npm: "@ai-sdk/openai-compatible", models: { simple: {} } } },
