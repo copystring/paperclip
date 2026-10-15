@@ -6337,6 +6337,23 @@ export function createToolGatewayService(
       );
       return { result, headerSummary, execution };
     } catch (error) {
+      // This AbortController is owned by the caller deadline above. Some HTTP
+      // wrappers replace AbortError with their own transport error, so use the
+      // authoritative signal state before classifying by error shape. A caller
+      // deadline does not prove the remote connection is unhealthy, and the
+      // provider may have applied a mutation before the response was lost.
+      if (controller.signal.aborted) {
+        throw new ToolGatewayHttpError(
+          504,
+          `Remote MCP tool call exceeded its ${ms} ms caller deadline. The provider may still have processed the action; its outcome is unknown. Check its state before an explicit retry.`,
+          "tool_timeout",
+          {
+            connectionId: connection.id,
+            catalogEntryId: entry.id,
+            execution,
+          },
+        );
+      }
       if (error instanceof McpHttpResponseError) {
         const failure = error.reason === "too_large" ? responseTooLargeError()
           : error.reason === "malformed_response" ? malformedRemoteMcpResponse()
