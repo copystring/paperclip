@@ -330,6 +330,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
+  const deferredCheckGuidance = env.PAPERCLIP_API_URL && env.PAPERCLIP_API_KEY && env.PAPERCLIP_TASK_ID
+    ? [
+        "Paperclip durable deferred-check contract:",
+        "Continue useful work now whenever it does not depend on the pending external result. A detached shell process, PID, log file, or promise to check later is not a durable Paperclip continuation.",
+        "Only when a specific asynchronous external check is still pending and no useful independent work remains, schedule one future, one-shot issue monitor for this task. Name the exact process or log to inspect and the expected success/failure condition in its notes. Do not schedule repetitive polling or an unbounded retry loop.",
+        "Use the existing run-scoped API environment without printing or copying its credential: normalize PAPERCLIP_API_URL by removing a trailing slash and then a trailing /api; send Authorization: Bearer $PAPERCLIP_API_KEY and X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID.",
+        "First GET /api/issues/$PAPERCLIP_TASK_ID and retain the complete executionPolicy value (including null). Then PATCH /api/issues/$PAPERCLIP_TASK_ID with a policy-only JSON body whose expectedExecutionPolicy is exactly that snapshot and whose executionPolicy preserves every existing field while adding or replacing monitor. Preserve existing monitor limits and recoveryPolicy; set nextCheckAt to a future ISO-8601 timestamp and notes to the concrete check and expected condition. Do not change task status, assignee, reviewer, or approval state.",
+        "Read the issue back and verify the persisted monitor nextCheckAt and notes before ending this run. Only then report that the task is yielded for that check. The monitor is one-shot: re-arm it only if the check proves another future check is needed, respecting its existing timeout and attempt limits.",
+        "A repeated identical remote PowerShell tool call may return its prior receipt instead of running again. Treat that as a replay, inspect its receipt and current remote state, and do not blindly retry a command with side effects after a timeout. For a fresh observation, use a harmless read-only check that reports the current time; never add a nonce or change arguments to force a possibly mutating command to run again.",
+      ].join("\n")
+    : "";
   const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({
     env,
     config,
@@ -592,6 +603,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
       const basePrompt = joinPromptSections([
         instructionsPrefix,
+        deferredCheckGuidance,
         renderedBootstrapPrompt,
         wakePrompt,
         taskContextNote,
