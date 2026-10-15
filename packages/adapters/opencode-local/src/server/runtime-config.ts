@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { AdapterRuntimeMcpServer } from "@paperclipai/adapter-utils";
 import { asBoolean } from "@paperclipai/adapter-utils/server-utils";
 
 type PreparedOpenCodeRuntimeConfig = {
@@ -105,10 +107,12 @@ async function readJsonObject(filepath: string): Promise<Record<string, unknown>
 export async function prepareOpenCodeRuntimeConfig(input: {
   env: Record<string, string>;
   config: Record<string, unknown>;
+  runtimeMcp?: AdapterRuntimeMcpServer[];
   targetIsRemote?: boolean;
 }): Promise<PreparedOpenCodeRuntimeConfig> {
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
-  if (!skipPermissions) {
+  const runtimeMcpServers = input.runtimeMcp ?? [];
+  if (!skipPermissions && runtimeMcpServers.length === 0) {
     return {
       env: input.env,
       notes: [],
@@ -134,105 +138,160 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
   const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
 
-  await fs.mkdir(runtimeConfigDir, { recursive: true });
   try {
-    await fs.cp(sourceConfigDir, runtimeConfigDir, {
-      recursive: true,
-      force: true,
-      errorOnExist: false,
-      dereference: false,
-    });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
-      throw err;
+    await fs.mkdir(runtimeConfigDir, { recursive: true, mode: 0o700 });
+    await fs.chmod(runtimeConfigHome, 0o700);
+    await fs.chmod(runtimeConfigDir, 0o700);
+    try {
+      await fs.cp(sourceConfigDir, runtimeConfigDir, {
+        recursive: true,
+        force: true,
+        errorOnExist: false,
+        dereference: false,
+      });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
+        throw err;
+      }
     }
-  }
+    // Copying the user's config may restore looser directory permissions.
+    // The runtime copy can contain assigned MCP credentials, so reassert them.
+    await fs.chmod(runtimeConfigHome, 0o700);
+    await fs.chmod(runtimeConfigDir, 0o700);
 
-  const existingConfig = await readJsonObject(runtimeConfigPath);
-  const notes = [
-    "Injected runtime OpenCode config with permission=allow for all tools and connections.",
-  ];
+    const existingConfig = await readJsonObject(runtimeConfigPath);
+    const notes = skipPermissions
+      ? ["Injected runtime OpenCode config with permission=allow for all tools and connections."]
+      : [];
 
-  // Merge gateway/custom provider definitions supplied via PAPERCLIP_OPENCODE_PROVIDERS
-  // (a JSON object in OpenCode's `provider` shape). OpenCode resolves a `--model
-  // provider/model` only when that model exists in a provider's `models` map, and
-  // OPENCODE_ALLOW_ALL_MODELS does NOT bypass its internal getModel(). So routing a
-  // gateway model (e.g. an EU LLM gateway exposing OpenAI-compatible /v1) requires a
-  // custom provider with an explicit models map. We accept it as config (not
-  // hard-coded) so the gateway URL, key env, and model list stay declarative.
-  const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
-  const gatewayProviders = parseProviderConfig(
-    input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS,
-    resolveEnv,
-    notes,
-  );
-  const existingProvider = isPlainObject(existingConfig.provider) ? existingConfig.provider : {};
-  let nextProvider = gatewayProviders
-    ? { ...existingProvider, ...gatewayProviders }
-    : existingProvider;
-  if (gatewayProviders) {
-    notes.push(
-      `Injected ${Object.keys(gatewayProviders).length} custom OpenCode provider(s) from PAPERCLIP_OPENCODE_PROVIDERS: ${Object.keys(gatewayProviders).join(", ")}.`,
-    );
-  }
-
-  // Register the configured model on its provider's models map. OpenCode resolves
-  // `--model provider/model` only when the model id exists in that map, so ids the
-  // models.dev catalog does not carry — OpenRouter routing variants such as
-  // `openai/gpt-oss-120b:nitro`, or models newer than the bundled catalog — are
-  // otherwise rejected with "Model not found" even though the provider serves them.
-  // An empty entry deep-merges with catalog metadata, so this is a no-op for models
-  // the catalog already knows, and we never clobber an explicit definition from the
-  // user config or PAPERCLIP_OPENCODE_PROVIDERS.
-  const configuredModel = parseConfiguredModelRef(input.config.model);
-  if (configuredModel) {
-    const providerEntry = isPlainObject(nextProvider[configuredModel.provider])
-      ? { ...(nextProvider[configuredModel.provider] as Record<string, unknown>) }
-      : {};
-    const providerModels = isPlainObject(providerEntry.models)
-      ? { ...(providerEntry.models as Record<string, unknown>) }
-      : {};
-    if (!isPlainObject(providerModels[configuredModel.model])) {
-      providerModels[configuredModel.model] = {};
-      providerEntry.models = providerModels;
-      nextProvider = { ...nextProvider, [configuredModel.provider]: providerEntry };
-      notes.push(
-        `Registered configured model ${configuredModel.provider}/${configuredModel.model} in the runtime OpenCode config.`,
+    // Merge gateway/custom provider definitions supplied via PAPERCLIP_OPENCODE_PROVIDERS
+    // (a JSON object in OpenCode's `provider` shape). OpenCode resolves a `--model
+    // provider/model` only when that model exists in a provider's `models` map, and
+    // OPENCODE_ALLOW_ALL_MODELS does NOT bypass its internal getModel(). So routing a
+    // gateway model (e.g. an EU LLM gateway exposing OpenAI-compatible /v1) requires a
+    // custom provider with an explicit models map. We accept it as config (not
+    // hard-coded) so the gateway URL, key env, and model list stay declarative.
+    const existingProvider = isPlainObject(existingConfig.provider) ? existingConfig.provider : {};
+    let nextProvider = existingProvider;
+    if (skipPermissions) {
+      const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
+      const gatewayProviders = parseProviderConfig(
+        input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS,
+        resolveEnv,
+        notes,
       );
+      nextProvider = gatewayProviders ? { ...existingProvider, ...gatewayProviders } : existingProvider;
+      if (gatewayProviders) {
+        notes.push(
+          `Injected ${Object.keys(gatewayProviders).length} custom OpenCode provider(s) from PAPERCLIP_OPENCODE_PROVIDERS: ${Object.keys(gatewayProviders).join(", ")}.`,
+        );
+      }
     }
-  }
 
-  const nextConfig: Record<string, unknown> = {
-    ...existingConfig,
-    permission: "allow",
-  };
-  if (Object.keys(nextProvider).length > 0) {
-    nextConfig.provider = nextProvider;
-  }
+    // Register the configured model on its provider's models map. OpenCode resolves
+    // `--model provider/model` only when the model id exists in that map, so ids the
+    // models.dev catalog does not carry — OpenRouter routing variants such as
+    // `openai/gpt-oss-120b:nitro`, or models newer than the bundled catalog — are
+    // otherwise rejected with "Model not found" even though the provider serves them.
+    // An empty entry deep-merges with catalog metadata, so this is a no-op for models
+    // the catalog already knows, and we never clobber an explicit definition from the
+    // user config or PAPERCLIP_OPENCODE_PROVIDERS.
+    const configuredModel = skipPermissions ? parseConfiguredModelRef(input.config.model) : null;
+    if (configuredModel) {
+      const providerEntry = isPlainObject(nextProvider[configuredModel.provider])
+        ? { ...(nextProvider[configuredModel.provider] as Record<string, unknown>) }
+        : {};
+      const providerModels = isPlainObject(providerEntry.models)
+        ? { ...(providerEntry.models as Record<string, unknown>) }
+        : {};
+      if (!isPlainObject(providerModels[configuredModel.model])) {
+        providerModels[configuredModel.model] = {};
+        providerEntry.models = providerModels;
+        nextProvider = { ...nextProvider, [configuredModel.provider]: providerEntry };
+        notes.push(
+          `Registered configured model ${configuredModel.provider}/${configuredModel.model} in the runtime OpenCode config.`,
+        );
+      }
+    }
 
-  // Pin OpenCode's auxiliary "small" model (used for session-title generation and
-  // other helper tasks) via PAPERCLIP_OPENCODE_SMALL_MODEL. OpenCode otherwise
-  // defaults the small model to a built-in provider default (e.g. a claude-* model
-  // for the anthropic provider); when that provider is repointed at a gateway that
-  // does not serve that exact model, the title-gen call fails and aborts the run.
-  // Setting small_model to a gateway-served model keeps every call on supported models.
-  const smallModel = (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim();
-  if (smallModel) {
-    nextConfig.small_model = smallModel;
-    notes.push(`Pinned OpenCode small_model to ${smallModel}.`);
-  }
-  await fs.writeFile(runtimeConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, "utf8");
+    const nextConfig: Record<string, unknown> = { ...existingConfig };
+    if (skipPermissions) nextConfig.permission = "allow";
+    if (skipPermissions && Object.keys(nextProvider).length > 0) {
+      nextConfig.provider = nextProvider;
+    }
 
-  return {
-    env: {
-      ...input.env,
-      XDG_CONFIG_HOME: runtimeConfigHome,
-    },
-    notes,
-    cleanup: async () => {
-      await fs.rm(runtimeConfigHome, { recursive: true, force: true });
-    },
-  };
+    // Pin OpenCode's auxiliary "small" model (used for session-title generation and
+    // other helper tasks) via PAPERCLIP_OPENCODE_SMALL_MODEL. OpenCode otherwise
+    // defaults the small model to a built-in provider default (e.g. a claude-* model
+    // for the anthropic provider); when that provider is repointed at a gateway that
+    // does not serve that exact model, the title-gen call fails and aborts the run.
+    // Setting small_model to a gateway-served model keeps every call on supported models.
+    const smallModel = skipPermissions
+      ? (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim()
+      : undefined;
+    if (smallModel) {
+      nextConfig.small_model = smallModel;
+      notes.push(`Pinned OpenCode small_model to ${smallModel}.`);
+    }
+    if (runtimeMcpServers.length > 0) {
+      const existingMcp = existingConfig.mcp;
+      if (existingMcp !== undefined && !isPlainObject(existingMcp)) {
+        throw new Error("OpenCode MCP configuration must be an object to add assigned servers.");
+      }
+      const nextMcp: Record<string, unknown> = isPlainObject(existingMcp) ? { ...existingMcp } : {};
+      for (const [index, server] of runtimeMcpServers.entries()) {
+        let endpoint: URL;
+        try {
+          endpoint = new URL(server.url);
+        } catch {
+          throw new Error("A Paperclip runtime MCP server has an invalid URL.");
+        }
+        if (!(["http:", "https:"].includes(endpoint.protocol)) || endpoint.username || endpoint.password ||
+            !server.connectionId.trim() || !server.token.trim() || /[\r\n]/.test(server.token)) {
+          throw new Error("A Paperclip runtime MCP server has an invalid HTTP binding.");
+        }
+        const identity = `${server.connectionId}\0${index}`;
+        const suffix = createHash("sha256").update(identity).digest("hex").slice(0, 16).toUpperCase();
+        const baseName = `paperclip_${suffix}`;
+        let name = baseName;
+        let collision = 1;
+        while (Object.hasOwn(nextMcp, name)) name = `${baseName}_${collision++}`;
+        nextMcp[name] = {
+          type: "remote",
+          url: server.url,
+          enabled: true,
+          oauth: false,
+          headers: { Authorization: `Bearer ${server.token}` },
+        };
+      }
+      nextConfig.mcp = nextMcp;
+      notes.push(`Injected ${runtimeMcpServers.length} Paperclip-managed MCP server(s) into the private OpenCode runtime config.`);
+    }
+    // Write a new regular file and rename it over any copied symlink/config.
+    // writeFile(..., mode) does not tighten permissions on an existing file.
+    const temporaryConfigPath = path.join(runtimeConfigDir, `.opencode-${process.pid}-${Date.now()}.tmp`);
+    await fs.writeFile(temporaryConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+    });
+    await fs.chmod(temporaryConfigPath, 0o600);
+    await fs.rename(temporaryConfigPath, runtimeConfigPath);
+
+    return {
+      env: {
+        ...input.env,
+        XDG_CONFIG_HOME: runtimeConfigHome,
+      },
+      notes,
+      cleanup: async () => {
+        await fs.rm(runtimeConfigHome, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    await fs.rm(runtimeConfigHome, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 /** Managed credentials must never leave host-only homes in a remote process. */

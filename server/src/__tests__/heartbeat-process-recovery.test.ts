@@ -10166,11 +10166,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       retryReason: "execution_review_participant_recovery",
       source: "issue.execution_review_recovery",
       retryOfRunId: runId,
-      currentStageId: stageId,
-      currentStageType: "review",
-      reviewRecoveryInstruction: expect.stringContaining(
-        "Submit the review decision now",
-      ),
+      executionStage: {
+        wakeRole: "reviewer",
+        stageId,
+        stageType: "review",
+        currentParticipant: { type: "agent", agentId },
+        allowedActions: ["approve", "request_changes"],
+        recoveryInstruction: expect.stringContaining(
+          "without a saved decision",
+        ),
+      },
     });
     expect(
       retryRun?.contextSnapshot as Record<string, unknown>,
@@ -10494,6 +10499,42 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("retries a pending execution-review participant once before blocking with a recovery action", async () => {
+    const probe = await seedInReviewParticipantRunFixture();
+    await db.update(agentWakeupRequests)
+      .set({ status: "completed", updatedAt: new Date() })
+      .where(eq(agentWakeupRequests.id, probe.wakeupRequestId));
+    await db.update(heartbeatRuns)
+      .set({ status: "succeeded", finishedAt: new Date() })
+      .where(eq(heartbeatRuns.id, probe.runId));
+    await db.update(issues)
+      .set({ executionRunId: null, executionLockedAt: null })
+      .where(eq(issues.id, probe.issueId));
+    const [issueAtRecoveryStart] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, probe.issueId));
+    expect(issueAtRecoveryStart).toBeTruthy();
+    let capturedReviewWake: { agentId: string; options: unknown } | null = null;
+    const recoveryProbe = recoveryService(db, {
+      enqueueWakeup: async (wakeupAgentId, options = {}) => {
+        if (wakeupAgentId === probe.agentId && options.reason === "execution_review_participant_recovery") {
+          capturedReviewWake = { agentId: wakeupAgentId, options };
+        }
+        return null;
+      },
+    });
+    await recoveryProbe.reconcileStrandedAssignedIssues();
+    expect(capturedReviewWake).toMatchObject({
+      agentId: probe.agentId,
+      options: {
+        issueStateGuard: {
+          statuses: ["in_review"],
+          assigneeAgentId: probe.agentId,
+          statusVersion: issueAtRecoveryStart!.statusVersion,
+        },
+      },
+    });
+
     const { companyId, agentId, issueId, runId, stageId } =
       await seedInReviewParticipantRunFixture();
     const heartbeat = heartbeatService(db);
@@ -10525,16 +10566,18 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       retryReason: "execution_review_participant_recovery",
       source: "issue.execution_review_recovery",
       retryOfRunId: runId,
-      currentStageId: stageId,
-      currentStageType: "review",
-      reviewRecoveryInstruction: expect.stringContaining(
-        "Submit the review decision now",
-      ),
+      executionStage: {
+        wakeRole: "reviewer",
+        stageId,
+        stageType: "review",
+        currentParticipant: { type: "agent", agentId, userId: null },
+        allowedActions: ["approve", "request_changes"],
+        recoveryInstruction: expect.stringContaining("without a saved decision"),
+      },
     });
     expect(
       reviewRecoveryRun?.contextSnapshot as Record<string, unknown>,
     ).not.toHaveProperty("modelProfile");
-
     const sourceIssue = await waitForValue(async () => {
       const row = await selectRecoveryIssueById(issueId);
       return row?.status === "blocked" ? row : null;

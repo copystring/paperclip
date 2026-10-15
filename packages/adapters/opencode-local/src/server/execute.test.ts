@@ -82,6 +82,50 @@ describe("OpenCode local skill injection", () => {
     expect(prompt).not.toContain("Create child issues");
   });
 
+  it("passes only the supplied runtime MCP servers into OpenCode and cleans the private config", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-runtime-mcp");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", "utf8");
+    await fs.chmod(commandPath, 0o755);
+    const token = "fixture-runtime-mcp-token";
+    let runtimeConfigHome = "";
+    let runtimeMcpConfig: Record<string, Record<string, unknown>> = {};
+    let logs = "";
+    runProcessMock.mockReset().mockImplementationOnce(async (...args) => {
+      const env = (args[4] as { env: Record<string, string> }).env;
+      runtimeConfigHome = env.XDG_CONFIG_HOME!;
+      const runtimeConfig = JSON.parse(
+        await fs.readFile(path.join(runtimeConfigHome, "opencode", "opencode.json"), "utf8"),
+      ) as { mcp: Record<string, Record<string, unknown>> };
+      runtimeMcpConfig = runtimeConfig.mcp;
+      const injected = Object.values(runtimeMcpConfig).find((server) => server.type === "remote")!;
+      const authorization = (injected.headers as Record<string, string>).Authorization;
+      expect(authorization).toBe(`Bearer ${token}`);
+      expect(Object.keys(env).filter((key) => key.startsWith("PAPERCLIP_OPENCODE_MCP_TOKEN_"))).toEqual([]);
+      return probeResult({ stdout: JSON.stringify({ type: "text", sessionID: "runtime-mcp", part: { text: "done" } }) });
+    });
+
+    const result = await execute({
+      runId: "run-runtime-mcp",
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: commandPath, cwd: configHome, model: "openai/gpt-5", env: { OPENCODE_ALLOW_ALL_MODELS: "1" } },
+      context: {},
+      runtimeMcp: { getServers: () => [{
+        name: "assigned",
+        url: "https://paperclip.example/mcp/gateways/assigned",
+        token,
+        connectionId: "connection-assigned",
+      }] },
+      onLog: async (_stream, chunk) => { logs += chunk; },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(Object.values(runtimeMcpConfig)).toHaveLength(1);
+    expect(JSON.stringify(runtimeMcpConfig)).toContain(`Bearer ${token}`);
+    expect(logs).not.toContain(token);
+    await expect(fs.access(runtimeConfigHome)).rejects.toThrow();
+  });
+
   it("delivers assignment context on an ordinary task turn and rebuilds it after resume fallback", async () => {
     const commandPath = path.join(configHome, "fake-opencode-context");
     await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });

@@ -9,6 +9,7 @@ import { ThemeProvider } from "@/context/ThemeContext";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TaskChatThread } from "./TaskChatThread";
 import type {
+  IssueRecoveryAction,
   IssueDocument,
   IssueQueuedCommentQueue,
   IssueThreadInteraction,
@@ -45,6 +46,31 @@ const DIRECT_ADAPTER_TYPES = [
 ] as const;
 const editorCallbacks = vi.hoisted(() => ({ change: (_value: string) => {} }));
 const streamlinedState = vi.hoisted(() => ({ enabled: true }));
+
+const activeRecoveryAction = {
+  id: "recovery-action",
+  companyId: "company",
+  sourceIssueId: "issue",
+  recoveryIssueId: null,
+  kind: "stranded_assigned_issue",
+  status: "active",
+  ownerType: "board",
+  ownerAgentId: null,
+  ownerUserId: null,
+  previousOwnerAgentId: null,
+  returnOwnerAgentId: null,
+  cause: "execution_review_participant_recovery",
+  fingerprint: "fingerprint",
+  evidence: { summary: "The review participant did not record a decision." },
+  nextAction: "Choose the next step.",
+  attemptCount: 0,
+  maxAttempts: null,
+  timeoutAt: null,
+  resolvedAt: null,
+  outcome: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+} as unknown as IssueRecoveryAction;
 
 vi.mock("@/components/transcript/useLiveRunTranscripts", () => ({
   useLiveRunTranscripts: ({ runs }: { runs: unknown[] }) => {
@@ -131,6 +157,50 @@ beforeEach(() => {
       queries: { retry: false },
       mutations: { retry: false },
     },
+  });
+});
+
+describe("TaskChatThread recovery action", () => {
+  it("renders the current recovery and wires its resolve callback", () => {
+    const onResolveRecoveryAction = vi.fn();
+    render(
+      <TaskChatThread
+        comments={[]}
+        onAdd={async () => {}}
+        issueStatus="blocked"
+        recoveryAction={activeRecoveryAction}
+        onResolveRecoveryAction={onResolveRecoveryAction}
+      />,
+    );
+
+    expect(container.querySelector('section[aria-label^="Recovery action:"]')).not.toBeNull();
+    const trigger = container.querySelector('[data-testid="recovery-action-resolve-trigger"]');
+    expect(trigger).not.toBeNull();
+    flushSync(() => trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    const retry = [...document.body.querySelectorAll("button")].find((button) => button.textContent?.includes("Try again"));
+    expect(retry).toBeTruthy();
+    flushSync(() => retry?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onResolveRecoveryAction).toHaveBeenCalledWith("todo");
+  });
+
+  it("suppresses historical recovery on a terminal task and leaves native reconciliation to its dedicated flow", () => {
+    render(
+      <TaskChatThread comments={[]} onAdd={async () => {}} issueStatus="done" recoveryAction={activeRecoveryAction} />,
+    );
+    expect(container.querySelector('section[aria-label^="Recovery action:"]')).toBeNull();
+
+    flushSync(() => root?.unmount());
+    root = createRoot(container);
+    render(
+      <TaskChatThread
+        comments={[]}
+        onAdd={async () => {}}
+        issueStatus="blocked"
+        recoveryAction={{ ...activeRecoveryAction, cause: "native_continuation_requires_reconciliation" } as IssueRecoveryAction}
+        onResolveRecoveryAction={vi.fn()}
+      />,
+    );
+    expect(container.querySelector('section[aria-label^="Recovery action:"]')).toBeNull();
   });
 });
 

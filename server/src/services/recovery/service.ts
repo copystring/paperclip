@@ -116,6 +116,7 @@ import {
   type IssuePostCommitAction,
 } from "../issues.js";
 import {
+  buildExecutionStageWakeContext,
   applyIssueMonitorPolicyTransition,
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
@@ -210,6 +211,7 @@ type RecoveryWakeupOptions = {
   issueStateGuard?: {
     statuses: string[];
     assigneeAgentId: string;
+    statusVersion?: number;
   };
 };
 
@@ -1975,6 +1977,11 @@ export function recoveryService(
     source: string;
     retryOfRunId?: string | null;
     extraContext?: Record<string, unknown>;
+    issueStateGuard?: {
+      statuses: string[];
+      assigneeAgentId: string;
+      statusVersion?: number;
+    };
     /**
      * Out-parameter: set `retryExhausted` when no successor was queued
      * because the failed predecessor has spent its bounded transient retry
@@ -2065,6 +2072,9 @@ export function recoveryService(
               assigneeAgentId: input.agentId,
             },
           }
+        : {}),
+      ...(input.issueStateGuard
+        ? { issueStateGuard: input.issueStateGuard }
         : {}),
       payload: withRecoveryContext(
         {
@@ -5166,10 +5176,20 @@ export function recoveryService(
           source: "issue.execution_review_recovery",
           retryOfRunId: participantLatestRun.id,
           extraContext: {
-            currentStageId: pendingExecutionState.currentStageId ?? null,
-            currentStageType: pendingExecutionState.currentStageType ?? null,
-            reviewRecoveryInstruction:
-              "The previous reviewer run ended while this execution-review stage was still pending. Submit the review decision now, or mark the issue blocked with the exact unblock action.",
+            executionStage: buildExecutionStageWakeContext({
+              state: pendingExecutionState,
+              wakeRole:
+                pendingExecutionState.currentStageType === "approval"
+                  ? "approver"
+                  : "reviewer",
+              recoveryInstruction:
+                "The previous reviewer run ended without a saved decision for this pending stage. Finish the review and record the decision through the issue update route below. Do not treat comments or prose as a saved decision.",
+            }),
+          },
+          issueStateGuard: {
+            statuses: ["in_review"],
+            assigneeAgentId: participantAgentId,
+            statusVersion: issue.statusVersion,
           },
           outcome: reviewOutcome,
         });

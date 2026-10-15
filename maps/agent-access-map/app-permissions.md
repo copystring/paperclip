@@ -41,6 +41,12 @@ assignment changes use the opt-in `agent_runtime` stream. These inputs contain
 no grant credentials and do not authorize a task's tool calls. See the
 [runtime contract](../../doc/plugins/AGENT_RUNTIME_SYNC.md#standing-connection-assignments).
 
+The OpenCode local adapter delivers the already assigned runtime MCP servers
+through a private, temporary remote-MCP configuration. This delivery does not
+change grants, profiles, or action policies. Adapter tests cover authentication,
+configuration preservation, and cleanup; a synthetic Linux CLI connection and
+tools/list probe checks transport only, not every assigned app action.
+
 ## `action-policy`
 
 Review: `baseline`.
