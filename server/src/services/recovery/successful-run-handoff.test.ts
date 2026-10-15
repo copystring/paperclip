@@ -115,8 +115,16 @@ describe("successful run handoff decision", () => {
     expect(decision.instruction).toContain("deferred_issue_execution or queued");
     expect(decision.instruction).toContain("Do not PATCH executionPolicy with resumeIntent/resumeFromRunId/nextAction");
     expect(decision.instruction).toContain("a coalesced wake, a skipped/rejected wake");
-    expect(decision.instruction).toContain("This is a disposition-only recovery for the persisted source run");
-    expect(decision.instruction).toContain("Do not redo implementation");
+    expect(decision.instruction).toContain("This wake is only for disposition of the persisted source run");
+    expect(decision.instruction).toContain("do not implement, inspect or modify the workspace, or perform verification here");
+    expect(decision.instruction).toContain("If scope is unfinished, or the same agent is authorized to perform a missing verification or readback, that is more work");
+    expect(decision.instruction).toContain("choose option 4 and persist a separate same-owner continuation or linked follow-up");
+    expect(decision.instruction).toContain("If a real hold applies, use its existing supported blocked or review path; never route around it");
+    expect(decision.instruction).toContain("Missing evidence alone is not a human gate");
+    expect(decision.instruction).toContain("do not mark the issue done until required work and evidence are complete");
+    expect(decision.instruction).toContain("If work is complete but an independent review or actual human decision is required, choose option 2");
+    expect(decision.instruction).toContain("for a real blocker that prevents progress, choose option 3");
+    expect(decision.instruction).toContain("Preserve genuine Stop, Unknown, HOLD, budget, and human-decision gates");
   });
 
   it("does not launch generic recovery when native semantic finalization owns disposition", () => {
