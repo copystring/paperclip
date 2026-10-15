@@ -14,6 +14,7 @@ import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
 import { documentService } from "./documents.js";
+import { UNREVIEWED_AGENT_REPORT_PREFIX, withIssueCommentReviewContext } from "./issue-comment-review-context.js";
 import { parseTaskSearch, taskSearchCtes, taskSearchScore } from "./task-search.js";
 import { createdFromIssueCondition } from "./issue-creation-origin.js";
 import { executionProjectionsForRuns } from "./execution-projection.js";
@@ -12467,7 +12468,7 @@ export function issueService(db: Db) {
       },
       dbOrTx: any = db,
     ): Promise<IssueComment> {
-      if (dbOrTx === db && (actor.runId || actor.userId)) {
+      if (dbOrTx === db && (actor.runId || actor.userId || actor.agentId)) {
         const append = () =>
           db.transaction(async (tx) => {
             // Serialize run-authored comments on the issue so a provider retry
@@ -12489,13 +12490,13 @@ export function issueService(db: Db) {
       // The query below locks human comments on caller-owned transactions too,
       // sharing the fence with both question creation and Slack settlement.
       const issueQuery = dbOrTx
-        .select({ companyId: issues.companyId, conversationAgentId: issues.conversationAgentId })
+        .select({ companyId: issues.companyId, conversationAgentId: issues.conversationAgentId, executionState: issues.executionState })
         .from(issues)
         .where(eq(issues.id, issueId));
       // Caller-owned transactions (including chat and review comments) must
       // serialize with question creation before inserting the human comment.
-      const issue = await (actor.userId || (actor.runId && dbOrTx !== db) ? issueQuery.for("update") : issueQuery)
-        .then((rows: Array<{ companyId: string; conversationAgentId: string | null }>) => rows[0] ?? null);
+      const issue = await (actor.userId || actor.agentId || (actor.runId && dbOrTx !== db) ? issueQuery.for("update") : issueQuery)
+        .then((rows: Array<{ companyId: string; conversationAgentId: string | null; executionState: unknown }>) => rows[0] ?? null);
 
       if (!issue) throw notFound("Issue not found");
 
@@ -12510,6 +12511,7 @@ export function issueService(db: Db) {
           .censorUsernameInLogs,
       };
       const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
+      const publishedBody = withIssueCommentReviewContext(redactedBody, actor.agentId, issue.executionState);
       if (actor.userId && options?.clientRequestId) {
         const [existing] = await dbOrTx.select().from(issueComments).where(and(eq(issueComments.issueId, issueId),
           eq(issueComments.authorUserId, actor.userId), eq(issueComments.clientRequestId, options.clientRequestId)));
@@ -12670,7 +12672,7 @@ export function issueService(db: Db) {
               actor.agentId
                 ? eq(issueComments.authorAgentId, actor.agentId)
                 : isNull(issueComments.authorAgentId),
-              eq(issueComments.body, redactedBody),
+              or(eq(issueComments.body, redactedBody), eq(issueComments.body, UNREVIEWED_AGENT_REPORT_PREFIX + redactedBody)),
               isNull(issueComments.deletedAt),
             ),
           )
@@ -12750,7 +12752,7 @@ export function issueService(db: Db) {
             onBehalfOfUserId,
             authorType,
             createdByRunId,
-            body: redactedBody,
+            body: publishedBody,
             clientRequestId: options?.clientRequestId ?? null,
             presentation,
             metadata,
@@ -13027,7 +13029,7 @@ export function issueService(db: Db) {
                 payload: projectSafeChatPublication({
                   classification: "external",
                   source: "agent_comment",
-                  text: redactedBody,
+                  text: comment.body,
                 }),
                 state: "pending",
                 createdAt: publicationCreatedAt,
