@@ -47,6 +47,12 @@ change grants, profiles, or action policies. Adapter tests cover authentication,
 configuration preservation, and cleanup; a synthetic Linux CLI connection and
 tools/list probe checks transport only, not every assigned app action.
 
+On-demand discovery ranks query terms across tool names, application names and
+descriptions after deriving the caller's authorized tool set. Punctuation and
+word spacing do not require an exact catalog phrase; discovery never adds grants.
+An OpenCode exit without assistant text or a completed tool action is reported as
+`opencode_empty_response`, rather than successful work.
+
 ## `action-policy`
 
 Review: `baseline`.
