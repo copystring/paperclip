@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -19,8 +19,29 @@ function resolveXdgConfigHome(env: Record<string, string>): string {
   );
 }
 
+function resolveXdgDataHome(env: Record<string, string>): string {
+  return (
+    (typeof env.XDG_DATA_HOME === "string" && env.XDG_DATA_HOME.trim()) ||
+    (typeof process.env.XDG_DATA_HOME === "string" && process.env.XDG_DATA_HOME.trim()) ||
+    (process.platform === "win32" && process.env.APPDATA
+      ? process.env.APPDATA
+      : path.join(os.homedir(), process.platform === "darwin" ? "Library/Application Support" : ".local/share"))
+  );
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStaticApiAuth(value: unknown): value is { type: "api"; key: string } {
+  return isPlainObject(value) && value.type === "api" && typeof value.key === "string" && value.key.length > 0;
+}
+
+function isValidStoredAuth(value: unknown): boolean {
+  if (isStaticApiAuth(value)) return true;
+  if (!isPlainObject(value)) return false;
+  if (value.type === "wellknown") return typeof value.key === "string" && typeof value.token === "string";
+  return value.type === "oauth" && typeof value.access === "string" && typeof value.refresh === "string" && Number.isFinite(value.expires);
 }
 
 // Recursively replace {env:VAR} placeholders with the resolved value. Used to bake
@@ -86,14 +107,6 @@ function parseProviderConfig(
   return Object.keys(providers).length > 0 ? providers : null;
 }
 
-function parseConfiguredModelRef(raw: unknown): { provider: string; model: string } | null {
-  if (typeof raw !== "string") return null;
-  const trimmed = raw.trim();
-  const slash = trimmed.indexOf("/");
-  if (slash <= 0 || slash === trimmed.length - 1) return null;
-  return { provider: trimmed.slice(0, slash), model: trimmed.slice(slash + 1) };
-}
-
 async function readJsonObject(filepath: string): Promise<Record<string, unknown>> {
   try {
     const raw = await fs.readFile(filepath, "utf8");
@@ -104,6 +117,245 @@ async function readJsonObject(filepath: string): Promise<Record<string, unknown>
   }
 }
 
+async function ensurePrivatePluginDirectory(pluginDir: string): Promise<void> {
+  try {
+    const stat = await fs.lstat(pluginDir);
+    if (stat.isSymbolicLink()) {
+      // Do not silently discard user plugins from an external target. Copying
+      // them safely requires resolving a user-managed tree, so fail this
+      // optional feature closed and leave normal OpenCode startup untouched.
+      throw new Error("OpenCode plugin path is a symlink; refusing to replace user plugins");
+    } else if (!stat.isDirectory()) {
+      throw new Error("OpenCode plugin path is not a directory");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw error;
+  }
+  await fs.mkdir(pluginDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(pluginDir, 0o700);
+  if ((await fs.readdir(pluginDir)).length > 0) {
+    throw new Error("OpenCode plugin hooks may already define provider fetch behavior");
+  }
+}
+
+const DEFAULT_OPEN_CODE_MODEL_TIMEOUT_MS = 300_000;
+const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
+const MAX_OPEN_CODE_TIMEOUT_RETRIES = 2;
+
+function configuredModelRef(raw: unknown): { provider: string; model: string } | null {
+  if (typeof raw !== "string") return null;
+  const separator = raw.indexOf("/");
+  if (separator <= 0 || separator === raw.length - 1) return null;
+  return { provider: raw.slice(0, separator).trim(), model: raw.slice(separator + 1).trim() };
+}
+
+function parseConfigContent(raw: unknown): Record<string, unknown> | null {
+  if (typeof raw !== "string" || raw.trim().length === 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isPlainObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveConfiguredSecret(raw: unknown, env: Record<string, string>): string | null {
+  if (typeof raw !== "string" || raw.trim().length === 0) return null;
+  const resolved = expandEnvPlaceholders(raw, (name) => env[name] ?? process.env[name]);
+  if (typeof resolved !== "string" || resolved.trim().length === 0 || /\{env:[A-Za-z_][A-Za-z0-9_]*\}/.test(resolved)) {
+    return null;
+  }
+  return resolved;
+}
+
+function buildOpenCodeTimeoutPlugin(providerName: string, targetModels: string[], timeoutMs: number, retryBudget: number): string {
+  const providerLiteral = JSON.stringify(providerName);
+  const targetModelsLiteral = JSON.stringify(targetModels);
+  const timeoutLiteral = JSON.stringify(timeoutMs);
+  const retryBudgetLiteral = JSON.stringify(retryBudget);
+  return `import { randomUUID } from "node:crypto";
+
+const providerName = ${providerLiteral};
+const targetModels = new Set(${targetModelsLiteral});
+const timeoutMs = ${timeoutLiteral};
+const retryBudget = ${retryBudgetLiteral};
+const MAX_PENDING_CHARS = 1_048_576;
+const MAX_TOOL_ARGUMENT_CHARS = 1_048_576;
+export const PaperclipModelStepTimeout = async () => {
+  let dispatchCount = 0;
+  let normalizedTimeoutRetries = 0;
+  const activeFetches = new Set();
+  return {
+    auth: {
+      provider: providerName,
+      methods: [{ type: "api", label: "Configured provider" }],
+      loader: async (_getAuth, providerInfo) => {
+        const configuredFetch = providerInfo?.options?.fetch;
+        const baseFetch = typeof configuredFetch === "function" ? configuredFetch : (...args) => fetch(...args);
+        return {
+        fetch: async (url, init = {}) => {
+          const requestBody = (() => {
+            try {
+              const raw = typeof init?.body === "string" ? init.body : "";
+              return raw ? JSON.parse(raw) : null;
+            } catch { return null; }
+          })();
+          const isTargetModel = Boolean(requestBody && typeof requestBody.model === "string" && targetModels.has(requestBody.model));
+          const externalSignal = init?.signal;
+          const request = { baseline: dispatchCount, isTargetModel, timedOut: false, canNormalizeTimeout: false, sawCompleteTool: false, parserUncertain: false, overlap: false, active: true };
+          if (activeFetches.size > 0) {
+            request.overlap = true;
+            for (const active of activeFetches) active.overlap = true;
+          }
+          activeFetches.add(request);
+          const finish = () => {
+            if (!request.active) return;
+            request.active = false;
+            activeFetches.delete(request);
+          };
+          const mayRetry = () => request.timedOut
+            && !externalSignal?.aborted
+            && request.isTargetModel
+            && request.canNormalizeTimeout
+            && dispatchCount === request.baseline
+            && !request.sawCompleteTool
+            && !request.parserUncertain
+            && !request.overlap
+            && activeFetches.size === 1;
+          const mapTimeout = (error) => {
+            if (!mayRetry() || normalizedTimeoutRetries >= retryBudget) return error;
+            normalizedTimeoutRetries += 1;
+            return new Error("response timeout", { cause: error });
+          };
+
+          let response;
+          const deadlineController = new AbortController();
+          const signal = externalSignal ? AbortSignal.any([externalSignal, deadlineController.signal]) : deadlineController.signal;
+          const deadline = request.isTargetModel ? setTimeout(() => {
+            request.timedOut = true;
+            deadlineController.abort(new DOMException("OpenCode model step timed out", "TimeoutError"));
+          }, timeoutMs) : null;
+          const finishDeadline = () => { if (deadline !== null) clearTimeout(deadline); };
+          try {
+            response = await baseFetch(url, { ...init, signal });
+          } catch (error) {
+            const mappedError = mapTimeout(error);
+            finishDeadline();
+            finish();
+            throw mappedError;
+          }
+          const isSse = response.status >= 200 && response.status < 300
+            && (response.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream");
+          request.canNormalizeTimeout = isSse;
+          if (!response.body) {
+            finishDeadline();
+            finish();
+            return response;
+          }
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let pending = "";
+          const calls = new Map();
+          const inspectFrame = (frame) => {
+            const lines = frame.split(/\\r?\\n/);
+            if (lines.some((line) => line && !line.startsWith(":") && !line.startsWith("data:") && !line.startsWith("event:") && !line.startsWith("id:") && !line.startsWith("retry:"))) {
+              request.parserUncertain = true;
+              return;
+            }
+            const data = lines.filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\\n");
+            if (!data) return;
+            if (data === "[DONE]") return;
+            let event;
+            try { event = JSON.parse(data); } catch { request.parserUncertain = true; return; }
+            if (!event || typeof event !== "object" || !Array.isArray(event.choices)) {
+              request.parserUncertain = true;
+              return;
+            }
+            if (event.choices.length === 0 && (!event.usage || typeof event.usage !== "object")) request.parserUncertain = true;
+            for (const choice of event.choices ?? []) {
+              if (!choice || typeof choice !== "object") { request.parserUncertain = true; continue; }
+              if (choice.finish_reason === "function_call" || choice.delta?.function_call || choice.message?.function_call) {
+                request.parserUncertain = true;
+              }
+              if (choice.finish_reason === "tool_calls") request.sawCompleteTool = true;
+              if (choice.finish_reason !== null && choice.finish_reason !== undefined && !["stop", "length", "content_filter", "tool_calls"].includes(choice.finish_reason)) request.parserUncertain = true;
+              const toolCalls = choice.delta?.tool_calls ?? choice.message?.tool_calls ?? [];
+              if (!Array.isArray(toolCalls)) { request.parserUncertain = true; continue; }
+              for (const part of toolCalls) {
+                if (!part || typeof part !== "object") { request.parserUncertain = true; continue; }
+                const index = Number.isInteger(part.index) ? part.index : 0;
+                const call = calls.get(index) ?? { id: "", name: "", arguments: "" };
+                if (typeof part.id === "string") call.id = (call.id + part.id).slice(0, 512);
+                const fn = part.function ?? {};
+                if (typeof part.type === "string" && part.type !== "function") request.parserUncertain = true;
+                if (typeof fn.name === "string") call.name = (call.name + fn.name).slice(0, 512);
+                if (typeof fn.arguments === "string") {
+                  if (call.arguments.length + fn.arguments.length > MAX_TOOL_ARGUMENT_CHARS) request.parserUncertain = true;
+                  else call.arguments += fn.arguments;
+                }
+                calls.set(index, call);
+                if (call.id && call.name && call.arguments.length > 0) {
+                  try { JSON.parse(call.arguments); request.sawCompleteTool = true; } catch {
+                    // Incomplete arguments are expected while streaming, but
+                    // parser errors cannot prove that a complete call is absent.
+                    request.parserUncertain = true;
+                  }
+                }
+              }
+            }
+          };
+          const inspectChunk = (bytes, final = false) => {
+            pending += decoder.decode(bytes, { stream: !final });
+            if (pending.length > MAX_PENDING_CHARS) {
+              request.parserUncertain = true;
+              pending = "";
+              return;
+            }
+            const frames = pending.split(/\\r?\\n\\r?\\n/);
+            pending = frames.pop() ?? "";
+            for (const frame of frames) inspectFrame(frame);
+            if (final && pending.trim()) inspectFrame(pending);
+          };
+          const body = new ReadableStream({
+            async pull(controller) {
+              try {
+                const item = await reader.read();
+                if (item.done) {
+                  if (isSse) inspectChunk(new Uint8Array(), true);
+                  finishDeadline();
+                  finish();
+                  controller.close();
+                } else {
+                  if (isSse) inspectChunk(item.value);
+                  controller.enqueue(item.value);
+                }
+              } catch (error) {
+                // A complete call may arrive in the last chunk without the
+                // normal blank-line delimiter. Parse buffered bytes before
+                // deciding whether retrying the model step is safe.
+                if (request.timedOut && isSse) inspectChunk(new Uint8Array(), true);
+                const mappedError = mapTimeout(error);
+                finishDeadline();
+                finish();
+                controller.error(mappedError);
+              }
+            },
+            async cancel(reason) {
+              try { await reader.cancel(reason); } finally { finishDeadline(); finish(); }
+            },
+          });
+          return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+        },
+      };
+      },
+    },
+    "tool.execute.before": async () => { dispatchCount += 1; },
+  };
+};
+`;
+}
+
 export async function prepareOpenCodeRuntimeConfig(input: {
   env: Record<string, string>;
   config: Record<string, unknown>;
@@ -112,7 +364,8 @@ export async function prepareOpenCodeRuntimeConfig(input: {
 }): Promise<PreparedOpenCodeRuntimeConfig> {
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
   const runtimeMcpServers = input.runtimeMcp ?? [];
-  if (!skipPermissions && runtimeMcpServers.length === 0) {
+  const selectedModel = configuredModelRef(input.config.model);
+  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || input.targetIsRemote)) {
     return {
       env: input.env,
       notes: [],
@@ -160,6 +413,8 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     await fs.chmod(runtimeConfigDir, 0o700);
 
     const existingConfig = await readJsonObject(runtimeConfigPath);
+    const envConfigContentRaw = input.env.OPENCODE_CONFIG_CONTENT ?? process.env.OPENCODE_CONFIG_CONTENT;
+    const envConfigContent = parseConfigContent(envConfigContentRaw);
     const notes = skipPermissions
       ? ["Injected runtime OpenCode config with permission=allow for all tools and connections."]
       : [];
@@ -196,7 +451,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     // An empty entry deep-merges with catalog metadata, so this is a no-op for models
     // the catalog already knows, and we never clobber an explicit definition from the
     // user config or PAPERCLIP_OPENCODE_PROVIDERS.
-    const configuredModel = skipPermissions ? parseConfiguredModelRef(input.config.model) : null;
+    const configuredModel = skipPermissions ? selectedModel : null;
     if (configuredModel) {
       const providerEntry = isPlainObject(nextProvider[configuredModel.provider])
         ? { ...(nextProvider[configuredModel.provider] as Record<string, unknown>) }
@@ -218,6 +473,102 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     if (skipPermissions) nextConfig.permission = "allow";
     if (skipPermissions && Object.keys(nextProvider).length > 0) {
       nextConfig.provider = nextProvider;
+    }
+
+    let timeoutPluginInstalled = false;
+    let timeoutAuthContent: string | undefined;
+    if (!input.targetIsRemote && selectedModel) {
+      const fileProvider = isPlainObject(nextProvider[selectedModel.provider])
+        ? nextProvider[selectedModel.provider] as Record<string, unknown>
+        : {};
+      const envProviders = isPlainObject(envConfigContent?.provider) ? envConfigContent.provider : {};
+      const envProvider = isPlainObject(envProviders[selectedModel.provider])
+        ? envProviders[selectedModel.provider] as Record<string, unknown>
+        : {};
+      const effectiveProvider = { ...fileProvider, ...envProvider };
+      const fileOptions = isPlainObject(fileProvider.options) ? fileProvider.options : {};
+      const envOptions = isPlainObject(envProvider.options) ? envProvider.options : {};
+      const effectiveOptions = { ...fileOptions, ...envOptions };
+      const modelConfig: Record<string, unknown> = isPlainObject(effectiveProvider.models) && isPlainObject(effectiveProvider.models[selectedModel.model])
+        ? effectiveProvider.models[selectedModel.model] as Record<string, unknown>
+        : {};
+      const modelOptions = isPlainObject(modelConfig.options) ? modelConfig.options : {};
+      const timeoutValue = Object.hasOwn(modelOptions, "timeout") ? modelOptions.timeout : effectiveOptions.timeout;
+      const maxRetriesValue = Object.hasOwn(modelOptions, "maxRetries") ? modelOptions.maxRetries : effectiveOptions.maxRetries;
+      const retryBudget = maxRetriesValue === false || maxRetriesValue === 0
+        ? 0
+        : typeof maxRetriesValue === "number" && Number.isFinite(maxRetriesValue)
+          ? Math.min(MAX_OPEN_CODE_TIMEOUT_RETRIES, Math.max(0, Math.floor(maxRetriesValue)))
+          : MAX_OPEN_CODE_TIMEOUT_RETRIES;
+      const hasTimeoutOptOut = timeoutValue === false || timeoutValue === 0;
+      const timeoutMs = typeof timeoutValue === "number" && Number.isFinite(timeoutValue) && timeoutValue > 0
+        ? timeoutValue
+        : DEFAULT_OPEN_CODE_MODEL_TIMEOUT_MS;
+      const timeoutSupported = timeoutMs <= MAX_NODE_TIMEOUT_MS;
+      const compatibleProvider = effectiveProvider.npm === "@ai-sdk/openai-compatible";
+
+      if (compatibleProvider && !hasTimeoutOptOut && !timeoutSupported) {
+        notes.push(
+          `OpenCode model-step timeout recovery was not enabled for provider ${selectedModel.provider}: the configured timeout exceeds the supported Node.js timer range.`,
+        );
+      } else if (compatibleProvider && !hasTimeoutOptOut) {
+        const providerKey = resolveConfiguredSecret(effectiveOptions.apiKey, input.env);
+        const sourceAuthPath = path.join(resolveXdgDataHome(input.env), "opencode", "auth.json");
+        const sourceAuth = await readJsonObject(sourceAuthPath);
+        const suppliedAuth = parseConfigContent(input.env.OPENCODE_AUTH_CONTENT ?? process.env.OPENCODE_AUTH_CONTENT);
+        const storedProviderAuth = suppliedAuth?.[selectedModel.provider] ?? sourceAuth[selectedModel.provider];
+        const authEntry = providerKey
+          ? { type: "api", key: providerKey }
+          : isStaticApiAuth(storedProviderAuth) ? storedProviderAuth : null;
+
+        if (!authEntry) {
+          notes.push(
+            `OpenCode model-step timeout recovery was not enabled for provider ${selectedModel.provider}: no usable provider credential was available in the isolated runtime.`,
+          );
+        } else {
+          let pluginPath: string | null = null;
+          try {
+            const configuredPlugins = [existingConfig.plugin, envConfigContent?.plugin].some(
+              (value) => Array.isArray(value) && value.length > 0,
+            );
+            if (configuredPlugins) {
+              throw new Error("Configured OpenCode plugins may already define provider fetch behavior");
+            }
+            const pluginDir = path.join(runtimeConfigDir, "plugins");
+            await ensurePrivatePluginDirectory(pluginDir);
+            pluginPath = path.join(pluginDir, `paperclip-model-timeout-${randomUUID()}.js`);
+            const targetModelIds = [...new Set([
+              selectedModel.model,
+              ...(typeof modelConfig.id === "string" ? [modelConfig.id] : []),
+              ...(isPlainObject(modelConfig.api) && typeof modelConfig.api.id === "string" ? [modelConfig.api.id] : []),
+            ])];
+            await fs.writeFile(pluginPath, buildOpenCodeTimeoutPlugin(selectedModel.provider, targetModelIds, timeoutMs, retryBudget), {
+              encoding: "utf8",
+              mode: 0o600,
+              flag: "wx",
+            });
+            await fs.chmod(pluginPath, 0o600);
+
+            // Auth.get() in OpenCode 1.18.35 reads OPENCODE_AUTH_CONTENT before
+            // the normal data home. Keep the existing data home intact so
+            // sessions/state remain visible. Preserve valid auth entries and
+            // replace only the selected provider's entry for this run.
+            const authContent = isPlainObject(suppliedAuth) ? suppliedAuth : sourceAuth;
+            const effectiveAuth = Object.fromEntries(
+              Object.entries(authContent).filter(([, value]) => isValidStoredAuth(value)),
+            );
+            effectiveAuth[selectedModel.provider] = authEntry;
+            timeoutAuthContent = JSON.stringify(effectiveAuth);
+            timeoutPluginInstalled = true;
+            notes.push(`Enabled a bounded, run-scoped OpenCode model-step timeout for model ${selectedModel.provider}/${selectedModel.model}.`);
+          } catch (error) {
+            if (pluginPath) await fs.rm(pluginPath, { force: true }).catch(() => undefined);
+            notes.push(
+              `OpenCode model-step timeout recovery was not enabled for provider ${selectedModel.provider}: ${error instanceof Error && error.message.includes("symlink") ? "the plugins directory is a symlink" : error instanceof Error && error.message.toLowerCase().includes("plugin") ? "existing plugins prevent safe fetch-hook composition" : "private runtime setup failed"}.`,
+            );
+          }
+        }
+      }
     }
 
     // Pin OpenCode's auxiliary "small" model (used for session-title generation and
@@ -278,11 +629,13 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     await fs.chmod(temporaryConfigPath, 0o600);
     await fs.rename(temporaryConfigPath, runtimeConfigPath);
 
-    return {
-      env: {
+    const preparedEnv = {
         ...input.env,
         XDG_CONFIG_HOME: runtimeConfigHome,
-      },
+        ...(timeoutPluginInstalled && timeoutAuthContent ? { OPENCODE_AUTH_CONTENT: timeoutAuthContent } : {}),
+      };
+    return {
+      env: preparedEnv,
       notes,
       cleanup: async () => {
         await fs.rm(runtimeConfigHome, { recursive: true, force: true });

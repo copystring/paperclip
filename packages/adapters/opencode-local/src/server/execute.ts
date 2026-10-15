@@ -446,7 +446,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       timeoutSec,
     });
     const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(command, executionTarget, cwd, runtimeEnv);
-    let loggedEnv = buildInvocationEnvForLogs(preparedRuntimeConfig.env, {
+    const loggableRuntimeEnv = { ...preparedRuntimeConfig.env };
+    // These JSON env values can contain provider API keys nested below otherwise
+    // innocuous variable names. Never copy them into invocation metadata.
+    delete loggableRuntimeEnv.OPENCODE_CONFIG_CONTENT;
+    delete loggableRuntimeEnv.PAPERCLIP_OPENCODE_PROVIDERS;
+    delete loggableRuntimeEnv.OPENCODE_AUTH_CONTENT;
+    let loggedEnv = buildInvocationEnvForLogs(loggableRuntimeEnv, {
       runtimeEnv,
       includeRuntimeKeys: ["HOME"],
       resolvedCommand,
@@ -593,7 +599,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
       if (paperclipBridge) {
         Object.assign(preparedRuntimeConfig.env, paperclipBridge.env);
-        loggedEnv = buildInvocationEnvForLogs(preparedRuntimeConfig.env, {
+        const sanitizedRuntimeEnv = { ...preparedRuntimeConfig.env };
+        delete sanitizedRuntimeEnv.OPENCODE_CONFIG_CONTENT;
+        delete sanitizedRuntimeEnv.PAPERCLIP_OPENCODE_PROVIDERS;
+        delete sanitizedRuntimeEnv.OPENCODE_AUTH_CONTENT;
+        loggedEnv = buildInvocationEnvForLogs(sanitizedRuntimeEnv, {
           runtimeEnv: Object.fromEntries(
             Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
               (entry): entry is [string, string] => typeof entry[1] === "string",
