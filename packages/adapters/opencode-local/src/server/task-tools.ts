@@ -26,7 +26,7 @@ function page(body, file, digest, offset) {
   return { file, sha256: digest, offset, nextOffset: end, totalCharacters: body.length,
     complete: end === body.length, body: body.slice(offset, end) };
 }
-async function api(route, method = 'GET', body) {
+async function api(route, method = 'GET', body, optional = false) {
   const base = process.env.PAPERCLIP_API_URL?.replace(/\/$/, '').replace(/\/api$/, '');
   requireValue(base && process.env.PAPERCLIP_API_KEY && process.env.PAPERCLIP_RUN_ID, 'Missing run-scoped Paperclip API environment.');
   const response = await fetch(base + '/api' + route, { method, redirect: 'error', signal: AbortSignal.timeout(20000),
@@ -34,12 +34,80 @@ async function api(route, method = 'GET', body) {
       'X-Paperclip-Run-Id': process.env.PAPERCLIP_RUN_ID, 'Content-Type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   // Do not print arbitrary response bodies, which can contain private metadata.
-  requireValue(response.status === 200, method + ' ' + route + ' returned HTTP ' + response.status + '; not confirmed.');
+  if (optional && method === 'GET' && response.status === 404) return null;
+  requireValue(response.status === 200 || (method === 'PUT' && response.status === 201), method + ' ' + route + ' returned HTTP ' + response.status + '; not confirmed.');
   const data = await response.json();
   requireValue(object(data), method + ' returned an invalid JSON object.');
   return data;
 }
+async function currentTask() {
+  const issue = process.env.PAPERCLIP_TASK_ID;
+  const agent = process.env.PAPERCLIP_AGENT_ID;
+  requireValue(issue && agent, 'Operation requires the current task and agent.');
+  const route = '/issues/' + encodeURIComponent(issue);
+  const task = await api(route);
+  requireValue(task.id === issue, 'Task readback does not identify the current task.');
+  requireValue(task.assigneeAgentId === agent && task.assigneeUserId === null && ['todo', 'in_progress', 'in_review', 'blocked'].includes(task.status), 'Current task is not assigned to this agent or is already terminal.');
+  return { issue, agent, route, task };
+}
+async function inputFile(file, maxLength) {
+  requireValue(typeof file === 'string' && file.length > 0, 'A UTF-8 input file is required.');
+  const info = await fs.lstat(file);
+  requireValue(info.isFile() && info.size <= maxLength * 4, 'Input must be a bounded regular UTF-8 file.');
+  const value = await fs.readFile(file, 'utf8');
+  requireValue(value.trim().length > 0 && value.length <= maxLength, 'Input text is empty or too large.');
+  return value;
+}
 async function main() {
+  if (command === 'write-document') {
+    accept(['--key', '--title', '--file']);
+    const key = options['--key']?.trim().toLowerCase(), title = options['--title']?.trim();
+    requireValue(key && typeof title === 'string' && title.trim() && title.length <= 200, 'write-document requires --key, --title and --file.');
+    const body = await inputFile(options['--file'], 524288);
+    const { issue, route } = await currentTask();
+    const documentRoute = route + '/documents/' + encodeURIComponent(key);
+    const before = await api(documentRoute, 'GET', undefined, true);
+    requireValue(before === null || typeof before.latestRevisionId === 'string', 'Existing document revision missing; no write attempted.');
+    const saved = await api(documentRoute, 'PUT', { title, format: 'markdown', body, baseRevisionId: before?.latestRevisionId ?? null });
+    const revisionId = saved.latestRevisionId;
+    // A locked document may be preserved by the server under its original key
+    // while our authorized revision is created under a new key. Follow that
+    // receipt, never unlock/overwrite the original or invent a canonical key.
+    requireValue(typeof revisionId === 'string' && typeof saved.key === 'string' && saved.key && saved.issueId === issue, 'Write returned no scoped document receipt; inspect the document before another write.');
+    const after = await api(route + '/documents/' + encodeURIComponent(saved.key));
+    requireValue(after.issueId === issue && after.key === saved.key && after.body === body && after.title === title && after.format === 'markdown' && after.latestRevisionId === revisionId, 'Document readback differs; no confirmed report. Inspect current state before another write.');
+    return { confirmed: true, issueId: issue, key: saved.key, revisionId, sha256: hash(body), bytes: Buffer.byteLength(body) };
+  }
+  if (command === 'complete-task') {
+    accept(['--summary-file', '--report-key', '--report-revision']);
+    const summary = await inputFile(options['--summary-file'], 16000);
+    const { issue, agent, route, task } = await currentTask();
+    const reportKey = options['--report-key'], reportRevision = options['--report-revision'];
+    requireValue(Boolean(reportKey) === Boolean(reportRevision), 'A report reference requires both --report-key and --report-revision.');
+    if (reportKey) {
+      const report = await api(route + '/documents/' + encodeURIComponent(reportKey));
+      requireValue(report.issueId === issue && report.key === reportKey && report.latestRevisionId === reportRevision, 'Report reference or revision changed; inspect it before requesting completion.');
+    }
+    // The server owns review/approval transitions. Never patch the reviewer,
+    // execution state or policy to turn an executor request into an approval.
+    await api(route, 'PATCH', { status: 'done', comment: summary, expectedExecutionPolicy: task.executionPolicy });
+    const after = await api(route);
+    requireValue(after.id === issue, 'Completion readback does not identify the current task.');
+    const reportReceipt = reportKey ? { key: reportKey, revisionId: reportRevision } : null;
+    if (reportKey) {
+      const report = await api(route + '/documents/' + encodeURIComponent(reportKey));
+      requireValue(report.issueId === issue && report.key === reportKey && report.latestRevisionId === reportRevision, 'Report changed during completion; inspect current task state before any further write.');
+    }
+    if (after.status === 'done') return { confirmed: true, issueId: issue, outcome: 'done', taskDone: true, report: reportReceipt };
+    const state = after.executionState;
+    const participant = state?.currentParticipant;
+    const pendingReview = after.status === 'in_review' && state?.status === 'pending'
+      && ['review', 'approval'].includes(state.currentStageType)
+      && ((participant?.type === 'agent' && typeof participant.agentId === 'string' && participant.agentId && participant.agentId !== agent && after.assigneeAgentId === participant.agentId)
+        || (participant?.type === 'user' && typeof participant.userId === 'string' && participant.userId && after.assigneeUserId === participant.userId));
+    requireValue(pendingReview, 'Completion was not confirmed by task readback. Inspect current state; do not repeat the write blindly.');
+    return { confirmed: true, issueId: issue, outcome: 'handed_off', taskDone: false, pendingStage: state.currentStageType, participant, report: reportReceipt };
+  }
   if (command === 'read-document') {
     accept(['--issue-id', '--key']);
     const issue = options['--issue-id'] ?? process.env.PAPERCLIP_TASK_ID;
@@ -118,7 +186,7 @@ async function main() {
     requireValue(isDeepStrictEqual(withoutMonitor(after.executionPolicy), withoutMonitor(policy)), 'Other execution policy fields changed; not confirmed.');
     return { confirmed: true, issueId: issue, nextCheckAt: stored.nextCheckAt, timeoutAt: stored.timeoutAt, maxAttempts: stored.maxAttempts, notes: stored.notes };
   }
-  throw new Error('Use read-document, read-snapshot or set-monitor.');
+  throw new Error('Use read-document, read-snapshot, write-document, complete-task or set-monitor.');
 }
 main().then(value => process.stdout.write(JSON.stringify(value) + '\n')).catch(error => {
   process.stderr.write(JSON.stringify({ confirmed: false, error: error instanceof Error ? error.message : 'Operation failed.' }) + '\n');

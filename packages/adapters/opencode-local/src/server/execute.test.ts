@@ -229,7 +229,7 @@ describe("OpenCode local skill injection", () => {
       expect(prompt).toContain("expectedExecutionPolicy is exactly that snapshot");
       expect(prompt).toContain("X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID");
       expect(prompt).toContain("Read the issue back and verify the persisted monitor");
-      expect(prompt).toContain("Do not change task status, assignee, reviewer, or approval state.");
+      expect(prompt).toContain("Scheduling a monitor must not change task status, assignee, reviewer, or approval state");
       expect(prompt).toContain("repeated identical remote PowerShell tool call may return its prior receipt");
       expect(prompt).not.toContain("run-token-must-not-appear-in-prompt");
     },
@@ -270,6 +270,9 @@ describe("OpenCode local skill injection", () => {
         expect(prompt).toContain("Paperclip prepared task tools");
         expect(prompt).toContain("read-snapshot --file FILE --sha256 HASH --offset NEXT until complete=true");
         expect(prompt).toContain("set-monitor --at ISO_TIME");
+        expect(prompt).toContain("write-document --key KEY --title TITLE --file FILE");
+        expect(prompt).toContain("complete-task --summary-file FILE");
+        expect(prompt).toContain("outcome=handed_off with taskDone=false");
         expect(prompt).toContain("Paperclip artifact handoff for this non-native OpenCode run:");
         expect(prompt).toContain("absence of an MCP tool named for uploading files does not mean");
         expect(prompt).toContain(skillDir);
