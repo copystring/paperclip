@@ -58,13 +58,7 @@ async function inputFile(file, maxLength) {
   requireValue(value.trim().length > 0 && value.length <= maxLength, 'Input text is empty or too large.');
   return value;
 }
-async function main() {
-  if (command === 'write-document') {
-    accept(['--key', '--title', '--file']);
-    const key = options['--key']?.trim().toLowerCase(), title = options['--title']?.trim();
-    requireValue(key && typeof title === 'string' && title.trim() && title.length <= 200, 'write-document requires --key, --title and --file.');
-    const body = await inputFile(options['--file'], 524288);
-    const { issue, route } = await currentTask();
+async function saveDocument({ issue, route }, key, title, body) {
     const documentRoute = route + '/documents/' + encodeURIComponent(key);
     const before = await api(documentRoute, 'GET', undefined, true);
     requireValue(before === null || typeof before.latestRevisionId === 'string', 'Existing document revision missing; no write attempted.');
@@ -77,23 +71,39 @@ async function main() {
     const after = await api(route + '/documents/' + encodeURIComponent(saved.key));
     requireValue(after.issueId === issue && after.key === saved.key && after.body === body && after.title === title && after.format === 'markdown' && after.latestRevisionId === revisionId, 'Document readback differs; no confirmed report. Inspect current state before another write.');
     return { confirmed: true, issueId: issue, key: saved.key, revisionId, sha256: hash(body), bytes: Buffer.byteLength(body) };
+}
+async function main() {
+  if (command === 'write-document') {
+    accept(['--key', '--title', '--file']);
+    const key = options['--key']?.trim().toLowerCase(), title = options['--title']?.trim();
+    requireValue(key && typeof title === 'string' && title.trim() && title.length <= 200, 'write-document requires --key, --title and --file.');
+    const body = await inputFile(options['--file'], 524288);
+    return saveDocument(await currentTask(), key, title, body);
   }
   if (command === 'complete-task') {
     accept(['--summary-file', '--report-key', '--report-revision']);
-    const summary = await inputFile(options['--summary-file'], 16000);
-    const { issue, agent, route } = await currentTask();
-    const reportKey = options['--report-key'], reportRevision = options['--report-revision'];
+    const current = await currentTask();
+    const { issue, agent, route, task } = current;
+    let reportKey = options['--report-key'], reportRevision = options['--report-revision'];
     requireValue(Boolean(reportKey) === Boolean(reportRevision), 'A report reference requires both --report-key and --report-revision.');
     if (reportKey) {
       const report = await api(route + '/documents/' + encodeURIComponent(reportKey));
       requireValue(report.issueId === issue && report.key === reportKey && report.latestRevisionId === reportRevision, 'Report reference or revision changed; inspect it before requesting completion.');
+    } else {
+      const summary = await inputFile(options['--summary-file'], 16000);
+      const saved = await saveDocument(current, 'completion-' + process.env.PAPERCLIP_RUN_ID, 'Ergebnis der Bearbeitung', summary);
+      reportKey = saved.key; reportRevision = saved.revisionId;
     }
+    // Free-form summaries may describe a prior failed attempt. Persist them as
+    // evidence, never republish them as the current completion/status message.
+    const label = String(task.identifier ?? issue).replace(/[\[\]\\]/g, '');
+    const comment = 'Abschluss der Bearbeitung angefordert. Ergebnisbericht: [' + label + '](/' + label.split('-')[0] + '/issues/' + label + '#document-' + encodeURIComponent(reportKey) + '). Berichtsrevision: ' + reportRevision + '. Der tatsächliche Aufgabenstatus wird anschließend zurückgelesen.';
     // The server owns review/approval transitions. Never patch the reviewer,
     // execution state or policy to turn an executor request into an approval.
     // expectedExecutionPolicy is exclusively a policy-only CAS in the REST
     // contract. Completion is guarded by the authenticated run and the native
     // workflow transaction; combining that CAS with status is rejected (422).
-    await api(route, 'PATCH', { status: 'done', comment: summary });
+    await api(route, 'PATCH', { status: 'done', comment });
     const after = await api(route);
     requireValue(after.id === issue, 'Completion readback does not identify the current task.');
     const reportReceipt = reportKey ? { key: reportKey, revisionId: reportRevision } : null;

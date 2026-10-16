@@ -34,14 +34,15 @@ describe("prepared Paperclip task operations", () => {
       res.setHeader("content-type", "application/json");
       if (responseMode === "denied") { res.statusCode = 403; res.end('{"private":"PRIVATE-TEST-TOKEN"}'); return; }
       if (req.url!.startsWith("/api/issues/task/documents/")) {
+        const key=decodeURIComponent(req.url!.split('/').at(-1)!);
         if (req.method === "PUT") {
           if (responseMode === "conflict") { res.statusCode = 409; res.end("{}"); return; }
-          expect(data.baseRevisionId).toBe(document?.latestRevisionId ?? null);
-          const created = !document || responseMode === "redirect-locked";
-          document = { ...data, issueId: "task", key: responseMode === "redirect-locked" ? "report-2" : "report", latestRevisionId: "revision-2" };
+          expect(data.baseRevisionId).toBe(document?.key===key ? document.latestRevisionId : null);
+          const created = document?.key!==key || responseMode === "redirect-locked";
+          document = { ...data, issueId: "task", key: responseMode === "redirect-locked" ? "report-2" : key, latestRevisionId: "revision-2" };
           res.statusCode = created ? 201 : 200;
           if (responseMode === "doc-lost-response") { res.destroy(); return; }
-        } else if (!document) { res.statusCode = 404; res.end("{}"); return; }
+        } else if (!document || document.key!==key) { res.statusCode = 404; res.end("{}"); return; }
         res.end(JSON.stringify(responseMode === "doc-mismatch" && req.method === "GET" && document.latestRevisionId === "revision-2"
           ? { ...document, body: "concurrent change" } : document));
         return;
@@ -134,7 +135,7 @@ describe("prepared Paperclip task operations", () => {
   });
   it.each(["completion-noop","completion-wrong-owner","conflict"])("does not claim completion or retry after %s", async mode => {
     responseMode = mode;
-    const result=await run(["complete-task","--summary-file",await reportFile()]);
+    const result=await run(["complete-task","--summary-file",await reportFile(),"--report-key","report","--report-revision","revision-1"]);
     expect(result.code).not.toBe(0); expect(result.stderr).toContain('"confirmed":false');
     expect(calls.filter(x=>x.method==="PATCH")).toHaveLength(1);
   });
@@ -145,6 +146,33 @@ describe("prepared Paperclip task operations", () => {
     expect((await run(["complete-task","--summary-file",summary])).code).not.toBe(0);
     expect((await run(["write-document","--key","report","--title","Report","--file",summary])).code).not.toBe(0);
     expect(calls.every(x=>x.method==="GET")).toBe(true);
+  });
+  it("generates the completion request from verified evidence instead of a stale failure summary", async () => {
+    responseMode="completion-done";
+    const summary=await reportFile();
+    await fs.writeFile(summary,"HTTP 422. Aufgabe bleibt offen. Keine CTO-Abnahme.");
+    const result=await run(["complete-task","--summary-file",summary,"--report-key","report","--report-revision","revision-1"]);
+    expect(result.out.taskDone).toBe(true);
+    const comment=calls.find(x=>x.method==="PATCH")!.body.comment;
+    expect(comment).toContain("Abschluss der Bearbeitung angefordert");
+    expect(comment).toContain("revision-1");
+    expect(comment).not.toContain("Aufgabe bleibt offen");
+    expect(comment).not.toContain("HTTP 422");
+  });
+  it("needs no transient summary file when the confirmed report already exists", async () => {
+    responseMode="completion-done";
+    const result=await run(["complete-task","--report-key","report","--report-revision","revision-1"]);
+    expect(result.out).toMatchObject({confirmed:true,taskDone:true});
+    expect(calls.some(x=>x.method==="PUT")).toBe(false);
+  });
+  it("persists a summary-only completion as a verified result document before requesting disposition", async () => {
+    responseMode="completion-done";
+    const file=await reportFile();
+    const result=await run(["complete-task","--summary-file",file]);
+    expect(result.out).toMatchObject({confirmed:true,taskDone:true,report:{key:"completion-run",revisionId:"revision-2"}});
+    expect(document.body).toBe(await fs.readFile(file,"utf8"));
+    expect(calls.findIndex(x=>x.method==="PUT")).toBeLessThan(calls.findIndex(x=>x.method==="PATCH"));
+    expect(calls.find(x=>x.method==="PATCH")!.body.comment).toContain("#document-completion-run");
   });
   it("reads a complete immutable document snapshot through bounded pages, including overlong lines", async () => {
     let result = await run(["read-document", "--issue-id", "policy", "--key", "rules"]);
