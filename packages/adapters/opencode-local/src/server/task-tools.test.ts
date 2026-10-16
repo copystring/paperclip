@@ -14,6 +14,7 @@ describe("prepared Paperclip task operations", () => {
   let calls: Array<{ method: string; url: string; body: any }>;
   let current: any;
   let responseMode: string;
+  let document: any;
   const body = ("x".repeat(5999) + "🦖" + "ä\n".repeat(3500) + "x".repeat(9000) + "END");
   const at = "2099-01-01T00:00:00.000Z", timeout = "2099-01-01T00:10:00.000Z";
   beforeEach(async () => {
@@ -21,7 +22,8 @@ describe("prepared Paperclip task operations", () => {
     file = path.join(root, "tools.mjs");
     await fs.writeFile(file, PAPERCLIP_TASK_TOOLS_SOURCE);
     calls = []; responseMode = "ok";
-    current = { assigneeAgentId: "agent", assigneeUserId: null, status: "in_progress", monitorAttemptCount: 0,
+    document = { issueId: "task", key: "report", title: "Old report", format: "markdown", body, latestRevisionId: "revision-1" };
+    current = { id: "task", identifier: "AIW-1", assigneeAgentId: "agent", assigneeUserId: null, status: "in_progress", monitorAttemptCount: 0,
       executionPolicy: { mode: "normal", stages: [{ type: "review", participants: ["reviewer"] }], authorizationPolicy: { trustPreset: "standard", keep: true } } };
     server = http.createServer(async (req, res) => {
       let raw = ""; for await (const chunk of req) raw += chunk;
@@ -31,11 +33,36 @@ describe("prepared Paperclip task operations", () => {
       expect(req.headers["x-paperclip-run-id"]).toBe("run");
       res.setHeader("content-type", "application/json");
       if (responseMode === "denied") { res.statusCode = 403; res.end('{"private":"PRIVATE-TEST-TOKEN"}'); return; }
+      if (req.url!.startsWith("/api/issues/task/documents/")) {
+        if (req.method === "PUT") {
+          if (responseMode === "conflict") { res.statusCode = 409; res.end("{}"); return; }
+          expect(data.baseRevisionId).toBe(document?.latestRevisionId ?? null);
+          const created = !document || responseMode === "redirect-locked";
+          document = { ...data, issueId: "task", key: responseMode === "redirect-locked" ? "report-2" : "report", latestRevisionId: "revision-2" };
+          res.statusCode = created ? 201 : 200;
+          if (responseMode === "doc-lost-response") { res.destroy(); return; }
+        } else if (!document) { res.statusCode = 404; res.end("{}"); return; }
+        res.end(JSON.stringify(responseMode === "doc-mismatch" && req.method === "GET" && document.latestRevisionId === "revision-2"
+          ? { ...document, body: "concurrent change" } : document));
+        return;
+      }
       if (req.url!.includes("/documents/")) {
         res.end(JSON.stringify({ body, latestRevisionId: "revision-1" })); return;
       }
       if (req.method === "PATCH") {
         if (responseMode === "conflict") { res.statusCode = 409; res.end("{}"); return; }
+        if (data.status === "done") {
+          if (responseMode === "completion-noop") { res.end(JSON.stringify(data)); return; }
+          if (responseMode === "completion-done") current.status = "done";
+          else {
+            current.status = "in_review";
+            current.assigneeAgentId = responseMode === "completion-user" ? null : "reviewer";
+            current.assigneeUserId = responseMode === "completion-user" ? "board" : null;
+            current.executionState = { status: "pending", currentStageType: responseMode === "completion-user" ? "approval" : "review", currentParticipant:
+              responseMode === "completion-user" ? { type: "user", userId: "board" } : { type: "agent", agentId: responseMode === "completion-wrong-owner" ? "agent" : "reviewer" } };
+          }
+          res.end(JSON.stringify(current)); return;
+        }
         current.executionPolicy = data.executionPolicy;
         current.monitorNextCheckAt = data.executionPolicy.monitor.nextCheckAt;
         if (responseMode === "reordered") {
@@ -64,6 +91,58 @@ describe("prepared Paperclip task operations", () => {
     }
   }
   const monitorArgs = () => ["set-monitor", "--at", at, "--timeout-at", timeout, "--notes", "Read the actual CI result", "--max-attempts", "2"];
+  async function reportFile() {
+    const input = path.join(root, "Bericht mit Umlauten.md");
+    await fs.writeFile(input, '# Ergebnis\n\nGrüße „äöü“ → `Code`\n');
+    return input;
+  }
+  it.each([false, true])("saves and verifies a report with revision CAS (new=%s), without shell quoting or HTTP trailers", async created => {
+    if (created) document = null;
+    const input = await reportFile();
+    const result = await run(["write-document", "--key", "report", "--title", "Ergebnis", "--file", input]);
+    expect(result.code).toBe(0); expect(result.out).toMatchObject({ confirmed: true, key: "report", revisionId: "revision-2" });
+    expect(document.body).toBe(await fs.readFile(input, "utf8"));
+    expect(calls.map(x=>x.method)).toEqual(["GET","GET","PUT","GET"]);
+    expect(calls.every(x=>!x.url.includes("/api/api/"))).toBe(true);
+    expect(result.stderr + JSON.stringify(result.out)).not.toContain("PRIVATE-TEST-TOKEN");
+  });
+  it("follows the actual document key when the server preserves a locked original", async () => {
+    responseMode = "redirect-locked";
+    const result = await run(["write-document","--key","report","--title","Ergebnis","--file",await reportFile()]);
+    expect(result.out).toMatchObject({confirmed:true,key:"report-2",revisionId:"revision-2"});
+    expect(calls.at(-1)?.url).toBe("/api/issues/task/documents/report-2");
+  });
+  it.each(["conflict","doc-mismatch","denied","doc-lost-response"])("does not retry or confirm report writes after %s", async mode => {
+    responseMode = mode;
+    const result=await run(["write-document","--key","report","--title","Ergebnis","--file",await reportFile()]);
+    expect(result.code).not.toBe(0); expect(result.stderr).toContain('"confirmed":false');
+    expect(calls.filter(x=>x.method==="PUT").length).toBeLessThanOrEqual(1);
+    expect(result.stderr).not.toContain("PRIVATE-TEST-TOKEN");
+  });
+  it.each(["completion-done","completion-review","completion-user"])("reports the authoritative disposition after %s without bypassing review", async mode => {
+    responseMode = mode;
+    const result=await run(["complete-task","--summary-file",await reportFile(),"--report-key","report","--report-revision","revision-1"]);
+    expect(result.code).toBe(0);
+    expect(result.out).toMatchObject({confirmed:true,taskDone:mode==="completion-done",outcome:mode==="completion-done"?"done":"handed_off"});
+    const writes=calls.filter(x=>x.method==="PATCH");
+    expect(writes).toHaveLength(1);
+    expect(Object.keys(writes[0].body).sort()).toEqual(["comment","expectedExecutionPolicy","status"]);
+    expect(calls.at(-1)?.method).toBe("GET");
+  });
+  it.each(["completion-noop","completion-wrong-owner","conflict"])("does not claim completion or retry after %s", async mode => {
+    responseMode = mode;
+    const result=await run(["complete-task","--summary-file",await reportFile()]);
+    expect(result.code).not.toBe(0); expect(result.stderr).toContain('"confirmed":false');
+    expect(calls.filter(x=>x.method==="PATCH")).toHaveLength(1);
+  });
+  it("does not request completion for a stale report revision or another assignee", async () => {
+    const summary=await reportFile();
+    expect((await run(["complete-task","--summary-file",summary,"--report-key","report","--report-revision","stale"])).code).not.toBe(0);
+    current.assigneeAgentId="other";
+    expect((await run(["complete-task","--summary-file",summary])).code).not.toBe(0);
+    expect((await run(["write-document","--key","report","--title","Report","--file",summary])).code).not.toBe(0);
+    expect(calls.every(x=>x.method==="GET")).toBe(true);
+  });
   it("reads a complete immutable document snapshot through bounded pages, including overlong lines", async () => {
     let result = await run(["read-document", "--issue-id", "policy", "--key", "rules"]);
     expect(result.code).toBe(0); expect(result.out.complete).toBe(false); expect(result.out.revisionId).toBe("revision-1");
