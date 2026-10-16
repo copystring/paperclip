@@ -52,6 +52,9 @@ describe("prepared Paperclip task operations", () => {
       if (req.method === "PATCH") {
         if (responseMode === "conflict") { res.statusCode = 409; res.end("{}"); return; }
         if (data.status === "done") {
+          // Matches the real issues route: a policy CAS is not permitted on
+          // completion/status writes, even when the supplied policy is null.
+          if (Object.hasOwn(data,"expectedExecutionPolicy")) { res.statusCode=422; res.end("{}"); return; }
           if (responseMode === "completion-noop") { res.end(JSON.stringify(data)); return; }
           if (responseMode === "completion-done") current.status = "done";
           else {
@@ -126,7 +129,7 @@ describe("prepared Paperclip task operations", () => {
     expect(result.out).toMatchObject({confirmed:true,taskDone:mode==="completion-done",outcome:mode==="completion-done"?"done":"handed_off"});
     const writes=calls.filter(x=>x.method==="PATCH");
     expect(writes).toHaveLength(1);
-    expect(Object.keys(writes[0].body).sort()).toEqual(["comment","expectedExecutionPolicy","status"]);
+    expect(Object.keys(writes[0].body).sort()).toEqual(["comment","status"]);
     expect(calls.at(-1)?.method).toBe("GET");
   });
   it.each(["completion-noop","completion-wrong-owner","conflict"])("does not claim completion or retry after %s", async mode => {

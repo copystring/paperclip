@@ -81,7 +81,7 @@ async function main() {
   if (command === 'complete-task') {
     accept(['--summary-file', '--report-key', '--report-revision']);
     const summary = await inputFile(options['--summary-file'], 16000);
-    const { issue, agent, route, task } = await currentTask();
+    const { issue, agent, route } = await currentTask();
     const reportKey = options['--report-key'], reportRevision = options['--report-revision'];
     requireValue(Boolean(reportKey) === Boolean(reportRevision), 'A report reference requires both --report-key and --report-revision.');
     if (reportKey) {
@@ -90,7 +90,10 @@ async function main() {
     }
     // The server owns review/approval transitions. Never patch the reviewer,
     // execution state or policy to turn an executor request into an approval.
-    await api(route, 'PATCH', { status: 'done', comment: summary, expectedExecutionPolicy: task.executionPolicy });
+    // expectedExecutionPolicy is exclusively a policy-only CAS in the REST
+    // contract. Completion is guarded by the authenticated run and the native
+    // workflow transaction; combining that CAS with status is rejected (422).
+    await api(route, 'PATCH', { status: 'done', comment: summary });
     const after = await api(route);
     requireValue(after.id === issue, 'Completion readback does not identify the current task.');
     const reportReceipt = reportKey ? { key: reportKey, revisionId: reportRevision } : null;
