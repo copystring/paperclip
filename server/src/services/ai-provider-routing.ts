@@ -10,6 +10,7 @@ export function managedProviderRouting(
   harness: string,
   credential: string,
   model: string,
+  imageInput?: boolean,
 ) {
   const env: Record<string, string> = {};
   const config: Record<string, unknown> = {};
@@ -55,7 +56,9 @@ export function managedProviderRouting(
             ? { npm: "@ai-sdk/openai-compatible", name: "Paperclip connection" }
             : {}),
           options: { baseURL: baseUrl, apiKey: credential },
-          models: id ? { [id]: { name: id } } : {},
+          models: id ? { [id]: { name: id, ...(imageInput === undefined ? {} : {
+            modalities: { input: imageInput ? ["text", "image"] : ["text"], output: ["text"] },
+          }) } } : {},
         },
       },
       enabled_providers: [provider],
