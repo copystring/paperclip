@@ -145,7 +145,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ steps.dependency_cache.outputs.pnpm_store }}
-          key: canary-pnpm-${{ runner.os }}-pnpm-9.15.4-${{ steps.dependency_cache.outputs.pnpm_lock_sha }}
+          key: canary-pnpm-${{ runner.os }}-${{ runner.arch }}-pnpm-9.15.4-${{ steps.dependency_cache.outputs.pnpm_lock_sha }}
       - name: Select prepared Canary Runner Rust toolchain
         if: matrix.native_runner_preflight
         working-directory: ${{ runner.temp }}/paperclip-source/packages/paperclip-runner
@@ -179,9 +179,136 @@ jobs:
           overwrite: true
           if-no-files-found: error
 
+  runner-artifacts:
+    needs: assemble
+    if: needs.assemble.outputs.needed == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-24.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: darwin-arm64
+            runner: macos-15
+          - target: darwin-x64
+            runner: macos-15-intel
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: canary-prepared-source
+          path: ${{ runner.temp }}/prepared
+      - name: Verify and extract the prepared source
+        env:
+          EXPECTED_SOURCE_SHA256: ${{ needs.assemble.outputs.source_sha256 }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, pathlib
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'prepared/canary-source.tgz'
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == os.environ['EXPECTED_SOURCE_SHA256'], 'Prepared source digest mismatch'
+          PY
+          tar -xzf "$RUNNER_TEMP/prepared/canary-source.tgz" -C "$RUNNER_TEMP"
+      - name: Fingerprint prepared dependency inputs
+        id: dependency_cache
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, pathlib, subprocess
+          source = pathlib.Path(os.environ['RUNNER_TEMP']) / 'paperclip-source'
+          lock = (source / 'pnpm-lock.yaml').read_bytes()
+          cargo_lock = (source / 'packages/paperclip-runner/runner/Cargo.lock').read_bytes()
+          toolchain = (source / 'packages/paperclip-runner/rust-toolchain.toml').read_bytes()
+          store = subprocess.check_output(['pnpm', 'store', 'path', '--silent'], cwd=source, text=True).strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('pnpm_store=' + store + '\n')
+              output.write('pnpm_lock_sha=' + hashlib.sha256(lock).hexdigest() + '\n')
+              output.write('rust_inputs_sha=' + hashlib.sha256(cargo_lock + b'\0' + toolchain).hexdigest() + '\n')
+          PY
+      - name: Restore prepared Canary pnpm store
+        id: pnpm_cache
+        if: github.repository == 'copystring/paperclip' && github.ref == 'refs/heads/master' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ steps.dependency_cache.outputs.pnpm_store }}
+          key: canary-pnpm-${{ runner.os }}-${{ runner.arch }}-pnpm-9.15.4-${{ steps.dependency_cache.outputs.pnpm_lock_sha }}
+      - name: Select prepared Canary Runner Rust toolchain
+        working-directory: ${{ runner.temp }}/paperclip-source/packages/paperclip-runner
+        run: |
+          set -euo pipefail
+          rustup show
+          toolchain="$(rustup show active-toolchain | awk '{print $1}')"
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+      - name: Restore prepared Canary Runner dependency artifacts
+        if: github.repository == 'copystring/paperclip' && github.ref == 'refs/heads/master' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: ${{ runner.temp }}/paperclip-source/packages/paperclip-runner/runner -> target
+          shared-key: canary-runner-${{ matrix.target }}-${{ steps.dependency_cache.outputs.rust_inputs_sha }}
+          cache-workspace-crates: false
+          cache-bin: false
+          cache-on-failure: false
+          save-if: ${{ github.repository == 'copystring/paperclip' && github.ref == 'refs/heads/master' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') }}
+      - name: Install frozen candidate dependencies
+        working-directory: ${{ runner.temp }}/paperclip-source
+        run: pnpm install --frozen-lockfile
+      - name: Build patched-source Runner TypeScript and native daemon
+        working-directory: ${{ runner.temp }}/paperclip-source
+        env:
+          RUNNER_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          test "$source_sha" = "$(python3 -c 'import json,os,pathlib; print(json.loads((pathlib.Path(os.environ["RUNNER_TEMP"])/"paperclip-output/provenance.json").read_text())["patchCommit"])')"
+          pnpm --filter @paperclipai/paperclip-runner build:typescript
+          pnpm --filter @paperclipai/paperclip-runner build:binary
+          mkdir -p "$RUNNER_TEMP/runner-release/$RUNNER_TARGET"
+          node packages/paperclip-runner/scripts/stage-release-runner-binaries.mjs record "$source_sha" "$RUNNER_TARGET" packages/paperclip-runner/dist/bin/paperclip-runnerd "$RUNNER_TEMP/runner-release/$RUNNER_TARGET"
+          test -z "$(git status --porcelain)"
+      - name: Build patched-source Linux x64 remote provider pack
+        if: matrix.target == 'linux-x64'
+        working-directory: ${{ runner.temp }}/paperclip-source
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/provider-pack-output"
+          pnpm --filter @paperclipai/paperclip-runner build:provider-pack -- "$RUNNER_TEMP/provider-pack-output"
+          test -f "$RUNNER_TEMP/provider-pack-output/provider-pack.json"
+          test -z "$(git status --porcelain)"
+      - name: Retain source-bound native daemon receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: canary-runner-${{ matrix.target }}
+          path: ${{ runner.temp }}/runner-release
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+      - name: Retain patched-source Linux x64 provider pack
+        if: matrix.target == 'linux-x64'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: canary-provider-pack
+          path: ${{ runner.temp }}/provider-pack-output/provider-pack.json
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
   build:
-    needs: [assemble, verify-tests]
-    if: needs.assemble.outputs.needed == 'true' && needs.verify-tests.result == 'success'
+    needs: [assemble, verify-tests, runner-artifacts]
+    if: needs.assemble.outputs.needed == 'true' && needs.verify-tests.result == 'success' && needs.runner-artifacts.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -236,7 +363,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ steps.dependency_cache.outputs.pnpm_store }}
-          key: canary-pnpm-${{ runner.os }}-pnpm-9.15.4-${{ steps.dependency_cache.outputs.pnpm_lock_sha }}
+          key: canary-pnpm-${{ runner.os }}-${{ runner.arch }}-pnpm-9.15.4-${{ steps.dependency_cache.outputs.pnpm_lock_sha }}
       - name: Select prepared Canary Runner Rust toolchain
         working-directory: ${{ runner.temp }}/paperclip-source/packages/paperclip-runner
         run: |
@@ -259,10 +386,21 @@ jobs:
           pattern: canary-test-*
           path: ${{ runner.temp }}/paperclip-test-receipts
           merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: canary-runner-*
+          path: ${{ runner.temp }}/paperclip-runner-artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: canary-provider-pack
+          path: ${{ runner.temp }}/paperclip-provider-pack
       - name: Verify every test proof and build runtime packages
         run: >-
           python3 ops/canary-train/build.py build
           --test-receipts "$RUNNER_TEMP/paperclip-test-receipts"
+          --runner-artifacts "$RUNNER_TEMP/paperclip-runner-artifacts"
+          --provider-pack "$RUNNER_TEMP/paperclip-provider-pack/provider-pack.json"
           --workspace "$RUNNER_TEMP/paperclip-source" --output "$RUNNER_TEMP/paperclip-output"
       - name: Package verified runtime output
         run: >-
@@ -273,7 +411,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ steps.dependency_cache.outputs.pnpm_store }}
-          key: canary-pnpm-${{ runner.os }}-pnpm-9.15.4-${{ steps.dependency_cache.outputs.pnpm_lock_sha }}
+          key: canary-pnpm-${{ runner.os }}-${{ runner.arch }}-pnpm-9.15.4-${{ steps.dependency_cache.outputs.pnpm_lock_sha }}
       - name: Publish green candidate and maintained source branch
         env:
           GH_TOKEN: ${{ github.token }}

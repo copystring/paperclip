@@ -43,6 +43,7 @@ DEPENDENCY_FILES = {
     "pnpm-lock.yaml", "pnpm-workspace.yaml", "package-lock.json",
     "npm-shrinkwrap.json", "yarn.lock", "bun.lock", "bun.lockb", ".npmrc",
 }
+RUNNER_RELEASE_TARGETS = ("darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64")
 
 
 class TrainError(RuntimeError):
@@ -795,11 +796,137 @@ def validate_test_receipts(directory: Path, provenance: dict[str, Any], plan_pat
     return plan, [receipts[lane["id"]] for lane in plan["lanes"]]
 
 
-def build(workspace: Path, output: Path, test_receipts: Path | None = None) -> dict[str, Any]:
+def _copy_generated_tree(source: Path, destination: Path, root: Path) -> None:
+    if source.is_symlink() or not source.is_dir() or not source.resolve().is_relative_to(root.resolve()):
+        raise TrainError(f"unsafe Runner release output: {source}")
+    for item in source.rglob("*"):
+        if item.is_symlink():
+            raise TrainError(f"Runner release output contains a symlink: {item}")
+    if destination.is_symlink() or not destination.resolve().is_relative_to(root.resolve()):
+        raise TrainError(f"unsafe Runner vendor destination: {destination}")
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination)
+
+
+def validate_runner_artifact_inputs(artifact_root: Path, provider_pack: Path, source_commit: str) -> dict[str, Any]:
+    artifact_root, provider_pack = Path(artifact_root), Path(provider_pack)
+    if artifact_root.is_symlink() or provider_pack.is_symlink():
+        raise TrainError("native Runner artifact paths must not be symlinks")
+    try:
+        artifact_root = artifact_root.resolve(strict=True)
+        provider_pack = provider_pack.resolve(strict=True)
+    except OSError as exc:
+        raise TrainError("native Runner artifact or provider pack is missing") from exc
+    if not artifact_root.is_dir() or not provider_pack.is_file():
+        raise TrainError("native Runner artifact root or provider pack is missing")
+    if sorted(path.name for path in artifact_root.iterdir()) != sorted(RUNNER_RELEASE_TARGETS):
+        raise TrainError("native Runner artifacts must contain exactly the four release targets")
+    receipts = {}
+    for target in RUNNER_RELEASE_TARGETS:
+        directory = artifact_root / target
+        if directory.is_symlink() or not directory.is_dir() or sorted(path.name for path in directory.iterdir()) != ["paperclip-runnerd", "receipt.json"]:
+            raise TrainError(f"native Runner target has an incomplete artifact/receipt pair: {target}")
+        binary_path, receipt_path = directory / "paperclip-runnerd", directory / "receipt.json"
+        if binary_path.is_symlink() or receipt_path.is_symlink() or not binary_path.is_file() or not receipt_path.is_file():
+            raise TrainError(f"native Runner target contains unsafe files: {target}")
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TrainError(f"native Runner receipt is invalid: {target}") from exc
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("sourceRevision") != source_commit
+            or receipt.get("target") != target
+            or receipt.get("sha256") != "sha256:" + sha256(binary_path.read_bytes())
+            or not isinstance(receipt.get("buildMetadata"), dict)
+        ):
+            raise TrainError(f"native Runner receipt does not prove the exact patched source and daemon: {target}")
+        receipts[target] = receipt
+    try:
+        identity = json.loads(provider_pack.read_text(encoding="utf-8"))
+        payload = identity.get("payload") if isinstance(identity, dict) else None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TrainError("patched-source provider pack is invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("runnerSourceRevision") != source_commit:
+        raise TrainError("provider pack is not bound to the exact patched source")
+    return {"artifactRoot": artifact_root, "providerPack": provider_pack, "receipts": receipts}
+
+
+def assemble_runner_artifacts(workspace: Path, artifact_root: Path, provider_pack: Path, source_commit: str) -> dict[str, Any]:
+    """Use upstream's assembler and verifier to stage patched-source native assets."""
+    if not HEX40.fullmatch(source_commit):
+        raise TrainError("native Runner assets require an exact patched source commit")
+    inputs = validate_runner_artifact_inputs(artifact_root, provider_pack, source_commit)
+    artifact_root, provider_pack = inputs["artifactRoot"], inputs["providerPack"]
+    package_root = workspace / "packages/paperclip-runner"
+    pack_destination = package_root / "dist/remote-provider-packs/linux-x64/provider-pack.json"
+    if pack_destination.is_symlink() or not pack_destination.resolve().is_relative_to(workspace.resolve()):
+        raise TrainError("provider-pack output path escapes the prepared source")
+    pack_destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(provider_pack, pack_destination)
+    assembler = package_root / "scripts/stage-release-runner-binaries.mjs"
+    if not assembler.is_file():
+        raise TrainError("upstream Runner release assembler is missing")
+    run_checked(["node", str(assembler), "assemble-daemons", str(artifact_root), source_commit], workspace)
+
+    release_path = package_root / "dist/bin/release-manifest.json"
+    try:
+        release = json.loads(release_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TrainError("upstream Runner assembler did not produce a valid release manifest") from exc
+    if release.get("sourceRevision") != source_commit or set(release.get("platforms", {})) != set(RUNNER_RELEASE_TARGETS):
+        raise TrainError("upstream Runner release manifest does not bind all targets to the patched source")
+    pack_meta = release.get("remoteProviderPack")
+    if not isinstance(pack_meta, dict) or pack_meta.get("sourceRevision") != source_commit or pack_meta.get("target") != "linux-x64":
+        raise TrainError("upstream Runner release manifest does not bind the provider pack to the patched source")
+
+    vendor = workspace / "server/dist/vendor/paperclip-runner"
+    _copy_generated_tree(package_root / "dist/bin", vendor / "bin", workspace)
+    _copy_generated_tree(package_root / "dist/remote-provider-packs", vendor / "remote-provider-packs", workspace)
+    targets = {}
+    for target in RUNNER_RELEASE_TARGETS:
+        entry = release["platforms"][target]
+        expected_path = f"{target}/paperclip-runnerd"
+        if entry.get("path") != expected_path or not re.fullmatch(r"sha256:[a-f0-9]{64}", str(entry.get("sha256", ""))):
+            raise TrainError(f"upstream assembler emitted invalid target metadata for {target}")
+        binary = package_root / "dist/bin" / entry["path"]
+        if not binary.is_file() or binary.is_symlink() or "sha256:" + sha256(binary.read_bytes()) != entry["sha256"]:
+            raise TrainError(f"upstream assembler omitted the {target} daemon")
+        receipt = inputs["receipts"][target]
+        targets[target] = {
+            "path": entry["path"],
+            "sha256": entry["sha256"],
+            "receiptSha256": sha256((artifact_root / target / "receipt.json").read_bytes()),
+            "buildMetadata": receipt["buildMetadata"],
+        }
+    pack = package_root / "dist/remote-provider-packs/linux-x64/provider-pack.json"
+    if not pack.is_file() or pack.is_symlink():
+        raise TrainError("upstream Runner assembler omitted the source-matched provider pack")
+    return {
+        "sourceRevision": source_commit,
+        "targets": targets,
+        "releaseManifestSha256": sha256(release_path.read_bytes()),
+        "providerPack": {"path": "remote-provider-packs/linux-x64/provider-pack.json", "sha256": sha256(pack.read_bytes()), "target": "linux-x64"},
+    }
+
+
+def build(
+    workspace: Path,
+    output: Path,
+    test_receipts: Path | None = None,
+    runner_artifacts: Path | None = None,
+    provider_pack: Path | None = None,
+) -> dict[str, Any]:
     provenance, release_packages = load_provenance(workspace, output)
     test_evidence = None
     if test_receipts is not None:
         _, test_evidence = validate_test_receipts(test_receipts, provenance, output / "test-plan.json")
+    if (runner_artifacts is None) != (provider_pack is None):
+        raise TrainError("native Runner artifacts and provider pack must be supplied together")
+    if runner_artifacts is None or provider_pack is None:
+        raise TrainError("complete native Runner artifact receipts and patched-source provider pack are required")
+    validate_runner_artifact_inputs(runner_artifacts, provider_pack, provenance["patchCommit"])
     commands = [
         ["pnpm", "install", "--frozen-lockfile"],
         ["pnpm", "-r", "typecheck"],
@@ -815,6 +942,7 @@ def build(workspace: Path, output: Path, test_receipts: Path | None = None) -> d
     if status:
         paths = status.decode("utf-8", "replace").strip()[:4000]
         raise TrainError("release build left source changes; refusing to package dirty worktree: " + paths)
+    native_evidence = assemble_runner_artifacts(workspace, runner_artifacts, provider_pack, provenance["patchCommit"])
     runtime_trees = {
         name: sha256(canonical_json(hash_tree(path)))
         for name, path in sorted(runtime_directories(workspace, release_packages).items())
@@ -825,8 +953,9 @@ def build(workspace: Path, output: Path, test_receipts: Path | None = None) -> d
         "sourceCommit": provenance["sourceCommit"],
         "patchCommit": provenance["patchCommit"],
         "patchTree": provenance["patchTree"],
-        "quality": {"frozenInstall": True, "typecheck": True, "tests": True, "build": True, "standalonePackages": True, "serverUi": True},
+        "quality": {"frozenInstall": True, "typecheck": True, "tests": True, "build": True, "standalonePackages": True, "serverUi": True, "nativeRunnerArtifacts": True},
         "runtimeTrees": runtime_trees,
+        "nativeRunnerEvidence": native_evidence,
     }
     if test_evidence is not None:
         result["testEvidence"] = test_evidence
@@ -941,7 +1070,7 @@ def package(workspace: Path, output: Path) -> dict[str, Any]:
     if not build_path.is_file():
         raise TrainError("build.json missing; run build and pass its quality gates")
     build_result = json.loads(build_path.read_text(encoding="utf-8"))
-    required_gates = {"frozenInstall", "typecheck", "tests", "build", "standalonePackages", "serverUi"}
+    required_gates = {"frozenInstall", "typecheck", "tests", "build", "standalonePackages", "serverUi", "nativeRunnerArtifacts"}
     quality = build_result.get("quality")
     if (
         build_result.get("version") != provenance["version"]
@@ -1020,6 +1149,47 @@ def package(workspace: Path, output: Path) -> dict[str, Any]:
     }
     if "testEvidence" in build_result:
         manifest["testEvidence"] = build_result["testEvidence"]
+    native_evidence = build_result.get("nativeRunnerEvidence")
+    if (
+        not isinstance(native_evidence, dict)
+        or native_evidence.get("sourceRevision") != provenance["patchCommit"]
+        or set(native_evidence.get("targets", {})) != set(RUNNER_RELEASE_TARGETS)
+        or not isinstance(native_evidence.get("providerPack"), dict)
+    ):
+        raise TrainError("build receipt is missing complete source-bound native Runner evidence")
+    release_path = workspace / "server/dist/vendor/paperclip-runner/bin/release-manifest.json"
+    try:
+        release = json.loads(release_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TrainError("server runtime is missing the assembled Runner release manifest") from exc
+    if release.get("sourceRevision") != provenance["patchCommit"] or set(release.get("platforms", {})) != set(RUNNER_RELEASE_TARGETS):
+        raise TrainError("server runtime Runner manifest does not match the patched source")
+    for target in RUNNER_RELEASE_TARGETS:
+        evidence = native_evidence["targets"].get(target)
+        entry = release["platforms"].get(target)
+        if (
+            not isinstance(evidence, dict)
+            or not isinstance(entry, dict)
+            or evidence.get("path") != entry.get("path")
+            or evidence.get("sha256") != entry.get("sha256")
+            or not re.fullmatch(r"sha256:[a-f0-9]{64}", str(evidence.get("sha256", "")))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(evidence.get("receiptSha256", "")))
+            or not isinstance(evidence.get("buildMetadata"), dict)
+        ):
+            raise TrainError(f"native Runner receipt evidence is incomplete for {target}")
+    provider_evidence = native_evidence["providerPack"]
+    provider_path = workspace / "server/dist/vendor/paperclip-runner/remote-provider-packs/linux-x64/provider-pack.json"
+    release_pack = release.get("remoteProviderPack")
+    if (
+        provider_evidence.get("path") != "remote-provider-packs/linux-x64/provider-pack.json"
+        or provider_evidence.get("target") != "linux-x64"
+        or provider_evidence.get("sha256") != sha256(provider_path.read_bytes())
+        or not isinstance(release_pack, dict)
+        or release_pack.get("sourceRevision") != provenance["patchCommit"]
+        or release_pack.get("target") != "linux-x64"
+    ):
+        raise TrainError("provider pack evidence is missing or does not match the patched runtime")
+    manifest["nativeRunnerEvidence"] = native_evidence
     write_json(output / "manifest.json", manifest)
     return manifest
 
@@ -1037,6 +1207,8 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--lane", required=True)
         elif name == "build":
             command.add_argument("--test-receipts", type=Path)
+            command.add_argument("--runner-artifacts", type=Path, required=True)
+            command.add_argument("--provider-pack", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         workspace, output = args.workspace.resolve(), args.output.resolve()
@@ -1048,7 +1220,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "test":
             result = run_test_lane(workspace, output, args.lane)
         elif args.command == "build":
-            result = build(workspace, output, args.test_receipts.resolve() if args.test_receipts else None)
+            result = build(
+                workspace,
+                output,
+                args.test_receipts.resolve() if args.test_receipts else None,
+                args.runner_artifacts.resolve(),
+                args.provider_pack.resolve(),
+            )
         else:
             result = package(workspace, output)
         print(json.dumps(result, indent=2, ensure_ascii=False))

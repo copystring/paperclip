@@ -50,6 +50,62 @@ def manifest():
     }
 
 
+def add_runner_release_assets(candidate: Path, source_commit: str, patched_commit: str, files: dict, *, runner_package=False,
+                              omit_target=None, wrong_source=False, escaped_target=None, bad_digest=False,
+                              provider_pack=False):
+    roots = [Path("node_modules/@paperclipai/server/dist/vendor/paperclip-runner")]
+    if runner_package:
+        roots.append(Path("node_modules/@paperclipai/paperclip-runner/dist"))
+    targets = ("darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64")
+    platforms = {}
+    for target in targets:
+        if target == omit_target:
+            continue
+        data = bytearray(64)
+        if target.startswith("linux-"):
+            data[:4] = b"\x7fELF"
+            data[4:6] = b"\x02\x01"
+            data[18:20] = (62 if target.endswith("x64") else 183).to_bytes(2, "little")
+        else:
+            data[:4] = (0xFEEDFACF).to_bytes(4, "little")
+            data[4:8] = (0x01000007 if target.endswith("x64") else 0x0100000C).to_bytes(4, "little")
+        data = bytes(data)
+        relative = f"{target}/paperclip-runnerd"
+        if target == escaped_target:
+            relative = "../../outside"
+        platforms[target] = {"path": relative, "sha256": "sha256:" + digest(data)}
+        for root in roots:
+            asset = candidate / root / "bin" / target / "paperclip-runnerd"
+            asset.parent.mkdir(parents=True, exist_ok=True)
+            asset.write_bytes(data)
+            asset.chmod(0o755)
+            files[(root / "bin" / target / "paperclip-runnerd").as_posix()] = digest(data)
+
+    release = {"schema": "paperclip.runner.release-binaries.v1",
+               "sourceRevision": "0" * 40 if wrong_source else patched_commit,
+               "platforms": platforms}
+    if bad_digest and "linux-x64" in platforms:
+        platforms["linux-x64"]["sha256"] = "sha256:" + "0" * 64
+    if provider_pack:
+        payload = {"runnerSourceRevision": patched_commit, "target": {"platform": "linux", "architecture": "x64"}}
+        identity = "sha256:" + hashlib.sha256(deploy.Deployer._canonical_json(payload).encode()).hexdigest()
+        pack_bytes = json.dumps({"schema": "paperclip-runner/remote-provider-pack/v1", "payload": payload,
+                                 "digest": identity}, separators=(",", ":")).encode()
+        for root in roots:
+            pack_path = candidate / root / "remote-provider-packs/linux-x64/provider-pack.json"
+            pack_path.parent.mkdir(parents=True, exist_ok=True)
+            pack_path.write_bytes(pack_bytes)
+            files[(root / "remote-provider-packs/linux-x64/provider-pack.json").as_posix()] = digest(pack_bytes)
+        release["remoteProviderPack"] = {"target": "linux-x64", "digest": identity,
+                                         "sourceRevision": patched_commit}
+    for root in roots:
+        path = candidate / root / "bin/release-manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.dumps(release, separators=(",", ":")).encode()
+        path.write_bytes(data)
+        files[(root / "bin/release-manifest.json").as_posix()] = digest(data)
+
+
 class FakeHttp:
     def __init__(self, raw=None, json_data=None):
         self.raw = raw or {}
@@ -158,6 +214,75 @@ class ReleaseTests(unittest.TestCase):
 
 
 class CandidateTests(unittest.TestCase):
+    def runner_candidate(self, root: Path, **options):
+        candidate = root / "candidate"
+        files = {}
+        source = "a" * 40
+        patched = "b" * 40
+        add_runner_release_assets(candidate, source, patched, files, **options)
+        package_map = {"@paperclipai/server#dist": "node_modules/@paperclipai/server/dist"}
+        if options.get("runner_package"):
+            package_map["@paperclipai/paperclip-runner#dist"] = "node_modules/@paperclipai/paperclip-runner/dist"
+        return candidate, {"sourceCommit": source, "patchedCommit": patched, "files": files, "packageMap": package_map}
+
+    def test_native_runner_release_requires_all_four_verified_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate, item = self.runner_candidate(Path(tmp), omit_target="darwin-arm64")
+            with self.assertRaisesRegex(deploy.DeployError, "all four supported"):
+                deployer(Path(tmp))._verify_runner_release_assets(candidate, item)
+
+    def test_native_runner_release_rejects_wrong_binary_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate, item = self.runner_candidate(Path(tmp), bad_digest=True)
+            with self.assertRaisesRegex(deploy.DeployError, "digest or architecture"):
+                deployer(Path(tmp))._verify_runner_release_assets(candidate, item)
+
+    def test_native_runner_release_rejects_target_path_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate, item = self.runner_candidate(Path(tmp), escaped_target="linux-arm64")
+            with self.assertRaisesRegex(deploy.DeployError, "release entry is invalid"):
+                deployer(Path(tmp))._verify_runner_release_assets(candidate, item)
+
+    def test_native_runner_release_rejects_revision_not_matching_patched_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate, item = self.runner_candidate(Path(tmp), wrong_source=True)
+            with self.assertRaisesRegex(deploy.DeployError, "patched commit"):
+                deployer(Path(tmp))._verify_runner_release_assets(candidate, item)
+
+    def test_native_runner_assets_are_bound_to_patched_not_upstream_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate, item = self.runner_candidate(Path(tmp))
+            self.assertNotEqual(item["sourceCommit"], item["patchedCommit"])
+            deployer(Path(tmp))._verify_runner_release_assets(candidate, item)
+
+    def test_native_runner_release_files_must_be_in_archive_inventory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate, item = self.runner_candidate(Path(tmp))
+            item["files"].pop("node_modules/@paperclipai/server/dist/vendor/paperclip-runner/bin/linux-x64/paperclip-runnerd")
+            with self.assertRaisesRegex(deploy.DeployError, "absent from the verified payload"):
+                deployer(Path(tmp))._verify_runner_release_assets(candidate, item)
+
+    def test_runner_npm_distribution_and_provider_pack_are_verified_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate, item = self.runner_candidate(Path(tmp), runner_package=True, provider_pack=True)
+            deployer(Path(tmp))._verify_runner_release_assets(candidate, item)
+            pack_path = candidate / "node_modules/@paperclipai/paperclip-runner/dist/remote-provider-packs/linux-x64/provider-pack.json"
+            pack = json.loads(pack_path.read_text())
+            pack["digest"] = "sha256:" + "0" * 64
+            pack_path.write_text(json.dumps(pack, separators=(",", ":")))
+            item["files"]["node_modules/@paperclipai/paperclip-runner/dist/remote-provider-packs/linux-x64/provider-pack.json"] = digest(pack_path.read_bytes())
+            with self.assertRaisesRegex(deploy.DeployError, "provider-pack reference"):
+                deployer(Path(tmp))._verify_runner_release_assets(candidate, item)
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable permission bits are not reliable on Windows")
+    def test_native_linux_runner_rejects_missing_executable_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate, item = self.runner_candidate(Path(tmp))
+            binary = candidate / "node_modules/@paperclipai/server/dist/vendor/paperclip-runner/bin/linux-x64/paperclip-runnerd"
+            binary.chmod(0o644)
+            with self.assertRaisesRegex(deploy.DeployError, "mode 0755"):
+                deployer(Path(tmp))._verify_runner_release_assets(candidate, item)
+
     def test_disk_guard_defers_before_npm_or_candidate_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -240,6 +365,34 @@ class CandidateTests(unittest.TestCase):
                 deployer(Path(tmp))._extract_payload(raw.getvalue(), Path(tmp), {
                     "node_modules/@paperclipai/server/dist/index.js": digest(b"expected")
                 })
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits are not reliable on Windows")
+    def test_tar_extraction_preserves_executable_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = io.BytesIO()
+            name = "node_modules/@paperclipai/server/dist/vendor/paperclip-runner/bin/linux-x64/paperclip-runnerd"
+            data = b"runner"
+            with tarfile.open(fileobj=raw, mode="w:gz") as archive:
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                info.mode = 0o755
+                archive.addfile(info, io.BytesIO(data))
+            destination = Path(tmp) / "extracted"
+            deployer(Path(tmp))._extract_payload(raw.getvalue(), destination, {name: digest(data)})
+            self.assertEqual(os.stat(destination / name).st_mode & 0o777, 0o755)
+
+    def test_tar_rejects_special_permission_bits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = io.BytesIO()
+            name = "node_modules/@paperclipai/server/dist/index.js"
+            data = b"source"
+            with tarfile.open(fileobj=raw, mode="w:gz") as archive:
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                info.mode = 0o4755
+                archive.addfile(info, io.BytesIO(data))
+            with self.assertRaisesRegex(deploy.DeployError, "unsafe file mode"):
+                deployer(Path(tmp))._extract_payload(raw.getvalue(), Path(tmp), {name: digest(data)})
 
     def test_migration_diff_rejects_changed_or_removed_existing_migration(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -471,6 +624,7 @@ class ActivationTests(unittest.TestCase):
         d.start_drain = lambda token: "owned"
         d.verify_owned_drain = lambda token, owner: None
         d.release_drain = lambda token, owner: None
+        d._verify_runner_release_assets = lambda candidate, manifest: None
         return d
 
     def test_partial_cutover_manifest_failure_restores_link_and_install(self):
