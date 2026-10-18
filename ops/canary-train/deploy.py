@@ -1035,10 +1035,13 @@ class Deployer:
             return None
 
     def _wait_health(self, expected_version: str, expected_commit=None, timeout=90):
+        # Authenticated instances intentionally redact the version from public
+        # health. Use the same existing operator identity as the drain checks.
+        token = self.load_token()
         deadline = self.clock() + timeout
         while self.clock() < deadline:
             try:
-                data = self.api_json("/health")
+                data = self.api_json("/health", token=token)
                 if isinstance(data, dict) and data.get("status") in {"ok", "ready"}:
                     installed = self._read_install()
                     version_ok = data.get("version", data.get("serverVersion")) == expected_version
