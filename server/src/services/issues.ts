@@ -13511,7 +13511,7 @@ export function issueService(db: Db) {
       return [...mentionedIds].filter((projectId) => valid.has(projectId));
     },
 
-    getAncestors: async (issueId: string) => {
+    getAncestors: async (issueId: string, companyId?: string) => {
       const raw: Array<{
         id: string;
         identifier: string | null;
@@ -13527,7 +13527,9 @@ export function issueService(db: Db) {
       const start = await db
         .select()
         .from(issues)
-        .where(eq(issues.id, issueId))
+        .where(companyId
+          ? and(eq(issues.id, issueId), eq(issues.companyId, companyId))
+          : eq(issues.id, issueId))
         .then((r) => r[0] ?? null);
       let currentId = start?.parentId ?? null;
       while (currentId && !visited.has(currentId) && raw.length < 50) {
@@ -13546,7 +13548,9 @@ export function issueService(db: Db) {
             parentId: issues.parentId,
           })
           .from(issues)
-          .where(eq(issues.id, currentId))
+          .where(companyId
+            ? and(eq(issues.id, currentId), eq(issues.companyId, companyId))
+            : eq(issues.id, currentId))
           .then((r) => r[0] ?? null);
         if (!parent) break;
         raw.push({
