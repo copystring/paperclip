@@ -396,8 +396,8 @@ class Deployer:
             self._verify_candidate_files(staging, manifest)
             self._verify_migrations(staging, manifest)
             self._verify_runner_release_assets(staging, manifest)
-            self._apply_local_hooks(staging)
-            self._verify_local_hook_files(staging)
+            self._apply_local_hooks(staging, manifest)
+            self._verify_local_hook_files(staging, manifest)
             self._verify_registered_support_files()
             self._verify_runner_release_assets(staging, manifest)
             candidate_files = {name: hash_file(staging.joinpath(*_safe_relative(name).parts))
@@ -471,7 +471,7 @@ class Deployer:
                 item["path"]: item["sha256"] for item in manifest["migrations"]}:
             raise DeployError("Existing candidate migration inventory changed")
         self._verify_registered_support_files()
-        self._verify_local_hook_files(candidate)
+        self._verify_local_hook_files(candidate, manifest)
         self._verify_runner_release_assets(candidate, manifest)
 
     @staticmethod
@@ -734,7 +734,7 @@ class Deployer:
         if actual != expected:
             raise DeployError("Candidate database migration inventory differs from its manifest")
 
-    def _apply_local_hooks(self, candidate: Path):
+    def _apply_local_hooks(self, candidate: Path, manifest: dict):
         hooks = self.c.get("hooks", [])
         if not isinstance(hooks, list):
             raise DeployError("Local hook registry is invalid")
@@ -777,7 +777,7 @@ class Deployer:
         self._apply_instruction_policy(candidate, hooks_by_kind["communication-policy"],
                                        "plain-language:v2", ("default", "ceo"), module)
         self._apply_direct_path_policy(candidate, hooks_by_kind["direct-path-policy"])
-        self._apply_review_hook(candidate, hooks_by_kind["review-tool-access"])
+        self._apply_review_hook(candidate, hooks_by_kind["review-tool-access"], manifest)
         probe = hooks_by_kind["tool-review-probe"]
         self.command(["/usr/bin/node", "--experimental-vm-modules", probe["path"],
                       str(candidate / "node_modules/@paperclipai/server/dist"), "patched"],
@@ -832,19 +832,63 @@ class Deployer:
             raise DeployError("Pinned direct-path helper has no supported entry point")
         apply(candidate, policy_file=policy_path)
 
-    def _apply_review_hook(self, candidate: Path, hook: dict):
+    def _verify_review_bundle_registration(self, hook: dict):
         bundle = Path(hook.get("bundlePath", ""))
         manifest_hash = hook.get("bundleManifestSha256")
         script = Path(hook["path"])
-        if not bundle.is_absolute() or not script.is_file():
+        script_hash = hook.get("sha256")
+        if (not bundle.is_absolute() or bundle.is_symlink() or not bundle.is_dir() or
+                not script.is_absolute() or script.is_symlink() or not script.is_file() or
+                not isinstance(script_hash, str) or not HEX_64.fullmatch(script_hash) or
+                hash_file(script) != script_hash):
             raise DeployError("Pinned review/OpenCode preservation bundle is unavailable")
         bundle_manifest = bundle / "manifest.json"
-        if not bundle_manifest.is_file() or not isinstance(manifest_hash, str) or hash_file(bundle_manifest) != manifest_hash:
+        if (bundle_manifest.is_symlink() or not bundle_manifest.is_file() or
+                not isinstance(manifest_hash, str) or not HEX_64.fullmatch(manifest_hash) or
+                hash_file(bundle_manifest) != manifest_hash):
             raise DeployError("Review/OpenCode bundle manifest changed")
-        self.command([sys.executable, str(script), str(bundle), str(candidate)],
-                     check=True, capture_output=True, text=True, timeout=120)
 
-    def _verify_local_hook_files(self, candidate: Path):
+    @staticmethod
+    def _verify_source_replacement(hook: dict, manifest: dict):
+        replacement = hook.get("sourceReplacement")
+        if (not isinstance(replacement, dict) or set(replacement) != {"repository", "number", "head"} or
+                not isinstance(replacement.get("repository"), str) or
+                not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", replacement["repository"]) or
+                not isinstance(replacement.get("number"), int) or isinstance(replacement["number"], bool) or
+                replacement["number"] < 1 or not isinstance(replacement.get("head"), str) or
+                not HEX_40.fullmatch(replacement["head"])):
+            raise DeployError("Review-tool source replacement registration is invalid")
+        patches = manifest.get("patches")
+        if not isinstance(patches, list):
+            raise DeployError("Verified release manifest has no patch-state inventory")
+        matches = [patch for patch in patches if isinstance(patch, dict) and
+                   patch.get("repository") == replacement["repository"] and
+                   patch.get("number") == replacement["number"] and
+                   patch.get("head") == replacement["head"]]
+        if len(matches) != 1:
+            raise DeployError("Verified release does not contain the registered review-tool replacement head")
+        state = matches[0].get("state")
+        if not isinstance(state, str) or state not in {
+                "applied", "applied_three_way", "applied_integration", "already_present",
+                "already_present_integration", "already_in_release"}:
+            raise DeployError("Verified review-tool replacement patch state is not accepted")
+        if state == "already_in_release" and not (
+                isinstance(matches[0].get("mergeCommit"), str) and HEX_40.fullmatch(matches[0]["mergeCommit"])):
+            raise DeployError("Verified in-release replacement is missing its merge commit")
+
+    def _apply_review_hook(self, candidate: Path, hook: dict, manifest: dict):
+        # Keep the historical compiled bundle integrity-checked for diagnosis,
+        # but its source patch in the verified release is the sole replacement.
+        self._verify_review_bundle_registration(hook)
+        self._verify_source_replacement(hook, manifest)
+
+    def _verify_local_hook_files(self, candidate: Path, manifest: dict):
+        hooks = self.c.get("hooks", [])
+        review_hooks = [hook for hook in hooks if isinstance(hook, dict) and hook.get("kind") == "review-tool-access"]
+        if len(review_hooks) != 1:
+            raise DeployError("Review-tool source replacement hook is missing or duplicated")
+        self._verify_review_bundle_registration(review_hooks[0])
+        self._verify_source_replacement(review_hooks[0], manifest)
         # Hook applications may only modify their explicitly reviewed targets.
         for role in ("default", "ceo"):
             path = candidate / "node_modules/@paperclipai/server/dist/onboarding-assets" / role / "AGENTS.md"
@@ -1048,6 +1092,8 @@ class Deployer:
         try:
             if migration_diff.get("added") or migration_diff.get("changed") or migration_diff.get("removed"):
                 raise DeployError("Candidate database migration inventory is not identical; activation refused")
+            self._verify_registered_support_files()
+            self._verify_local_hook_files(candidate, manifest)
             self._verify_runner_release_assets(candidate, manifest)
             self.assert_no_work(token)
             owner = self.start_drain(token)
@@ -1062,6 +1108,8 @@ class Deployer:
                     active_migrations != migration_diff.get("inventory")):
                 raise DeployError("Active migration baseline changed after candidate staging")
             self.verify_owned_drain(token, owner)
+            self._verify_registered_support_files()
+            self._verify_local_hook_files(candidate, manifest)
             self._verify_runner_release_assets(candidate, manifest)
             # The symlink and install receipt are two coordinated pieces of
             # state; mark cutover before either is mutated so partial writes

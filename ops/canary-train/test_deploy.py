@@ -428,7 +428,71 @@ class CandidateTests(unittest.TestCase):
             hook.write_text("# changed")
             d = deployer(root, hooks=[{"path": str(hook), "sha256": "0" * 64, "kind": "codex-auth"}])
             with self.assertRaisesRegex(deploy.DeployError, "hook changed"):
-                d._apply_local_hooks(root)
+                d._apply_local_hooks(root, manifest())
+
+    def review_replacement_hook(self, root: Path, *, number=314, head="a" * 40):
+        bundle = root / "bundle"
+        bundle.mkdir()
+        bundle_manifest = bundle / "manifest.json"
+        bundle_manifest.write_text("{}")
+        marker = root / "compiled-hook-ran"
+        script = root / "compiled-hook.py"
+        script.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran')\n")
+        return ({"kind": "review-tool-access", "path": str(script), "sha256": digest(script.read_bytes()),
+                 "bundlePath": str(bundle), "bundleManifestSha256": digest(bundle_manifest.read_bytes()),
+                 "sourceReplacement": {"repository": "copystring/paperclip", "number": number, "head": head}}, marker)
+
+    def test_review_hook_uses_verified_source_patch_without_running_compiled_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hook, marker = self.review_replacement_hook(root)
+            item = manifest()
+            item["patches"].append({"repository": "copystring/paperclip", "number": 314,
+                                    "head": "a" * 40, "state": "applied_integration"})
+            calls = []
+            d = deployer(root, command=lambda *args, **kwargs: calls.append(args))
+            d._apply_review_hook(root, hook, item)
+            self.assertFalse(marker.exists())
+            self.assertEqual(calls, [])
+
+    def test_review_hook_source_replacement_rejects_missing_or_wrong_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hook, _ = self.review_replacement_hook(root)
+            item = manifest()
+            with self.assertRaisesRegex(deploy.DeployError, "does not contain"):
+                deployer(root)._apply_review_hook(root, hook, item)
+            item["patches"].append({"repository": "copystring/paperclip", "number": 314,
+                                    "head": "b" * 40, "state": "applied"})
+            with self.assertRaisesRegex(deploy.DeployError, "does not contain"):
+                deployer(root)._apply_review_hook(root, hook, item)
+
+    def test_review_hook_source_replacement_rejects_unaccepted_patch_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hook, _ = self.review_replacement_hook(root)
+            item = manifest()
+            item["patches"].append({"repository": "copystring/paperclip", "number": 314,
+                                    "head": "a" * 40, "state": "pending"})
+            with self.assertRaisesRegex(deploy.DeployError, "state is not accepted"):
+                deployer(root)._apply_review_hook(root, hook, item)
+
+    def test_review_hook_accepts_already_in_release_only_with_valid_merge_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hook, _ = self.review_replacement_hook(root)
+            item = manifest()
+            row = {"repository": "copystring/paperclip", "number": 314, "head": "a" * 40,
+                   "state": "already_in_release", "mergeCommit": "c" * 40}
+            item["patches"].append(row)
+            deployer(root)._apply_review_hook(root, hook, item)
+
+            for merge_commit in (None, "not-a-commit", "C" * 40):
+                row.pop("mergeCommit", None)
+                if merge_commit is not None:
+                    row["mergeCommit"] = merge_commit
+                with self.assertRaisesRegex(deploy.DeployError, "missing its merge commit"):
+                    deployer(root)._apply_review_hook(root, hook, item)
 
     def test_stage_failure_leaves_active_install_and_link_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -624,6 +688,8 @@ class ActivationTests(unittest.TestCase):
         d.start_drain = lambda token: "owned"
         d.verify_owned_drain = lambda token, owner: None
         d.release_drain = lambda token, owner: None
+        d._verify_registered_support_files = lambda: None
+        d._verify_local_hook_files = lambda candidate, manifest: None
         d._verify_runner_release_assets = lambda candidate, manifest: None
         return d
 
@@ -693,7 +759,7 @@ class ActivationTests(unittest.TestCase):
                       "protectedFiles": protected}
             (candidate / ".canary-train-owned.json").write_text(json.dumps(marker))
             d._verify_registered_support_files = lambda: None
-            d._verify_local_hook_files = lambda path: None
+            d._verify_local_hook_files = lambda path, manifest: None
             version = item["version"]
             d._npm_metadata = lambda requested: ["paperclipai", "@paperclipai/server"]
             path, migration_diff = d.stage(item, {"payload.tar.gz": {"size": 1024}})

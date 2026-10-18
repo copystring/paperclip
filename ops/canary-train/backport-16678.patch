@@ -1,0 +1,474 @@
+diff --git a/doc/connection-intents.md b/doc/connection-intents.md
+index c41e5d129..ce0c6d889 100644
+--- a/doc/connection-intents.md
++++ b/doc/connection-intents.md
+@@ -20,7 +20,7 @@ Every active heartbeat with a responsible user receives two run-bound tools:
+ - `connections_search({ query })` searches catalog names and descriptions, plus authorized configured MCP connections and indexed tool descriptions and returns `ready`, `needs_user_action`, `available`, or `unavailable` from the requesting agent's perspective.
+ - `connection_request({ service })` returns immediately when the service is already usable. Otherwise it creates or reuses a `connection_intent` and instructs the agent to finish independent work, then yield pending continuation.
+ 
+-The native Paperclip Runner advertises both tools through its server-owned tool authority even with an empty MCP assignment. It captures the current responsible identity at each call. Legacy Claude and Codex receive the tools through a managed MCP server. Local/process adapters receive `PAPERCLIP_RUNTIME_TOOLS_*` environment variables and CLI guidance. Cloud, HTTP, gateway, and external adapters receive the typed runtime descriptor in their invocation context; compatible adapters may also project it into their remote environment.
++The native Paperclip Runner advertises both tools through its server-owned tool authority even with an empty MCP assignment. It captures the current responsible identity at each call. Legacy Claude, Codex, and OpenCode receive the tools through a managed MCP server. OpenCode uses the server's bounded public name as its MCP namespace; the connection ID remains internal. The namespace stays within 22 characters so long gateway tool names remain below the 128-character tool-name limit. Other local/process adapters receive `PAPERCLIP_RUNTIME_TOOLS_*` environment variables and CLI guidance. Cloud, HTTP, gateway, and external adapters receive the typed runtime descriptor in their invocation context; compatible adapters may also project it into their remote environment.
+ 
+ Legacy delivery uses the same intent service, setup card, and fresh-session resolution wake. Environment and descriptor delivery require the receiving harness to consume them; they do not establish support in every third-party runtime. The default legacy prompt includes the canonical discovery guidance. A custom `promptTemplate` replaces that default and should retain the connection guidance if proactive discovery is desired.
+ 
+diff --git a/packages/adapters/opencode-local/src/server/execute.remote.test.ts b/packages/adapters/opencode-local/src/server/execute.remote.test.ts
+index 13335c0be..e6c590b7d 100644
+--- a/packages/adapters/opencode-local/src/server/execute.remote.test.ts
++++ b/packages/adapters/opencode-local/src/server/execute.remote.test.ts
+@@ -1,4 +1,4 @@
+-import { mkdir, mkdtemp, rm } from "node:fs/promises";
++import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+ import os from "node:os";
+ import path from "node:path";
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+@@ -165,6 +165,18 @@ describe("opencode remote execution", () => {
+     const managedRemoteWorkspace = "/remote/workspace/.paperclip-runtime/runs/run-1/workspace";
+     await mkdir(workspaceDir, { recursive: true });
+     await mkdir(alternateWorkspaceDir, { recursive: true });
++    const stagedMcpConfigs: Record<string, unknown>[] = [];
++    const syncMock = syncDirectoryToSsh as unknown as {
++      mockReset: () => void;
++      mockImplementation: (implementation: (input: { localDir: string; remoteDir: string }) => Promise<void>) => void;
++    };
++    syncMock.mockReset();
++    syncMock.mockImplementation(async (input) => {
++      if (input.remoteDir.endsWith("/xdgConfig")) {
++        const configText = await readFile(path.join(input.localDir, "opencode", "opencode.json"), "utf8");
++        stagedMcpConfigs.push(JSON.parse(configText) as Record<string, unknown>);
++      }
++    });
+ 
+     const result = await execute({
+       runId: "run-1",
+@@ -193,6 +205,14 @@ describe("opencode remote execution", () => {
+           ...(managed ? { HOME: "/var/folders/qa-managed", XDG_DATA_HOME: "/var/folders/qa-managed/data" } : {}),
+         },
+       },
++      runtimeMcp: {
++        getServers: () => [{
++          name: "Remote MCP fixture",
++          connectionId: "remote-mcp-fixture",
++          url: "https://paperclip.example/api/mcp/remote-run",
++          token: "remote-run-secret",
++        }],
++      },
+       context: {
+         paperclipWorkspace: {
+           cwd: workspaceDir,
+@@ -239,6 +259,14 @@ describe("opencode remote execution", () => {
+         remoteCwd: managedRemoteWorkspace,
+       },
+     });
++    expect(stagedMcpConfigs).toHaveLength(1);
++    expect(stagedMcpConfigs[0]?.mcp).toMatchObject({
++      Remote_MCP_fixture: {
++        url: "https://paperclip.example/api/mcp/remote-run",
++        headers: { Authorization: "Bearer remote-run-secret" },
++        oauth: false,
++      },
++    });
+     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledTimes(1);
+     expect(syncDirectoryToSsh).toHaveBeenCalledTimes(2);
+     expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
+diff --git a/packages/adapters/opencode-local/src/server/execute.test.ts b/packages/adapters/opencode-local/src/server/execute.test.ts
+index b54d5127f..b7fa8c513 100644
+--- a/packages/adapters/opencode-local/src/server/execute.test.ts
++++ b/packages/adapters/opencode-local/src/server/execute.test.ts
+@@ -286,6 +286,77 @@ describe("OpenCode local skill injection", () => {
+   });
+ });
+ 
++describe("OpenCode runtime MCP handoff", () => {
++  let configHome: string;
++
++  beforeEach(async () => {
++    configHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-mcp-handoff-"));
++    vi.stubEnv("XDG_CONFIG_HOME", configHome);
++    vi.stubEnv("OPENCODE_ALLOW_ALL_MODELS", "1");
++  });
++
++  afterEach(async () => {
++    vi.unstubAllEnvs();
++    await fs.rm(configHome, { recursive: true, force: true });
++  });
++
++  it("passes the run MCP server into OpenCode and removes its local secret config after execution", async () => {
++    const commandPath = path.join(configHome, "fake-opencode-mcp");
++    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", "utf8");
++    await fs.chmod(commandPath, 0o755);
++    const secret = "runtime-mcp-run-secret";
++    let configPath = "";
++    let configAtExecution: Record<string, unknown> | undefined;
++    const logOutput: string[] = [];
++
++    runProcessMock.mockReset();
++    runProcessMock.mockImplementation(async (...args) => {
++      const options = args[4] as { env: Record<string, string> };
++      if (args[3].includes("run")) {
++        configPath = path.join(options.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
++        configAtExecution = JSON.parse(await fs.readFile(configPath, "utf8")) as Record<string, unknown>;
++      }
++      return probeResult({ stdout: JSON.stringify({ type: "text", sessionID: "mcp-session", part: { text: "done" } }) });
++    });
++
++    const result = await execute({
++      runId: "run-mcp-handoff",
++      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
++      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
++      config: {
++        command: commandPath,
++        cwd: configHome,
++        model: "openai/gpt-5",
++        dangerouslySkipPermissions: false,
++        env: { OPENCODE_ALLOW_ALL_MODELS: "1" },
++      },
++      context: {},
++      runtimeMcp: {
++        getServers: () => [{
++          name: "PowerShell on Felix PC",
++          connectionId: "felix-pc-powershell",
++          url: "https://paperclip.example/api/mcp/run-1",
++          token: secret,
++        }],
++      },
++      onLog: async (_stream, chunk) => { logOutput.push(chunk); },
++    });
++
++    expect(result.exitCode).toBe(0);
++    expect(configAtExecution?.permission).toBeUndefined();
++    expect(configAtExecution?.mcp).toMatchObject({
++      PowerShell_on_Felix_PC: {
++        type: "remote",
++        url: "https://paperclip.example/api/mcp/run-1",
++        headers: { Authorization: `Bearer ${secret}` },
++        oauth: false,
++      },
++    });
++    expect(JSON.stringify({ result, logs: logOutput })).not.toContain(secret);
++    await expect(fs.access(configPath)).rejects.toThrow();
++  });
++});
++
+ describe("ensureRemoteOpenCodeModelConfiguredAndAvailable", () => {
+   afterEach(() => {
+     delete process.env.OPENCODE_ALLOW_ALL_MODELS;
+diff --git a/packages/adapters/opencode-local/src/server/execute.ts b/packages/adapters/opencode-local/src/server/execute.ts
+index 1a3193390..bc387a4ef 100644
+--- a/packages/adapters/opencode-local/src/server/execute.ts
++++ b/packages/adapters/opencode-local/src/server/execute.ts
+@@ -332,7 +332,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
+     env.PAPERCLIP_API_KEY = authToken;
+   }
+   const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({
+-    env, config, targetIsRemote: executionTargetIsRemote,
++    env,
++    config,
++    targetIsRemote: executionTargetIsRemote,
++    runtimeMcpServers: ctx.runtimeMcp?.getServers() ?? [],
+   });
+   const localRuntimeConfigHome = preparedRuntimeConfig.runtimeConfigHome ?? "";
+   try {
+diff --git a/packages/adapters/opencode-local/src/server/runtime-config.test.ts b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
+index 5e33aa4c5..c9a986fdb 100644
+--- a/packages/adapters/opencode-local/src/server/runtime-config.test.ts
++++ b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
+@@ -367,4 +367,148 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+     expect(prepared.notes).toEqual([]);
+     await prepared.cleanup();
+   });
++
++  it.each([false, true])("adds run-scoped MCP servers without changing permission policy (skip=%s)", async (skip) => {
++    const configHome = await makeConfigHome({
++      permission: { bash: "ask", "mcp__existing__write": "deny" },
++      mcp: {
++        "paperclip-assigned": { type: "remote", url: "https://user.example/mcp", enabled: true },
++        existing: { type: "remote", url: "https://existing.example/mcp", enabled: true },
++      },
++      provider: { custom: { models: { "example/model": {} } } },
++      small_model: "example/model",
++    });
++    const token = "run-scoped-fixture-secret";
++    const prepared = await prepareOpenCodeRuntimeConfig({
++      env: { XDG_CONFIG_HOME: configHome },
++      config: { dangerouslySkipPermissions: skip },
++      runtimeMcpServers: [
++        { name: "paperclip-assigned", connectionId: `assignment:${"a".repeat(64)}`, url: "https://paperclip.example/mcp/one", token },
++        { name: "paperclip-assigned", connectionId: `assignment:${"b".repeat(64)}`, url: "https://paperclip.example/mcp/two", token: "second-run-token" },
++      ],
++    });
++    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
++
++    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
++    const runtimeConfig = JSON.parse(await fs.readFile(runtimeConfigPath, "utf8")) as {
++      mcp: Record<string, unknown>;
++      permission?: unknown;
++      provider?: unknown;
++      small_model?: unknown;
++    };
++    expect(runtimeConfig.mcp).toMatchObject({
++      "paperclip-assigned": { url: "https://user.example/mcp" },
++      existing: { url: "https://existing.example/mcp" },
++      "paperclip-assigned_2": {
++        type: "remote",
++        url: "https://paperclip.example/mcp/one",
++        enabled: true,
++        oauth: false,
++        timeout: 30_000,
++        headers: { Authorization: `Bearer ${token}` },
++      },
++      "paperclip-assigned_3": {
++        type: "remote",
++        url: "https://paperclip.example/mcp/two",
++        headers: { Authorization: "Bearer second-run-token" },
++      },
++    });
++    const generatedNames = ["paperclip-assigned_2", "paperclip-assigned_3"];
++    const gatewayMetaActionNames = [
++      `mcp.app-gallery-files:${"read_sensitive_metadata".padEnd(103 - "mcp.app-gallery-files:".length, "x")}`,
++      `mcp.app-gallery-files:${"update_sensitive_metadata".padEnd(104 - "mcp.app-gallery-files:".length, "y")}`,
++    ];
++    const composedToolNames = generatedNames.flatMap((serverName) =>
++      gatewayMetaActionNames.map((toolName) => `${serverName}__${toolName}`),
++    );
++    expect(gatewayMetaActionNames.map((name) => name.length)).toEqual([103, 104]);
++    expect(generatedNames.every((name) => name.length <= 22)).toBe(true);
++    expect(composedToolNames.every((name) => name.length <= 128)).toBe(true);
++    expect(new Set(composedToolNames).size).toBe(composedToolNames.length);
++    expect(JSON.stringify(runtimeConfig.mcp)).not.toContain("a".repeat(64));
++    expect(JSON.stringify(runtimeConfig.mcp)).not.toContain("b".repeat(64));
++    expect(runtimeConfig.permission).toEqual(skip ? "allow" : { bash: "ask", "mcp__existing__write": "deny" });
++    expect(runtimeConfig.provider).toEqual({ custom: { models: { "example/model": {} } } });
++    expect(runtimeConfig.small_model).toBe("example/model");
++    if (process.platform !== "win32") {
++      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
++    }
++    expect(JSON.stringify(prepared.notes)).not.toContain(token);
++    expect(JSON.parse(await fs.readFile(path.join(configHome, "opencode", "opencode.json"), "utf8"))).toMatchObject({
++      permission: { bash: "ask" },
++      mcp: { "paperclip-assigned": { url: "https://user.example/mcp" } },
++    });
++
++    await prepared.cleanup();
++    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
++    await expect(fs.access(prepared.env.XDG_CONFIG_HOME)).rejects.toThrow();
++  });
++
++  it("keeps a readable short label and deterministically bounds long labels", async () => {
++    const configHome = await makeConfigHome();
++    const servers = [{
++      name: "Paperclip project tools with a long descriptive label",
++      connectionId: `assignment:${"c".repeat(64)}`,
++      url: "https://paperclip.example/mcp",
++      token: "fixture-token",
++    }];
++    const first = await prepareOpenCodeRuntimeConfig({
++      env: { XDG_CONFIG_HOME: configHome },
++      config: { dangerouslySkipPermissions: false },
++      runtimeMcpServers: servers,
++    });
++    cleanupPaths.add(first.env.XDG_CONFIG_HOME);
++    const firstConfig = JSON.parse(
++      await fs.readFile(path.join(first.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
++    ) as { mcp: Record<string, unknown> };
++    const [firstName] = Object.keys(firstConfig.mcp);
++    expect(firstName).toMatch(/^Paperclip_pro_[a-f0-9]{8}$/);
++    expect(firstName.length).toBeLessThanOrEqual(22);
++
++    await first.cleanup();
++    cleanupPaths.delete(first.env.XDG_CONFIG_HOME);
++    const second = await prepareOpenCodeRuntimeConfig({
++      env: { XDG_CONFIG_HOME: configHome },
++      config: { dangerouslySkipPermissions: false },
++      runtimeMcpServers: servers,
++    });
++    cleanupPaths.add(second.env.XDG_CONFIG_HOME);
++    const secondConfig = JSON.parse(
++      await fs.readFile(path.join(second.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
++    ) as { mcp: Record<string, unknown> };
++    expect(Object.keys(secondConfig.mcp)).toEqual([firstName]);
++    await second.cleanup();
++    cleanupPaths.delete(second.env.XDG_CONFIG_HOME);
++  });
++
++  it("does not follow a user config symlink when writing the run secret", async () => {
++    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-symlink-test-"));
++    cleanupPaths.add(root);
++    const configHome = path.join(root, "config");
++    const externalConfig = path.join(root, "external.json");
++    const configDir = path.join(configHome, "opencode");
++    await fs.mkdir(configDir, { recursive: true });
++    await fs.writeFile(externalConfig, JSON.stringify({ theme: "system" }), "utf8");
++    await fs.symlink(externalConfig, path.join(configDir, "opencode.json"));
++
++    const prepared = await prepareOpenCodeRuntimeConfig({
++      env: { XDG_CONFIG_HOME: configHome },
++      config: { dangerouslySkipPermissions: false },
++      runtimeMcpServers: [{
++        name: "Assigned tools",
++        connectionId: "connection-1",
++        url: "https://paperclip.example/mcp",
++        token: "fixture-secret",
++      }],
++    });
++    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
++    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
++    expect((await fs.lstat(runtimeConfigPath)).isSymbolicLink()).toBe(false);
++    expect(await fs.readFile(externalConfig, "utf8")).toBe(JSON.stringify({ theme: "system" }));
++    if (process.platform !== "win32") {
++      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
++    }
++    await prepared.cleanup();
++    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
++  });
+ });
+diff --git a/packages/adapters/opencode-local/src/server/runtime-config.ts b/packages/adapters/opencode-local/src/server/runtime-config.ts
+index db66e0d8b..c03ee30c8 100644
+--- a/packages/adapters/opencode-local/src/server/runtime-config.ts
++++ b/packages/adapters/opencode-local/src/server/runtime-config.ts
+@@ -1,6 +1,8 @@
+ import fs from "node:fs/promises";
++import { createHash } from "node:crypto";
+ import os from "node:os";
+ import path from "node:path";
++import type { AdapterRuntimeMcpServer } from "@paperclipai/adapter-utils";
+ import { asBoolean } from "@paperclipai/adapter-utils/server-utils";
+ 
+ type PreparedOpenCodeRuntimeConfig = {
+@@ -10,6 +12,8 @@ type PreparedOpenCodeRuntimeConfig = {
+   cleanup: () => Promise<void>;
+ };
+ 
++const MAX_RUNTIME_MCP_SERVER_NAME_LENGTH = 22;
++
+ function resolveXdgConfigHome(env: Record<string, string>): string {
+   return (
+     (typeof env.XDG_CONFIG_HOME === "string" && env.XDG_CONFIG_HOME.trim()) ||
+@@ -103,6 +107,57 @@ async function readJsonObject(filepath: string): Promise<Record<string, unknown>
+   }
+ }
+ 
++function buildRuntimeMcpConfig(
++  existing: Record<string, unknown>,
++  servers: readonly AdapterRuntimeMcpServer[],
++): Record<string, unknown> {
++  const mcp: Record<string, unknown> = { ...existing };
++  const usedNames = new Set(Object.keys(mcp));
++  for (const server of servers) {
++    const safeServerName = server.name.replace(/[^a-zA-Z0-9_-]/g, "_") || "connection";
++    let suffix = 1;
++    let name: string;
++    do {
++      const collisionSuffix = suffix === 1 ? "" : `_${suffix}`;
++      const nameBudget = MAX_RUNTIME_MCP_SERVER_NAME_LENGTH - collisionSuffix.length;
++      if (safeServerName.length <= nameBudget) name = `${safeServerName}${collisionSuffix}`;
++      else {
++        const hash = createHash("sha256").update(safeServerName).digest("hex").slice(0, 8);
++        const prefixLength = nameBudget - hash.length - 1;
++        name = `${safeServerName.slice(0, prefixLength)}_${hash}${collisionSuffix}`;
++      }
++      suffix += 1;
++    } while (usedNames.has(name));
++    usedNames.add(name);
++    mcp[name] = {
++      type: "remote",
++      url: server.url,
++      headers: { Authorization: `Bearer ${server.token}` },
++      enabled: true,
++      oauth: false,
++      timeout: 30_000,
++    };
++  }
++  return mcp;
++}
++
++async function replaceRuntimeConfigSymlink(filepath: string): Promise<void> {
++  let stat: Awaited<ReturnType<typeof fs.lstat>>;
++  try { stat = await fs.lstat(filepath); }
++  catch (err) {
++    if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return;
++    throw err;
++  }
++  if (!stat.isSymbolicLink()) return;
++  let contents: Buffer | null = null;
++  try { contents = await fs.readFile(filepath); }
++  catch (err) {
++    if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw err;
++  }
++  await fs.unlink(filepath);
++  if (contents) await fs.writeFile(filepath, contents, { mode: 0o600 });
++}
++
+ /** Carry effective explicit settings into the inline layer before catalog discovery. */
+ function preserveExplicitModelModalities(
+   env: Record<string, string>, providers: unknown, model: unknown,
+@@ -130,10 +185,12 @@ export async function prepareOpenCodeRuntimeConfig(input: {
+   env: Record<string, string>;
+   config: Record<string, unknown>;
+   targetIsRemote?: boolean;
++  runtimeMcpServers?: readonly AdapterRuntimeMcpServer[];
+ }): Promise<PreparedOpenCodeRuntimeConfig> {
+   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
+   const targetIsRemote = input.targetIsRemote === true;
+-  if (!skipPermissions && !targetIsRemote) {
++  const runtimeMcpServers = targetIsRemote ? [] : (input.runtimeMcpServers ?? []);
++  if (!skipPermissions && !targetIsRemote && runtimeMcpServers.length === 0) {
+     const existingConfig = await readJsonObject(
+       path.join(resolveXdgConfigHome(input.env), "opencode", "opencode.json"),
+     );
+@@ -187,6 +244,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
+     }
+   }
+ 
++  await replaceRuntimeConfigSymlink(runtimeConfigPath);
+   const existingConfig = await readJsonObject(runtimeConfigPath);
+   const existingProvider = isPlainObject(existingConfig.provider) ? existingConfig.provider : {};
+   let nextProvider = gatewayProviders
+@@ -232,6 +290,12 @@ export async function prepareOpenCodeRuntimeConfig(input: {
+     nextConfig.provider = nextProvider;
+   }
+ 
++  if (runtimeMcpServers.length > 0) {
++    const existingMcp = isPlainObject(existingConfig.mcp) ? existingConfig.mcp : {};
++    nextConfig.mcp = buildRuntimeMcpConfig(existingMcp, runtimeMcpServers);
++    notes.push(`Injected ${runtimeMcpServers.length} run-scoped Paperclip MCP server(s) into OpenCode.`);
++  }
++
+   // Pin OpenCode's auxiliary "small" model (used for session-title generation and
+   // other helper tasks) via PAPERCLIP_OPENCODE_SMALL_MODEL. OpenCode otherwise
+   // defaults the small model to a built-in provider default (e.g. a claude-* model
+@@ -242,7 +306,8 @@ export async function prepareOpenCodeRuntimeConfig(input: {
+     nextConfig.small_model = smallModel;
+     notes.push(`Pinned OpenCode small_model to ${smallModel}.`);
+   }
+-  await fs.writeFile(runtimeConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, "utf8");
++  await fs.writeFile(runtimeConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
++  await fs.chmod(runtimeConfigPath, 0o600);
+ 
+   return {
+     env: {
+diff --git a/server/src/adapters/registry.test.ts b/server/src/adapters/registry.test.ts
+index b59f7ffc8..442397584 100644
+--- a/server/src/adapters/registry.test.ts
++++ b/server/src/adapters/registry.test.ts
+@@ -73,7 +73,7 @@ describe("built-in runtime connection tool delivery", () => {
+     ["hermes_local", "environment"],
+     ["kimi_local", "environment"],
+     ["openclaw_gateway", "invocation_context"],
+-    ["opencode_local", "environment"],
++    ["opencode_local", "native_mcp"],
+     ["paperclip_runner", "environment"],
+     ["pi_local", "environment"],
+     ["process", "environment"],
+diff --git a/server/src/adapters/registry.ts b/server/src/adapters/registry.ts
+index 9ba279853..c06efc16c 100644
+--- a/server/src/adapters/registry.ts
++++ b/server/src/adapters/registry.ts
+@@ -850,7 +850,7 @@ const openclawGatewayAdapter: ServerAdapterModule = {
+ 
+ const openCodeLocalAdapter: ServerAdapterModule = {
+   type: "opencode_local",
+-  runtimeToolDelivery: "environment",
++  runtimeToolDelivery: "native_mcp",
+   execute: openCodeExecute,
+   testEnvironment: openCodeTestEnvironment,
+   listSkills: listOpenCodeSkills,
