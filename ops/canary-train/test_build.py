@@ -170,6 +170,34 @@ class FailClosedPolicyTests(unittest.TestCase):
         self.assertEqual(str(build.archive_root("@paperclipai/server#ui-dist")), "node_modules/@paperclipai/server/ui-dist")
         self.assertEqual(str(build.archive_root("@paperclipai/db#dist")), "node_modules/@paperclipai/db/dist")
 
+    def test_production_runtime_includes_only_transitive_public_dependencies(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp)
+            manifest = [
+                {"name": "paperclipai", "dir": "cli", "publishFromCi": True},
+                {"name": "@paperclipai/server", "dir": "server", "publishFromCi": True},
+                {"name": "@paperclipai/db", "dir": "packages/db", "publishFromCi": True},
+                {"name": "@paperclipai/hermes-paperclip-adapter", "dir": "packages/adapters/hermes", "publishFromCi": True},
+                {"name": "@paperclipai/plugin-cloudflare-sandbox", "dir": "packages/plugins/sandbox-providers/cloudflare", "publishFromCi": True},
+            ]
+            packages = {
+                "cli/package.json": {"name": "paperclipai", "dependencies": {"@paperclipai/server": "workspace:*"}},
+                "server/package.json": {"name": "@paperclipai/server", "dependencies": {"@paperclipai/db": "workspace:*"}},
+                "packages/db/package.json": {"name": "@paperclipai/db"},
+                "packages/adapters/hermes/package.json": {"name": "@paperclipai/hermes-paperclip-adapter"},
+                "packages/plugins/sandbox-providers/cloudflare/package.json": {"name": "@paperclipai/plugin-cloudflare-sandbox"},
+            }
+            for relative, value in packages.items():
+                path = workspace / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(value))
+            closure = build.production_package_closure(workspace, manifest)
+            self.assertEqual(closure, {"paperclipai", "@paperclipai/server", "@paperclipai/db"})
+            with self.assertRaisesRegex(build.TrainError, "outside the installed production package closure"):
+                build.validate_patch_runtime_paths(
+                    workspace, manifest, ["packages/plugins/sandbox-providers/cloudflare/src/index.ts"]
+                )
+
 
 class ArtifactTests(unittest.TestCase):
     def make_checkout(self, root: Path) -> tuple[Path, Path]:
@@ -184,17 +212,27 @@ class ArtifactTests(unittest.TestCase):
             {"name": "@paperclipai/server", "dir": "server", "publishFromCi": True},
             {"name": "@paperclipai/db", "dir": "packages/db", "publishFromCi": True},
             {"name": "@paperclipai/hermes-paperclip-adapter", "dir": "packages/adapters/hermes", "publishFromCi": True},
+            {"name": "@paperclipai/plugin-cloudflare-sandbox", "dir": "packages/plugins/sandbox-providers/cloudflare", "publishFromCi": True},
             {"name": "@paperclipai/ui", "dir": "ui", "publishFromCi": True},
         ]
         (workspace / "scripts").mkdir()
         (workspace / "scripts/release-package-manifest.json").write_text(json.dumps(package_entries))
         package_manifests = {
-            "cli/package.json": {"name": "paperclipai", "files": ["dist"]},
-            "server/package.json": {"name": "@paperclipai/server", "files": ["dist", "ui-dist", "skills"]},
+            "cli/package.json": {
+                "name": "paperclipai", "files": ["dist"],
+                "dependencies": {"@paperclipai/server": "workspace:*", "@paperclipai/db": "workspace:*"},
+            },
+            "server/package.json": {
+                "name": "@paperclipai/server", "files": ["dist", "ui-dist", "skills"],
+                "dependencies": {"@paperclipai/db": "workspace:*", "@paperclipai/hermes-paperclip-adapter": "workspace:*"},
+            },
             "packages/db/package.json": {"name": "@paperclipai/db", "files": ["dist"]},
             "packages/adapters/hermes/package.json": {
                 "name": "@paperclipai/hermes-paperclip-adapter",
                 "files": ["dist", "ui-parser.cjs", "gateway-ui-parser.cjs", "README.md", "LICENSE"],
+            },
+            "packages/plugins/sandbox-providers/cloudflare/package.json": {
+                "name": "@paperclipai/plugin-cloudflare-sandbox", "files": ["dist"],
             },
         }
         for relative, package_json in package_manifests.items():
@@ -211,6 +249,7 @@ class ArtifactTests(unittest.TestCase):
             "packages/adapters/hermes/dist/index.js": b"hermes runtime",
             "packages/adapters/hermes/ui-parser.cjs": b"module.exports = {};",
             "packages/adapters/hermes/gateway-ui-parser.cjs": b"module.exports = {};",
+            "packages/plugins/sandbox-providers/cloudflare/dist/index.js": b"standalone plugin runtime",
             "server/skills/base.md": b"server skill",
             "packages/adapters/claude-local/package.json": json.dumps({"name": "@paperclipai/adapter-claude-local"}).encode(),
             "packages/adapters/claude-local/skills/base.md": b"claude skill",
@@ -274,6 +313,7 @@ class ArtifactTests(unittest.TestCase):
                 {"": hashlib.sha256(b"module.exports = {};").hexdigest()},
             )
             self.assertNotIn("node_modules/@paperclipai/server/package.json", first["files"])
+            self.assertNotIn("node_modules/@paperclipai/plugin-cloudflare-sandbox/dist/index.js", first["files"])
             migration_by_path = {item["path"]: item["sha256"] for item in first["migrations"]}
             self.assertEqual(migration_by_path["node_modules/@paperclipai/db/dist/migrations/0001_test.sql"], hashlib.sha256(b"select 1;").hexdigest())
             self.assertEqual(migration_by_path["node_modules/@paperclipai/db/dist/migrations/meta/_journal.json"], hashlib.sha256(b'{"version":"1"}').hexdigest())

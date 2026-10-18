@@ -341,8 +341,6 @@ def prepare(workspace: Path, output: Path, manifest: dict[str, Any], manifest_pa
     for patch in manifest["patches"]:
         number, repository, head = patch["number"], patch["repository"], patch["head"].lower()
         pr = http_json(f"{GITHUB_API}/repos/{repository}/pulls/{number}")
-        if str(pr.get("head", {}).get("sha", "")).lower() != head:
-            raise TrainError(f"PR #{number} head changed; update the pinned manifest explicitly")
         row: dict[str, Any] = {"number": number, "repository": repository, "head": head}
         merge_sha = pr.get("merge_commit_sha")
         merged_ancestor = bool(pr.get("merged_at") and isinstance(merge_sha, str) and HEX40.fullmatch(merge_sha) and is_ancestor(workspace, merge_sha, source_commit))
@@ -350,6 +348,8 @@ def prepare(workspace: Path, output: Path, manifest: dict[str, Any], manifest_pa
             row.update(state="already_in_release", mergeCommit=merge_sha.lower())
             statuses.append(row)
             continue
+        if str(pr.get("head", {}).get("sha", "")).lower() != head:
+            raise TrainError(f"PR #{number} head changed; update the pinned manifest explicitly")
         patch_bytes = http_bytes(f"https://github.com/{repository}/pull/{number}.diff", "text/plain")
         # Close the tiny race between validating the pinned head and reading its
         # diff. A PR that moved while we fetched it requires a manifest update.
@@ -504,7 +504,18 @@ def load_provenance(workspace: Path, output: Path) -> tuple[dict[str, Any], list
     changed = git(workspace, "diff", "--name-only", provenance["sourceCommit"], provenance["patchCommit"]).stdout.decode("utf-8", "surrogateescape").splitlines()
     validate_patch_paths(changed)
     release_packages = json.loads((workspace / "scripts" / "release-package-manifest.json").read_text(encoding="utf-8"))
+    validate_patch_runtime_paths(workspace, release_packages, changed)
     return provenance, release_packages
+
+
+def validate_patch_runtime_paths(workspace: Path, release_packages: list[dict[str, Any]], changed: list[str]) -> None:
+    closure = production_package_closure(workspace, release_packages)
+    for item in release_packages:
+        if item.get("publishFromCi") is not True or item.get("name") in closure or item.get("name") == "@paperclipai/ui":
+            continue
+        relative = item.get("dir")
+        if isinstance(relative, str) and any(path == relative or path.startswith(relative.rstrip("/") + "/") for path in changed):
+            raise TrainError(f"pinned patch changes runtime source outside the installed production package closure: {item['name']}")
 
 
 def build(workspace: Path, output: Path) -> dict[str, Any]:
@@ -571,10 +582,44 @@ def archive_root(key: str) -> PurePosixPath:
     return PurePosixPath("node_modules") / PurePosixPath(package_name) / safe_relative_path(relative)
 
 
+def production_package_closure(workspace: Path, release_manifest: list[dict[str, Any]]) -> set[str]:
+    """Find public workspace packages installed transitively by CLI or server."""
+    packages = {
+        item["name"]: item
+        for item in release_manifest
+        if item.get("publishFromCi") is True and isinstance(item.get("name"), str)
+    }
+    pending = list(DEFAULT_PACKAGES)
+    closure: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name in closure:
+            continue
+        item = packages.get(name)
+        if item is None:
+            raise TrainError(f"required production package is not published by CI: {name}")
+        closure.add(name)
+        source = (workspace / item["dir"]).resolve()
+        if not source.is_relative_to(workspace.resolve()):
+            raise TrainError(f"package directory escapes workspace: {item['dir']}")
+        package = json.loads((source / "package.json").read_text(encoding="utf-8"))
+        if package.get("name") != name:
+            raise TrainError(f"release package identity does not match its directory: {name}")
+        for field in ("dependencies", "optionalDependencies"):
+            dependencies = package.get(field, {})
+            if not isinstance(dependencies, dict):
+                raise TrainError(f"{name} has an invalid {field} table")
+            for dependency in dependencies:
+                if dependency in packages and dependency not in closure:
+                    pending.append(dependency)
+    return closure
+
+
 def runtime_directories(workspace: Path, release_manifest: list[dict[str, Any]]) -> dict[str, Path]:
     result: dict[str, Path] = {}
+    closure = production_package_closure(workspace, release_manifest)
     for item in release_manifest:
-        if item.get("publishFromCi") is not True:
+        if item.get("publishFromCi") is not True or item.get("name") not in closure:
             continue
         name, relative = item.get("name"), item.get("dir")
         if not isinstance(name, str) or not PACKAGE_NAME.fullmatch(name) or not isinstance(relative, str):

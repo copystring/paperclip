@@ -34,6 +34,10 @@ class DeployError(RuntimeError):
     """A fail-closed deployment check failed."""
 
 
+class ReleaseNotReady(DeployError):
+    """A published release exists, but its producing workflow is still running."""
+
+
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 VERSION = re.compile(r"^\d{4}\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
@@ -263,8 +267,10 @@ class Deployer:
                                        {"Accept": "application/vnd.github+json"}), "GitHub workflow run")
         if not isinstance(run, dict):
             raise DeployError("GitHub workflow run response is invalid")
-        if run.get("status") != "completed" or run.get("conclusion") != "success":
-            raise DeployError("Release workflow is not completed successfully")
+        if run.get("status") != "completed":
+            raise ReleaseNotReady("Release workflow is still running")
+        if run.get("conclusion") != "success":
+            raise DeployError("Release workflow did not complete successfully")
         if run.get("path") != self.workflow or run.get("event") not in {"schedule", "workflow_dispatch"}:
             raise DeployError("Release was not produced by the allowed workflow event")
         if (run.get("head_repository") or {}).get("full_name", "").lower() != self.repository.lower():
@@ -286,6 +292,7 @@ class Deployer:
                     and r.get("tag_name", "").startswith(prefix)]
         releases.sort(key=lambda r: r.get("created_at", ""), reverse=True)
         last_error = None
+        not_ready = None
         for release in releases:
             try:
                 assets = {a.get("name"): a for a in release.get("assets", [])}
@@ -302,11 +309,16 @@ class Deployer:
                     raise DeployError("Release target commit does not match the manifest")
                 self.verify_workflow_run(manifest)
                 return release, manifest, assets
+            except ReleaseNotReady as exc:
+                not_ready = exc
+                continue
             except (DeployError, KeyError, ValueError) as exc:
                 last_error = exc
                 continue
         if last_error:
             raise DeployError(f"No verified green release found: {last_error}")
+        if not_ready:
+            raise not_ready
         raise DeployError("No patched Canary release is published")
 
     def _verify_asset_digest(self, asset: dict, data: bytes, expected_name: str):
@@ -329,7 +341,7 @@ class Deployer:
         return packages
 
     def stage(self, manifest: dict, assets: dict):
-        self.installs.mkdir(parents=True, exist_ok=True)
+        self._prune_owned_candidates()
         stem = f"{manifest['version']}-patched-{manifest['runId']}-{manifest['runAttempt']}"
         target = self.installs / stem
         if target.exists():
@@ -338,6 +350,18 @@ class Deployer:
                 return target, self._migration_diff(self.current_link.resolve(strict=True), target)
             except DeployError:
                 self._remove_inactive_owned_candidate(target, manifest)
+        archive_size = (assets.get("payload.tar.gz") or {}).get("size")
+        if not isinstance(archive_size, int) or archive_size < 1:
+            raise DeployError("GitHub payload asset size is invalid")
+        minimum_free = self.c.get("minimumFreeBytes", 4 * 1024 ** 3)
+        multiplier = self.c.get("stageDiskMultiplier", 3)
+        if not isinstance(minimum_free, int) or minimum_free < 0 or not isinstance(multiplier, int) or multiplier < 1:
+            raise DeployError("Disk safety configuration is invalid")
+        free = shutil.disk_usage(self.home).free
+        required = minimum_free + archive_size * multiplier
+        if free < required:
+            raise DeployError("Insufficient free disk space for a safe candidate stage")
+        self.installs.mkdir(parents=True, exist_ok=True)
         npm_package = self._npm_metadata(manifest["version"])
         staging = self.installs / f".staging-{stem}-{os.getpid()}"
         if staging.exists():
@@ -465,7 +489,7 @@ class Deployer:
             raise DeployError("Existing candidate receipt does not authorize replacement")
         shutil.rmtree(candidate)
 
-    def _prune_owned_candidates(self, newest: Path):
+    def _prune_owned_candidates(self, newest: Path | None = None):
         """Retain active/history candidates plus three newest owned candidates."""
         try:
             root = self.installs.resolve(strict=True)
@@ -492,7 +516,8 @@ class Deployer:
                     continue
                 owned.append(candidate.resolve())
             keep = preserved | {p for p in sorted(owned, key=lambda p: p.stat().st_mtime, reverse=True)[:3]}
-            keep.add(newest.resolve())
+            if newest is not None:
+                keep.add(newest.resolve())
             for candidate in owned:
                 if candidate in keep:
                     continue
@@ -502,6 +527,28 @@ class Deployer:
             # Retention is best-effort; a cleanup problem must not invalidate a
             # fully verified candidate or obscure the original staging error.
             return
+
+    @contextlib.contextmanager
+    def deployment_lock(self):
+        path = Path(self.c.get("lockFile", str(self.home / "autoupdate/autoupdate.lock")))
+        if not path.is_absolute():
+            raise DeployError("Deployment lock path must be absolute")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+b") as stream:
+            if os.name == "nt":
+                # The production service is Linux. Keeping Windows imports
+                # usable supports local unit tests without adding a dependency.
+                yield
+                return
+            import fcntl
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise DeployError("Another Paperclip updater already holds the shared update lock") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
     def _extract_payload(self, archive: bytes, destination: Path, expected_files: dict):
         seen = set()
@@ -1017,7 +1064,7 @@ class Deployer:
         try:
             release, manifest, assets = self.find_release()
         except DeployError as exc:
-            if "No patched Canary release is published" in str(exc) or "No verified green release found" in str(exc):
+            if "No patched Canary release is published" in str(exc) or isinstance(exc, ReleaseNotReady):
                 self._write_status({"state": "waiting", "reason": "No verified green public fork release is available"})
                 return {"available": False, "state": "waiting"}
             raise
@@ -1060,7 +1107,9 @@ def main(argv=None):
     config = None
     try:
         config = json.loads(Path(args.config).read_text(encoding="utf-8"))
-        result = Deployer(config).run("run" if args.run else "stage" if args.stage else "check")
+        deployer = Deployer(config)
+        with deployer.deployment_lock():
+            result = deployer.run("run" if args.run else "stage" if args.stage else "check")
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     except (OSError, json.JSONDecodeError, DeployError, subprocess.SubprocessError) as exc:

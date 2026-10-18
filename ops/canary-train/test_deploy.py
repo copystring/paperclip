@@ -1,11 +1,13 @@
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import deploy
 
@@ -104,6 +106,14 @@ class ManifestTests(unittest.TestCase):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_unfinished_workflow_is_distinguished_from_invalid_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            item = manifest()
+            api = "https://api.github.com/repos/copystring/paperclip/actions/runs/42"
+            http = FakeHttp(raw={api: json.dumps({"status": "in_progress"}).encode()})
+            with self.assertRaises(deploy.ReleaseNotReady):
+                deployer(Path(tmp), http=http).verify_workflow_run(item)
+
     def test_rejects_workflow_from_pull_request_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             item = manifest()
@@ -148,6 +158,29 @@ class ReleaseTests(unittest.TestCase):
 
 
 class CandidateTests(unittest.TestCase):
+    def test_disk_guard_defers_before_npm_or_candidate_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            command_calls = []
+            d = deployer(root, command=lambda *a, **k: command_calls.append(a) or SimpleNamespace(returncode=1))
+            item = manifest()
+            with patch.object(deploy.shutil, "disk_usage", return_value=SimpleNamespace(free=10)):
+                with self.assertRaisesRegex(deploy.DeployError, "Insufficient free disk space"):
+                    d.stage(item, {"payload.tar.gz": {"size": 1024}})
+            self.assertEqual(command_calls, [])
+            self.assertFalse(d.installs.exists())
+
+    @unittest.skipIf(os.name == "nt", "production lock uses Linux fcntl")
+    def test_shared_lock_rejects_concurrent_invocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = deployer(Path(tmp))
+            with d.deployment_lock():
+                with self.assertRaisesRegex(deploy.DeployError, "already holds"):
+                    with d.deployment_lock():
+                        pass
+            self.assertEqual(d.c.get("lockFile", str(d.home / "autoupdate/autoupdate.lock")),
+                             str(d.home / "autoupdate/autoupdate.lock"))
+
     def test_package_map_replaces_exact_single_file_runtime_asset(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -263,7 +296,7 @@ class CandidateTests(unittest.TestCase):
             d = deployer(root, http=http, command=lambda *a, **k: SimpleNamespace(returncode=1, stderr="offline"))
             item = manifest()
             with self.assertRaisesRegex(deploy.DeployError, "npm install failed"):
-                d.stage(item, {})
+                d.stage(item, {"payload.tar.gz": {"size": 1024}})
             self.assertEqual(current.resolve(), old)
             self.assertEqual(json.loads((cli / "install.json").read_text())["version"], "old")
             self.assertFalse(any(installs.glob(".staging-*")))
@@ -474,12 +507,12 @@ class ActivationTests(unittest.TestCase):
             d._verify_local_hook_files = lambda path: None
             version = item["version"]
             d._npm_metadata = lambda requested: ["paperclipai", "@paperclipai/server"]
-            path, migration_diff = d.stage(item, {})
+            path, migration_diff = d.stage(item, {"payload.tar.gz": {"size": 1024}})
             self.assertEqual(path, candidate)
             self.assertEqual(migration_diff["baselinePath"], str(old.resolve()))
             (candidate / "node_modules/@paperclipai/server/dist/build-info.json").write_text("tampered")
             with self.assertRaisesRegex(deploy.DeployError, "npm install failed"):
-                d.stage(item, {})
+                d.stage(item, {"payload.tar.gz": {"size": 1024}})
             self.assertFalse(candidate.exists())
 
     def test_activate_rejects_changed_stage_migration_baseline(self):
