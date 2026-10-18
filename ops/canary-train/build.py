@@ -1054,6 +1054,12 @@ def runtime_directories(workspace: Path, release_manifest: list[dict[str, Any]])
                 # packages. Read it directly at the archive boundary instead
                 # of creating untracked publish staging files in the source.
                 target = workspace / "skills"
+            elif entry == "skills" and not target.exists() and not target.is_symlink():
+                # npm's files list permits absent paths. Other adapters declare
+                # skills but release.sh does not stage the canonical tree for
+                # them. Preserve their published layout; do not synthesize skills
+                # or relax the required compiled runtime output checks.
+                continue
             if target.is_dir() or target.is_file():
                 result[f"{name}#{path.as_posix()}"] = target
             else:

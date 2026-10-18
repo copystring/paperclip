@@ -583,6 +583,8 @@ class ArtifactTests(unittest.TestCase):
             {"name": "@paperclipai/hermes-paperclip-adapter", "dir": "packages/adapters/hermes", "publishFromCi": True},
             {"name": "@paperclipai/adapter-claude-local", "dir": "packages/adapters/claude-local", "publishFromCi": True},
             {"name": "@paperclipai/adapter-codex-local", "dir": "packages/adapters/codex-local", "publishFromCi": True},
+            *[{"name": f"@paperclipai/adapter-{adapter}-local", "dir": f"packages/adapters/{adapter}-local", "publishFromCi": True}
+              for adapter in ("cursor", "gemini", "opencode")],
             {"name": "@paperclipai/plugin-cloudflare-sandbox", "dir": "packages/plugins/sandbox-providers/cloudflare", "publishFromCi": True},
             {"name": "@paperclipai/ui", "dir": "ui", "publishFromCi": True},
         ]
@@ -596,12 +598,13 @@ class ArtifactTests(unittest.TestCase):
             "server/package.json": {
                 "name": "@paperclipai/server", "files": ["dist", "ui-dist", "skills"],
                 "dependencies": {"@paperclipai/db": "workspace:*", "@paperclipai/hermes-paperclip-adapter": "workspace:*",
-                                 "@paperclipai/adapter-claude-local": "workspace:*", "@paperclipai/adapter-codex-local": "workspace:*"},
+                                 "@paperclipai/adapter-claude-local": "workspace:*", "@paperclipai/adapter-codex-local": "workspace:*",
+                                 **{f"@paperclipai/adapter-{adapter}-local": "workspace:*" for adapter in ("cursor", "gemini", "opencode")}},
             },
             "packages/db/package.json": {"name": "@paperclipai/db", "files": ["dist"]},
             "packages/adapters/hermes/package.json": {
                 "name": "@paperclipai/hermes-paperclip-adapter",
-                "files": ["dist", "ui-parser.cjs", "gateway-ui-parser.cjs", "README.md", "LICENSE"],
+                "files": ["dist", "skills", "ui-parser.cjs", "gateway-ui-parser.cjs", "README.md", "LICENSE"],
             },
             "packages/plugins/sandbox-providers/cloudflare/package.json": {
                 "name": "@paperclipai/plugin-cloudflare-sandbox", "files": ["dist"],
@@ -619,6 +622,7 @@ class ArtifactTests(unittest.TestCase):
             "packages/db/dist/migrations/0001_test.sql": b"select 1;",
             "packages/db/dist/migrations/meta/_journal.json": b'{"version":"1"}',
             "packages/adapters/hermes/dist/index.js": b"hermes runtime",
+            "packages/adapters/hermes/skills/bridge/SKILL.md": b"hermes-specific skill",
             "packages/adapters/hermes/ui-parser.cjs": b"module.exports = {};",
             "packages/adapters/hermes/gateway-ui-parser.cjs": b"module.exports = {};",
             "packages/plugins/sandbox-providers/cloudflare/dist/index.js": b"standalone plugin runtime",
@@ -628,6 +632,11 @@ class ArtifactTests(unittest.TestCase):
             "packages/adapters/codex-local/package.json": json.dumps({"name": "@paperclipai/adapter-codex-local", "files": ["dist", "skills"]}).encode(),
             "packages/adapters/codex-local/dist/index.js": b"codex runtime",
         }
+        for adapter in ("cursor", "gemini", "opencode"):
+            output_map[f"packages/adapters/{adapter}-local/package.json"] = json.dumps({
+                "name": f"@paperclipai/adapter-{adapter}-local", "files": ["dist", "skills"],
+            }).encode()
+            output_map[f"packages/adapters/{adapter}-local/dist/index.js"] = adapter.encode()
         for relative, data in output_map.items():
             path = workspace / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -703,6 +712,11 @@ class ArtifactTests(unittest.TestCase):
                 self.assertEqual(first["files"][f"node_modules/@paperclipai/{name}/skills/base.md"],
                                  hashlib.sha256(b"canonical skill").hexdigest())
             self.assertFalse((workspace / "server/skills").exists())
+            for adapter in ("cursor", "gemini", "opencode"):
+                self.assertNotIn(f"@paperclipai/adapter-{adapter}-local#skills", first["packageMap"])
+                self.assertIn(f"node_modules/@paperclipai/adapter-{adapter}-local/dist/index.js", first["files"])
+            self.assertEqual(first["files"]["node_modules/@paperclipai/hermes-paperclip-adapter/skills/bridge/SKILL.md"],
+                             hashlib.sha256(b"hermes-specific skill").hexdigest())
             self.assertEqual(build.git(workspace, "status", "--porcelain").stdout, b"")
             self.assertIn("node_modules/@paperclipai/db/dist/index.js", first["files"])
             self.assertIn("node_modules/@paperclipai/hermes-paperclip-adapter/ui-parser.cjs", first["files"])
@@ -730,6 +744,17 @@ class ArtifactTests(unittest.TestCase):
             (workspace / "server/dist/index.js").write_text("changed after build")
             with self.assertRaisesRegex(build.TrainError, "changed after"):
                 build.package(workspace, output)
+
+    def test_optional_skills_do_not_make_other_runtime_outputs_optional(self):
+        for relative in ("skills/base.md", "packages/adapters/cursor-local/dist/index.js"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temp:
+                workspace, output = self.make_checkout(Path(temp))
+                target = workspace / relative
+                target.unlink()
+                target.parent.rmdir()
+                manifest = json.loads((workspace / "scripts/release-package-manifest.json").read_text())
+                with self.assertRaisesRegex(build.TrainError, "declared npm runtime output"):
+                    build.runtime_directories(workspace, manifest)
 
 
 if __name__ == "__main__":
