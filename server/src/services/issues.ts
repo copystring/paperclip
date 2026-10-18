@@ -13,7 +13,11 @@ import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notificatio
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
-import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
+import {
+  assertLegacyRunTaskOwnership,
+  LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT,
+} from "../legacy-run-task-ownership.js";
+import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
 import { documentService } from "./documents.js";
@@ -217,6 +221,72 @@ import { buildIssueChanges } from "./issue-change-receipt.js";
 import { ensurePersonalPrivateProject } from "./projects.js";
 import { projectSafeChatPublication } from "./chat-publication-projection.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
+
+async function revokeLegacyRunsOnIssueHandoff(
+  tx: any,
+  input: {
+    issue: typeof issues.$inferSelect;
+    nextAssigneeAgentId: string | null;
+    nextAssigneeUserId: string | null;
+    actorAgentId: string | null | undefined;
+    actorRunId: string | null | undefined;
+  },
+) {
+  const { issue } = input;
+  const assignmentChanged =
+    issue.assigneeAgentId !== input.nextAssigneeAgentId ||
+    issue.assigneeUserId !== input.nextAssigneeUserId;
+  if (!assignmentChanged || !issue.assigneeAgentId) return;
+
+  const issueBoundRunIds = new Set(
+    [issue.executionRunId, issue.checkoutRunId].filter((runId): runId is string => Boolean(runId)),
+  );
+  const runIds = new Set(issueBoundRunIds);
+  if (input.actorAgentId === issue.assigneeAgentId && input.actorRunId) {
+    runIds.add(input.actorRunId);
+  }
+  if (runIds.size === 0) return;
+
+  const runs = await tx
+    .select({
+      id: heartbeatRuns.id,
+      companyId: heartbeatRuns.companyId,
+      agentId: heartbeatRuns.agentId,
+      runtimeMode: heartbeatRuns.runtimeMode,
+      contextSnapshot: heartbeatRuns.contextSnapshot,
+    })
+    .from(heartbeatRuns)
+    .where(and(
+      eq(heartbeatRuns.companyId, issue.companyId),
+      inArray(heartbeatRuns.id, [...runIds]),
+    ))
+    .for("update");
+
+  for (const run of runs) {
+    const context = run.contextSnapshot;
+    if (
+      run.runtimeMode !== "legacy" ||
+      run.agentId !== issue.assigneeAgentId ||
+      (!issueBoundRunIds.has(run.id) && (
+        !context || typeof context !== "object" || Array.isArray(context) ||
+        (context as Record<string, unknown>).issueId !== issue.id
+      ))
+    ) continue;
+    await appendHeartbeatRunEvent(tx as Db, {
+      companyId: issue.companyId,
+      runId: run.id,
+      agentId: run.agentId,
+      eventType: LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT,
+      stream: "system",
+      level: "info",
+      message: "Issue ownership was transferred; this run can no longer change the issue.",
+      payload: {
+        issueId: issue.id,
+        ownerAgentId: run.agentId,
+      },
+    });
+  }
+}
 
 const ALL_ISSUE_STATUSES = [
   "backlog",
@@ -11160,7 +11230,7 @@ export function issueService(db: Db) {
           const actorRun = await assertAgentRunWriteAllowed(tx, receiptExisting.companyId, {
             agentId: actorAgentId, runId: actorRunId, stopId: actorRunStopId,
           });
-          assertLegacyRunTaskOwnership(actorRun, receiptExisting);
+          await assertLegacyRunTaskOwnership(tx, actorRun, receiptExisting);
           if (actorRunHandoffId && (
             !actorRun || actorRunHandoffId !== actorRunId ||
             actorRun.runtimeMode !== "legacy" || actorRun.companyId !== receiptExisting.companyId ||
@@ -11176,6 +11246,19 @@ export function issueService(db: Db) {
             });
           }
         }
+        await revokeLegacyRunsOnIssueHandoff(tx, {
+          issue: receiptExisting,
+          nextAssigneeAgentId:
+            issueData.assigneeAgentId !== undefined
+              ? issueData.assigneeAgentId
+              : receiptExisting.assigneeAgentId,
+          nextAssigneeUserId:
+            issueData.assigneeUserId !== undefined
+              ? issueData.assigneeUserId
+              : receiptExisting.assigneeUserId,
+          actorAgentId,
+          actorRunId,
+        });
         if (actorAgentId && patch.status === "done") {
           const [review] = await tx.select({ id: toolActionRequests.id }).from(toolActionRequests).where(and(eq(toolActionRequests.companyId, existing.companyId), eq(toolActionRequests.issueId, id), inArray(toolActionRequests.status, ["pending", "approved", "executing"]))).limit(1);
           if (review) throw conflict("This task is waiting for a connection review. Finish unrelated work, then yield in_review without retrying the governed call.", { code: "tool_review_pending", actionRequestId: review.id });

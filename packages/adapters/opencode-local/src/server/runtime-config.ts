@@ -411,7 +411,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
 }): Promise<PreparedOpenCodeRuntimeConfig> {
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
   const targetIsRemote = input.targetIsRemote === true;
-  const runtimeMcpServers = targetIsRemote ? [] : (input.runtimeMcp ?? []);
+  const runtimeMcpServers = input.runtimeMcp ?? [];
   const selectedModel = configuredModelRef(input.config.model);
   const hasExplicitRemoteSettings = Boolean(
     (input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS)?.trim() ||
