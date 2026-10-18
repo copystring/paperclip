@@ -9,13 +9,15 @@
 import { fileURLToPath } from 'node:url';
 
 const TEST_PATTERNS = [
+  /(?:^|\/)test_[^/]+\.py$/,
+  /(?:^|\/)[^/]+_test\.py$/,
   /\.test\.(ts|js|tsx|jsx|mjs|cjs)$/,
   /\.spec\.(ts|js|tsx|jsx|mjs|cjs)$/,
   /(?:^|\/)tests?\//,
   /\/__tests__\//,
 ];
 
-const SOURCE_CODE_PATTERN = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
+const SOURCE_CODE_PATTERN = /\.(ts|tsx|js|jsx|mjs|cjs|py)$/;
 
 // Prefixes where test coverage is NOT required
 const SKIP_TEST_PREFIXES = ['docs', 'chore', 'build', 'ci', 'style', 'refactor', 'revert'];
