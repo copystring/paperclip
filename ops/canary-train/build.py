@@ -28,6 +28,12 @@ DEFAULT_PACKAGES = ("paperclipai", "@paperclipai/server")
 REGISTRY = "https://registry.npmjs.org"
 GITHUB_API = "https://api.github.com"
 PATCH_BRANCH = "deploy/canary-patched"
+TEST_PLAN_SCHEMA = 1
+EXPECTED_GENERAL_GROUPS = {
+    "general-server", "general-server-without-chat", "general-server-without-chat-or-native-runner",
+    "general-chat", "general-server-native-runner", "general-workspaces-a", "general-workspaces-b",
+    "general-workspaces-c",
+}
 DEPENDENCY_FILES = {
     "pnpm-lock.yaml", "pnpm-workspace.yaml", "package-lock.json",
     "npm-shrinkwrap.json", "yarn.lock", "bun.lock", "bun.lockb", ".npmrc",
@@ -507,6 +513,197 @@ def load_provenance(workspace: Path, output: Path) -> tuple[dict[str, Any], list
     return provenance, release_packages
 
 
+def clean_child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("GH_TOKEN", None)
+    env.pop("GITHUB_TOKEN", None)
+    return env
+
+
+def run_checked(command: list[str], workspace: Path) -> None:
+    print("+ " + " ".join(command), flush=True)
+    subprocess.run(command, cwd=workspace, check=True, env=clean_child_env())
+
+
+def wrapper_dry_run(workspace: Path, *flags: str) -> dict[str, Any]:
+    command = ["node", "scripts/run-vitest-stable.mjs", *flags, "--dry-run"]
+    completed = subprocess.run(command, cwd=workspace, check=True, text=True, stdout=subprocess.PIPE, env=clean_child_env())
+    try:
+        value = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise TrainError("upstream test wrapper returned invalid dry-run JSON") from exc
+    if not isinstance(value, dict):
+        raise TrainError("upstream test wrapper dry-run contract is invalid")
+    return value
+
+
+def _unique_string_list(value: Any, label: str) -> list[str]:
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+        raise TrainError(f"upstream dry-run {label} contract is invalid")
+    if len(value) != len(set(value)):
+        raise TrainError(f"upstream dry-run {label} contains duplicates")
+    return value
+
+
+def create_test_plan(workspace: Path, output: Path) -> dict[str, Any]:
+    provenance, _ = load_provenance(workspace, output)
+    inventory = wrapper_dry_run(workspace, "--mode", "all")
+    groups = inventory.get("availableGeneralGroups")
+    if not isinstance(groups, list) or set(groups) != EXPECTED_GENERAL_GROUPS or len(groups) != len(EXPECTED_GENERAL_GROUPS):
+        raise TrainError("upstream general test group contract is unknown or duplicated")
+    serialized_all = _unique_string_list(inventory.get("selectedSerializedSuites"), "serialized suites")
+    if inventory.get("mode") != "all":
+        raise TrainError("upstream all dry-run returned an unexpected mode")
+
+    server_shards: list[list[str]] = []
+    for index in range(4):
+        result = wrapper_dry_run(
+            workspace, "--mode", "general", "--group", "general-server",
+            "--shard-index", str(index), "--shard-count", "4",
+        )
+        server_shards.append(_unique_string_list(result.get("selectedGeneralServerSuites"), "general-server suites"))
+    server_inventory_result = wrapper_dry_run(
+        workspace, "--mode", "general", "--group", "general-server",
+        "--shard-index", "0", "--shard-count", "1",
+    )
+    server_inventory = _unique_string_list(server_inventory_result.get("selectedGeneralServerSuites"), "complete general-server inventory")
+    flattened_server = [item for shard in server_shards for item in shard]
+    expected_server_count = inventory.get("generalServerSuiteCount")
+    if (
+        not isinstance(expected_server_count, int) or expected_server_count < 1
+        or len(flattened_server) != len(set(flattened_server))
+        or len(flattened_server) != expected_server_count
+        or len(server_inventory) != expected_server_count
+        or set(flattened_server) != set(server_inventory)
+    ):
+        raise TrainError("general-server shards are not a complete disjoint partition of the upstream inventory")
+    native_inventory = wrapper_dry_run(workspace, "--mode", "general", "--group", "general-server-native-runner")
+    native_suites = _unique_string_list(native_inventory.get("selectedGeneralServerSuites"), "native-runner suites")
+    if not native_suites or not set(native_suites).issubset(set(flattened_server)):
+        raise TrainError("general-server shards omit native-runner suites")
+
+    serialized_shards: list[list[str]] = []
+    for index in range(2):
+        result = wrapper_dry_run(workspace, "--mode", "serialized", "--shard-index", str(index), "--shard-count", "2")
+        serialized_shards.append(_unique_string_list(result.get("selectedSerializedSuites"), "serialized suites"))
+    flattened_serialized = [item for shard in serialized_shards for item in shard]
+    if (
+        len(flattened_serialized) != len(set(flattened_serialized))
+        or set(flattened_serialized) != set(serialized_all)
+        or len(flattened_serialized) != len(serialized_all)
+    ):
+        raise TrainError("serialized shards are not a complete disjoint partition of the upstream inventory")
+
+    lane_specs = [
+        (f"general-server-{index + 1}-of-4", "general", "general-server", index, 4)
+        for index in range(4)
+    ]
+    workspace_projects: dict[str, list[str]] = {}
+    for group in ("general-workspaces-a", "general-workspaces-b", "general-workspaces-c"):
+        result = wrapper_dry_run(workspace, "--mode", "general", "--group", group)
+        if result.get("workspaceProjects") is None:
+            raise TrainError(f"upstream workspace group has no project contract: {group}")
+        projects = _unique_string_list(result.get("workspaceProjects"), f"{group} projects")
+        if not projects:
+            raise TrainError(f"upstream workspace group is empty: {group}")
+        if set().union(*workspace_projects.values()).intersection(projects):
+            raise TrainError("upstream workspace project groups overlap")
+        workspace_projects[group] = projects
+        lane_specs.append((group, "general", group, 0, 1))
+    lane_specs.extend((f"serialized-{index + 1}-of-2", "serialized", "serialized", index, 2) for index in range(2))
+    lanes = [
+        {"id": lane_id, "mode": mode, "group": group, "shardIndex": index, "shardCount": count}
+        for lane_id, mode, group, index, count in lane_specs
+    ]
+    if len(lanes) != 9 or len({lane["id"] for lane in lanes}) != 9:
+        raise TrainError("internal lane plan is incomplete or duplicated")
+    plan = {
+        "schemaVersion": TEST_PLAN_SCHEMA,
+        "sourceCommit": provenance["sourceCommit"],
+        "patchCommit": provenance["patchCommit"],
+        "patchTree": provenance["patchTree"],
+        "serverInventoryCount": expected_server_count,
+        "serializedInventoryCount": len(serialized_all),
+        "workspaceProjects": workspace_projects,
+        "lanes": lanes,
+    }
+    write_json(output / "test-plan.json", plan)
+    return plan
+
+
+def load_test_plan(path: Path, provenance: dict[str, Any]) -> dict[str, Any]:
+    if not path.is_file():
+        raise TrainError("test-plan.json is missing")
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        plan.get("schemaVersion") != TEST_PLAN_SCHEMA
+        or plan.get("sourceCommit") != provenance.get("sourceCommit")
+        or plan.get("patchCommit") != provenance.get("patchCommit")
+        or plan.get("patchTree") != provenance.get("patchTree")
+    ):
+        raise TrainError("test plan does not match immutable source and patch provenance")
+    lanes = plan.get("lanes")
+    expected = [
+        {"id": f"general-server-{i + 1}-of-4", "mode": "general", "group": "general-server", "shardIndex": i, "shardCount": 4}
+        for i in range(4)
+    ]
+    expected += [
+        {"id": group, "mode": "general", "group": group, "shardIndex": 0, "shardCount": 1}
+        for group in ("general-workspaces-a", "general-workspaces-b", "general-workspaces-c")
+    ]
+    expected += [
+        {"id": f"serialized-{i + 1}-of-2", "mode": "serialized", "group": "serialized", "shardIndex": i, "shardCount": 2}
+        for i in range(2)
+    ]
+    if (
+        lanes != expected
+        or type(plan.get("serverInventoryCount")) is not int or plan["serverInventoryCount"] < 1
+        or type(plan.get("serializedInventoryCount")) is not int or plan["serializedInventoryCount"] < 0
+    ):
+        raise TrainError("test plan lane set or inventory metadata is invalid")
+    projects = plan.get("workspaceProjects")
+    if not isinstance(projects, dict) or set(projects) != {"general-workspaces-a", "general-workspaces-b", "general-workspaces-c"}:
+        raise TrainError("test plan workspace-group contract is incomplete or unknown")
+    seen_projects: set[str] = set()
+    for group in ("general-workspaces-a", "general-workspaces-b", "general-workspaces-c"):
+        members = _unique_string_list(projects[group], f"{group} projects")
+        if not members or seen_projects.intersection(members):
+            raise TrainError("test plan workspace groups are empty or overlap")
+        seen_projects.update(members)
+    return plan
+
+
+def run_test_lane(workspace: Path, output: Path, lane_id: str) -> dict[str, Any]:
+    provenance, _ = load_provenance(workspace, output)
+    plan = load_test_plan(output / "test-plan.json", provenance)
+    lane = next((item for item in plan["lanes"] if item["id"] == lane_id), None)
+    if lane is None:
+        raise TrainError(f"unknown test lane: {lane_id}")
+    head_before = git(workspace, "rev-parse", "HEAD").stdout.decode().strip()
+    run_checked(["pnpm", "install", "--frozen-lockfile"], workspace)
+    if lane["mode"] == "general":
+        command = ["pnpm", "run", "test:run:general", "--", "--group", lane["group"]]
+        if lane["shardCount"] > 1:
+            command += ["--shard-index", str(lane["shardIndex"]), "--shard-count", str(lane["shardCount"])]
+    else:
+        command = ["pnpm", "run", "test:run:serialized", "--", "--shard-index", str(lane["shardIndex"]), "--shard-count", str(lane["shardCount"])]
+    run_checked(command, workspace)
+    if git(workspace, "rev-parse", "HEAD").stdout.decode().strip() != head_before or git(workspace, "status", "--porcelain").stdout:
+        raise TrainError("test lane changed the prepared source worktree")
+    receipt = {
+        "schemaVersion": 1,
+        "sourceCommit": provenance["sourceCommit"],
+        "patchCommit": provenance["patchCommit"],
+        "patchTree": provenance["patchTree"],
+        "planDigest": sha256(canonical_json(plan)),
+        "lane": lane,
+        "frozenInstall": True,
+        "passed": True,
+    }
+    write_json(output / f"test-{lane_id}.json", receipt)
+    return receipt
+
+
 def validate_patch_runtime_paths(workspace: Path, release_packages: list[dict[str, Any]], changed: list[str]) -> None:
     closure = production_package_closure(workspace, release_packages)
     for item in release_packages:
@@ -517,22 +714,55 @@ def validate_patch_runtime_paths(workspace: Path, release_packages: list[dict[st
             raise TrainError(f"pinned patch changes runtime source outside the installed production package closure: {item['name']}")
 
 
-def build(workspace: Path, output: Path) -> dict[str, Any]:
+def validate_test_receipts(directory: Path, provenance: dict[str, Any], plan_path: Path | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    plan = load_test_plan(plan_path or directory / "test-plan.json", provenance)
+    digest = sha256(canonical_json(plan))
+    expected_by_id = {lane["id"]: lane for lane in plan["lanes"]}
+    receipts: dict[str, dict[str, Any]] = {}
+    for path in sorted(directory.glob("test-*.json")):
+        if path.name == "test-plan.json":
+            continue
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        lane = receipt.get("lane")
+        lane_id = lane.get("id") if isinstance(lane, dict) else None
+        if not isinstance(lane_id, str) or lane_id not in expected_by_id:
+            raise TrainError(f"unexpected test receipt or lane: {path.name}")
+        if lane_id in receipts or path.name != f"test-{lane_id}.json":
+            raise TrainError(f"duplicate or misnamed test receipt: {path.name}")
+        if (
+            receipt.get("schemaVersion") != 1
+            or receipt.get("sourceCommit") != provenance["sourceCommit"]
+            or receipt.get("patchCommit") != provenance["patchCommit"]
+            or receipt.get("patchTree") != provenance["patchTree"]
+            or receipt.get("planDigest") != digest
+            or lane != expected_by_id[lane_id]
+            or receipt.get("frozenInstall") is not True
+            or receipt.get("passed") is not True
+        ):
+            raise TrainError(f"test receipt does not prove its exact lane and source: {path.name}")
+        receipts[lane_id] = receipt
+    if set(receipts) != set(expected_by_id):
+        missing = sorted(set(expected_by_id) - set(receipts))
+        raise TrainError("test receipts are incomplete; missing: " + ", ".join(missing))
+    return plan, [receipts[lane["id"]] for lane in plan["lanes"]]
+
+
+def build(workspace: Path, output: Path, test_receipts: Path | None = None) -> dict[str, Any]:
     provenance, release_packages = load_provenance(workspace, output)
+    test_evidence = None
+    if test_receipts is not None:
+        _, test_evidence = validate_test_receipts(test_receipts, provenance, output / "test-plan.json")
     commands = [
         ["pnpm", "install", "--frozen-lockfile"],
         ["pnpm", "-r", "typecheck"],
-        ["pnpm", "test:run"],
         ["pnpm", "build"],
         ["node", "scripts/build-standalone-public-packages.mjs"],
         ["bash", "scripts/prepare-server-ui-dist.sh"],
     ]
+    if test_receipts is None:
+        commands.insert(2, ["pnpm", "test:run"])
     for command in commands:
-        print("+ " + " ".join(command), flush=True)
-        clean_env = os.environ.copy()
-        clean_env.pop("GH_TOKEN", None)
-        clean_env.pop("GITHUB_TOKEN", None)
-        subprocess.run(command, cwd=workspace, check=True, env=clean_env)
+        run_checked(command, workspace)
     for package_dir in ("server", "packages/adapters/claude-local", "packages/adapters/codex-local"):
         source, destination = workspace / "skills", workspace / package_dir / "skills"
         if destination.exists():
@@ -555,6 +785,8 @@ def build(workspace: Path, output: Path) -> dict[str, Any]:
         "quality": {"frozenInstall": True, "typecheck": True, "tests": True, "build": True, "standalonePackages": True, "serverUi": True},
         "runtimeTrees": runtime_trees,
     }
+    if test_evidence is not None:
+        result["testEvidence"] = test_evidence
     write_json(output / "build.json", result)
     return result
 
@@ -738,6 +970,8 @@ def package(workspace: Path, output: Path) -> dict[str, Any]:
         "quality": quality,
         "archiveSha256": sha256(payload.read_bytes()),
     }
+    if "testEvidence" in build_result:
+        manifest["testEvidence"] = build_result["testEvidence"]
     write_json(output / "manifest.json", manifest)
     return manifest
 
@@ -745,20 +979,28 @@ def package(workspace: Path, output: Path) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("prepare", "build", "package"):
+    for name in ("prepare", "plan", "test", "build", "package"):
         command = commands.add_parser(name)
         command.add_argument("--workspace", type=Path, required=True)
         command.add_argument("--output", type=Path, required=True)
         if name == "prepare":
             command.add_argument("--manifest", type=Path, required=True)
+        elif name == "test":
+            command.add_argument("--lane", required=True)
+        elif name == "build":
+            command.add_argument("--test-receipts", type=Path)
     args = parser.parse_args(argv)
     try:
         workspace, output = args.workspace.resolve(), args.output.resolve()
         if args.command == "prepare":
             manifest = validate_manifest(json.loads(args.manifest.read_text(encoding="utf-8")))
             result = prepare(workspace, output, manifest, args.manifest)
+        elif args.command == "plan":
+            result = create_test_plan(workspace, output)
+        elif args.command == "test":
+            result = run_test_lane(workspace, output, args.lane)
         elif args.command == "build":
-            result = build(workspace, output)
+            result = build(workspace, output, args.test_receipts.resolve() if args.test_receipts else None)
         else:
             result = package(workspace, output)
         print(json.dumps(result, indent=2, ensure_ascii=False))

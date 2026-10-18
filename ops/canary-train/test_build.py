@@ -220,6 +220,184 @@ class FailClosedPolicyTests(unittest.TestCase):
                 )
 
 
+class PlanConstructionTests(unittest.TestCase):
+    def make_dry_run(self, duplicate_server=False, unknown_group=False):
+        groups = sorted(build.EXPECTED_GENERAL_GROUPS)
+        if unknown_group:
+            groups.append("new-upstream-group")
+        serialized = ["route/a.test.ts", "route/b.test.ts", "route/c.test.ts"]
+        server = [[f"server/{index}.test.ts"] for index in range(4)]
+        workspace_projects = {
+            "general-workspaces-a": ["@paperclipai/ui", "paperclipai"],
+            "general-workspaces-b": ["@paperclipai/shared", "@paperclipai/create-paperclip-plugin"],
+            "general-workspaces-c": ["@paperclipai/db"],
+        }
+        if duplicate_server:
+            server[1].append(server[0][0])
+
+        def fake(_workspace, *flags):
+            args = list(flags)
+            if args == ["--mode", "all"]:
+                return {"mode": "all", "availableGeneralGroups": groups, "selectedSerializedSuites": serialized, "generalServerSuiteCount": 4}
+            mode = args[args.index("--mode") + 1]
+            if mode == "general" and "--group" not in args:
+                return {"selectedGeneralServerSuites": None}
+            if mode == "general":
+                group = args[args.index("--group") + 1]
+                if group == "general-server":
+                    index = int(args[args.index("--shard-index") + 1])
+                    count = int(args[args.index("--shard-count") + 1])
+                    if count == 1:
+                        return {"selectedGeneralServerSuites": [item for shard in server for item in shard]}
+                    return {"selectedGeneralServerSuites": server[index]}
+                if group == "general-server-native-runner":
+                    return {"selectedGeneralServerSuites": ["server/0.test.ts"]}
+                return {"workspaceProjects": workspace_projects[group]}
+            if mode == "serialized":
+                index = int(args[args.index("--shard-index") + 1])
+                return {"selectedSerializedSuites": serialized[index::2]}
+            raise AssertionError(flags)
+        return fake
+
+    def test_plan_uses_exactly_nine_lanes_and_complete_disjoint_inventories(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp)
+            provenance = {"sourceCommit": "a" * 40, "patchCommit": "b" * 40, "patchTree": "c" * 40}
+            with patch.object(build, "load_provenance", return_value=(provenance, [])), patch.object(build, "wrapper_dry_run", side_effect=self.make_dry_run()):
+                plan = build.create_test_plan(Path(temp), output)
+            self.assertEqual(len(plan["lanes"]), 9)
+            self.assertEqual(plan["serverInventoryCount"], 4)
+            self.assertEqual(plan["serializedInventoryCount"], 3)
+            self.assertEqual([lane["id"] for lane in plan["lanes"][-2:]], ["serialized-1-of-2", "serialized-2-of-2"])
+            self.assertEqual(build.load_test_plan(output / "test-plan.json", provenance), plan)
+
+    def test_plan_fails_closed_on_unknown_group_or_overlapping_partition(self):
+        for fake in (self.make_dry_run(duplicate_server=True), self.make_dry_run(unknown_group=True)):
+            with self.subTest(fake=fake), tempfile.TemporaryDirectory() as temp:
+                provenance = {"sourceCommit": "a" * 40, "patchCommit": "b" * 40, "patchTree": "c" * 40}
+                with patch.object(build, "load_provenance", return_value=(provenance, [])), patch.object(build, "wrapper_dry_run", side_effect=fake):
+                    with self.assertRaises(build.TrainError):
+                        build.create_test_plan(Path(temp), Path(temp))
+
+
+class ShardedTestReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self.provenance = {"sourceCommit": "a" * 40, "patchCommit": "b" * 40, "patchTree": "c" * 40}
+        self.plan = {
+            "schemaVersion": 1,
+            **self.provenance,
+            "serverInventoryCount": 4,
+            "serializedInventoryCount": 2,
+            "workspaceProjects": {
+                "general-workspaces-a": ["@paperclipai/ui", "paperclipai"],
+                "general-workspaces-b": ["@paperclipai/shared", "@paperclipai/create-paperclip-plugin"],
+                "general-workspaces-c": ["@paperclipai/db"],
+            },
+            "lanes": [
+                {"id": f"general-server-{i + 1}-of-4", "mode": "general", "group": "general-server", "shardIndex": i, "shardCount": 4}
+                for i in range(4)
+            ] + [
+                {"id": group, "mode": "general", "group": group, "shardIndex": 0, "shardCount": 1}
+                for group in ("general-workspaces-a", "general-workspaces-b", "general-workspaces-c")
+            ] + [
+                {"id": f"serialized-{i + 1}-of-2", "mode": "serialized", "group": "serialized", "shardIndex": i, "shardCount": 2}
+                for i in range(2)
+            ],
+        }
+
+    def write_receipt_set(self, directory, mutate=None):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "test-plan.json").write_bytes(build.canonical_json(self.plan))
+        digest = build.sha256(build.canonical_json(self.plan))
+        for lane in self.plan["lanes"]:
+            receipt = {"schemaVersion": 1, **self.provenance, "planDigest": digest, "lane": lane, "frozenInstall": True, "passed": True}
+            if mutate:
+                receipt = mutate(lane, receipt)
+            (directory / f"test-{lane['id']}.json").write_bytes(build.canonical_json(receipt))
+
+    def test_accepts_exact_complete_nine_lane_receipt_set(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            self.write_receipt_set(directory)
+            plan, receipts = build.validate_test_receipts(directory, self.provenance)
+            self.assertEqual(len(plan["lanes"]), 9)
+            self.assertEqual(len(receipts), 9)
+            self.assertTrue(all(item["passed"] is True for item in receipts))
+
+    def test_rejects_missing_lane(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            self.write_receipt_set(directory)
+            (directory / "test-general-workspaces-b.json").unlink()
+            with self.assertRaisesRegex(build.TrainError, "incomplete"):
+                build.validate_test_receipts(directory, self.provenance)
+
+    def test_rejects_duplicate_lane_receipt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            self.write_receipt_set(directory)
+            (directory / "test-duplicate.json").write_bytes((directory / "test-general-workspaces-a.json").read_bytes())
+            with self.assertRaisesRegex(build.TrainError, "duplicate or misnamed"):
+                build.validate_test_receipts(directory, self.provenance)
+
+    def test_rejects_wrong_source_lane_or_failed_receipt(self):
+        for field, value in (
+            ("sourceCommit", "d" * 40),
+            ("lane", {"id": "general-workspaces-a", "mode": "general", "group": "general-workspaces-b", "shardIndex": 0, "shardCount": 1}),
+            ("passed", False),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp)
+                self.write_receipt_set(directory, lambda lane, receipt: {**receipt, field: value} if lane["id"] == "general-workspaces-a" else receipt)
+                with self.assertRaisesRegex(build.TrainError, "exact lane and source"):
+                    build.validate_test_receipts(directory, self.provenance)
+
+    def test_rejects_plan_from_another_source_and_missing_plan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            self.write_receipt_set(directory)
+            with self.assertRaisesRegex(build.TrainError, "immutable source"):
+                build.validate_test_receipts(directory, {**self.provenance, "sourceCommit": "d" * 40})
+            (directory / "test-plan.json").unlink()
+            with self.assertRaisesRegex(build.TrainError, "missing"):
+                build.validate_test_receipts(directory, self.provenance)
+
+
+class BuildReceiptGateTests(unittest.TestCase):
+    def fixture(self, root):
+        workspace = root / "source"
+        output = root / "output"
+        (workspace / "skills").mkdir(parents=True)
+        output.mkdir()
+        provenance = {"version": "2026.1018.0-canary.1", "sourceCommit": "a" * 40, "patchCommit": "b" * 40, "patchTree": "c" * 40}
+        return workspace, output, provenance
+
+    def test_receipt_build_skips_redundant_full_suite_and_sets_test_gate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace, output, provenance = self.fixture(Path(temp))
+            commands = []
+            with patch.object(build, "load_provenance", return_value=(provenance, [])), \
+                 patch.object(build, "validate_test_receipts", return_value=({}, [{"passed": True}] * 9)), \
+                 patch.object(build, "run_checked", side_effect=lambda command, _workspace: commands.append(command)), \
+                 patch.object(build, "runtime_directories", return_value={}), \
+                 patch.object(build, "git", return_value=type("Result", (), {"stdout": b""})()):
+                result = build.build(workspace, output, Path(temp) / "receipts")
+            self.assertNotIn(["pnpm", "test:run"], commands)
+            self.assertTrue(result["quality"]["tests"])
+            self.assertEqual(len(result["testEvidence"]), 9)
+
+    def test_invalid_receipt_set_blocks_install_and_build(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace, output, provenance = self.fixture(Path(temp))
+            commands = []
+            with patch.object(build, "load_provenance", return_value=(provenance, [])), \
+                 patch.object(build, "validate_test_receipts", side_effect=build.TrainError("missing lane")), \
+                 patch.object(build, "run_checked", side_effect=lambda command, _workspace: commands.append(command)):
+                with self.assertRaisesRegex(build.TrainError, "missing lane"):
+                    build.build(workspace, output, Path(temp) / "receipts")
+            self.assertEqual(commands, [])
+
+
 class ArtifactTests(unittest.TestCase):
     def make_checkout(self, root: Path) -> tuple[Path, Path]:
         workspace = root / "source"
