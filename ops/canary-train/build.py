@@ -292,11 +292,10 @@ def resolve_canary() -> tuple[str, dict[str, dict[str, Any]], str]:
     docs: dict[str, dict[str, Any]] = {}
     versions = {}
     for name in DEFAULT_PACKAGES:
-        tags = http_json(npm_url(name, "dist-tags"))
-        version = tags.get("canary")
+        doc = http_json(npm_url(name, "canary"))
+        version = doc.get("version")
         if not isinstance(version, str) or not version:
             raise TrainError(f"npm canary tag is missing for {name}")
-        doc = http_json(npm_url(name, urllib.parse.quote(version, safe="")))
         if doc.get("name") != name or doc.get("version") != version or not isinstance(doc.get("dist", {}).get("tarball"), str):
             raise TrainError(f"npm metadata identity mismatch for {name}@{version}")
         docs[name], versions[name] = doc, version
