@@ -38,6 +38,7 @@ NATIVE_RUNNER_TEST_MARKERS = (
     'execFileSync("cargo"', "execFileSync('cargo'",
     "existsSync(defaultCapabilityRunnerdBinary())", "existsSync(fakeCodexAppServer)",
 )
+RELEASE_SKILLS_PACKAGE_DIRS = {"server", "packages/adapters/claude-local", "packages/adapters/codex-local"}
 DEPENDENCY_FILES = {
     "pnpm-lock.yaml", "pnpm-workspace.yaml", "package-lock.json",
     "npm-shrinkwrap.json", "yarn.lock", "bun.lock", "bun.lockb", ".npmrc",
@@ -810,15 +811,10 @@ def build(workspace: Path, output: Path, test_receipts: Path | None = None) -> d
         commands.insert(2, ["pnpm", "test:run"])
     for command in commands:
         run_checked(command, workspace)
-    for package_dir in ("server", "packages/adapters/claude-local", "packages/adapters/codex-local"):
-        source, destination = workspace / "skills", workspace / package_dir / "skills"
-        if destination.exists():
-            if hash_tree(destination) != hash_tree(source):
-                raise TrainError(f"refusing to replace non-identical generated skills directory: {destination}")
-        else:
-            shutil.copytree(source, destination)
-    if git(workspace, "status", "--porcelain").stdout:
-        raise TrainError("release build left source changes; refusing to package dirty worktree")
+    status = git(workspace, "status", "--porcelain").stdout
+    if status:
+        paths = status.decode("utf-8", "replace").strip()[:4000]
+        raise TrainError("release build left source changes; refusing to package dirty worktree: " + paths)
     runtime_trees = {
         name: sha256(canonical_json(hash_tree(path)))
         for name, path in sorted(runtime_directories(workspace, release_packages).items())
@@ -924,6 +920,11 @@ def runtime_directories(workspace: Path, release_manifest: list[dict[str, Any]])
             if any(part == "package.json" for part in path.parts) or "*" in entry:
                 raise TrainError(f"{name} has an unsupported npm files entry: {raw_entry}")
             target = source / Path(*path.parts)
+            if entry == "skills" and relative in RELEASE_SKILLS_PACKAGE_DIRS:
+                # release.sh copies the canonical skills tree into these npm
+                # packages. Read it directly at the archive boundary instead
+                # of creating untracked publish staging files in the source.
+                target = workspace / "skills"
             if target.is_dir() or target.is_file():
                 result[f"{name}#{path.as_posix()}"] = target
             else:

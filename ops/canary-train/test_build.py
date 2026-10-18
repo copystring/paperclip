@@ -431,6 +431,35 @@ class BuildReceiptGateTests(unittest.TestCase):
         provenance = {"version": "2026.1018.0-canary.1", "sourceCommit": "a" * 40, "patchCommit": "b" * 40, "patchTree": "c" * 40}
         return workspace, output, provenance
 
+    def test_build_keeps_source_clean_without_staging_publish_skills(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace, output, provenance = self.fixture(Path(temp))
+            (workspace / "skills/base.md").write_text("canonical skill")
+            for args in (["init", "-b", build.PATCH_BRANCH], ["config", "user.name", "test"],
+                         ["config", "user.email", "test@example.invalid"], ["add", "."],
+                         ["commit", "-m", "source"]):
+                subprocess.run(["git", *args], cwd=workspace, check=True, capture_output=True)
+            with patch.object(build, "load_provenance", return_value=(provenance, [])), \
+                 patch.object(build, "validate_test_receipts", return_value=({}, [{"passed": True}] * 9)), \
+                 patch.object(build, "run_checked"), patch.object(build, "runtime_directories", return_value={}):
+                build.build(workspace, output, Path(temp) / "receipts")
+            self.assertEqual(build.git(workspace, "status", "--porcelain").stdout, b"")
+            for package_dir in build.RELEASE_SKILLS_PACKAGE_DIRS:
+                self.assertFalse((workspace / package_dir / "skills").exists())
+            for dirty_kind in ("tracked", "untracked"):
+                with self.subTest(dirty_kind=dirty_kind):
+                    dirty = workspace / ("skills/base.md" if dirty_kind == "tracked" else "unexpected.txt")
+                    dirty.write_text("unexpected source change")
+                    with patch.object(build, "load_provenance", return_value=(provenance, [])), \
+                         patch.object(build, "validate_test_receipts", return_value=({}, [])), \
+                         patch.object(build, "run_checked"):
+                        with self.assertRaisesRegex(build.TrainError, "source changes"):
+                            build.build(workspace, output, Path(temp) / "receipts")
+                    if dirty_kind == "tracked":
+                        dirty.write_text("canonical skill")
+                    else:
+                        dirty.unlink()
+
     def test_receipt_build_skips_redundant_full_suite_and_sets_test_gate(self):
         with tempfile.TemporaryDirectory() as temp:
             workspace, output, provenance = self.fixture(Path(temp))
@@ -464,12 +493,14 @@ class ArtifactTests(unittest.TestCase):
         subprocess.run(["git", "init", "-b", build.PATCH_BRANCH], cwd=workspace, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "test"], cwd=workspace, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=workspace, check=True)
-        (workspace / ".gitignore").write_text("**/dist/\n**/ui-dist/\nserver/skills/\npackages/adapters/*/skills/\n")
+        (workspace / ".gitignore").write_text("**/dist/\n**/ui-dist/\n")
         package_entries = [
             {"name": "paperclipai", "dir": "cli", "publishFromCi": True},
             {"name": "@paperclipai/server", "dir": "server", "publishFromCi": True},
             {"name": "@paperclipai/db", "dir": "packages/db", "publishFromCi": True},
             {"name": "@paperclipai/hermes-paperclip-adapter", "dir": "packages/adapters/hermes", "publishFromCi": True},
+            {"name": "@paperclipai/adapter-claude-local", "dir": "packages/adapters/claude-local", "publishFromCi": True},
+            {"name": "@paperclipai/adapter-codex-local", "dir": "packages/adapters/codex-local", "publishFromCi": True},
             {"name": "@paperclipai/plugin-cloudflare-sandbox", "dir": "packages/plugins/sandbox-providers/cloudflare", "publishFromCi": True},
             {"name": "@paperclipai/ui", "dir": "ui", "publishFromCi": True},
         ]
@@ -482,7 +513,8 @@ class ArtifactTests(unittest.TestCase):
             },
             "server/package.json": {
                 "name": "@paperclipai/server", "files": ["dist", "ui-dist", "skills"],
-                "dependencies": {"@paperclipai/db": "workspace:*", "@paperclipai/hermes-paperclip-adapter": "workspace:*"},
+                "dependencies": {"@paperclipai/db": "workspace:*", "@paperclipai/hermes-paperclip-adapter": "workspace:*",
+                                 "@paperclipai/adapter-claude-local": "workspace:*", "@paperclipai/adapter-codex-local": "workspace:*"},
             },
             "packages/db/package.json": {"name": "@paperclipai/db", "files": ["dist"]},
             "packages/adapters/hermes/package.json": {
@@ -508,11 +540,11 @@ class ArtifactTests(unittest.TestCase):
             "packages/adapters/hermes/ui-parser.cjs": b"module.exports = {};",
             "packages/adapters/hermes/gateway-ui-parser.cjs": b"module.exports = {};",
             "packages/plugins/sandbox-providers/cloudflare/dist/index.js": b"standalone plugin runtime",
-            "server/skills/base.md": b"server skill",
-            "packages/adapters/claude-local/package.json": json.dumps({"name": "@paperclipai/adapter-claude-local"}).encode(),
-            "packages/adapters/claude-local/skills/base.md": b"claude skill",
-            "packages/adapters/codex-local/package.json": json.dumps({"name": "@paperclipai/adapter-codex-local"}).encode(),
-            "packages/adapters/codex-local/skills/base.md": b"codex skill",
+            "skills/base.md": b"canonical skill",
+            "packages/adapters/claude-local/package.json": json.dumps({"name": "@paperclipai/adapter-claude-local", "files": ["dist", "skills"]}).encode(),
+            "packages/adapters/claude-local/dist/index.js": b"claude runtime",
+            "packages/adapters/codex-local/package.json": json.dumps({"name": "@paperclipai/adapter-codex-local", "files": ["dist", "skills"]}).encode(),
+            "packages/adapters/codex-local/dist/index.js": b"codex runtime",
         }
         for relative, data in output_map.items():
             path = workspace / relative
@@ -559,6 +591,13 @@ class ArtifactTests(unittest.TestCase):
             self.assertIn("node_modules/@paperclipai/server/dist/index.js", first["files"])
             self.assertIn("node_modules/@paperclipai/server/ui-dist/index.html", first["files"])
             self.assertIn("node_modules/@paperclipai/server/skills/base.md", first["files"])
+            self.assertEqual(first["files"]["node_modules/@paperclipai/server/skills/base.md"],
+                             hashlib.sha256(b"canonical skill").hexdigest())
+            for name in ("adapter-claude-local", "adapter-codex-local"):
+                self.assertEqual(first["files"][f"node_modules/@paperclipai/{name}/skills/base.md"],
+                                 hashlib.sha256(b"canonical skill").hexdigest())
+            self.assertFalse((workspace / "server/skills").exists())
+            self.assertEqual(build.git(workspace, "status", "--porcelain").stdout, b"")
             self.assertIn("node_modules/@paperclipai/db/dist/index.js", first["files"])
             self.assertIn("node_modules/@paperclipai/hermes-paperclip-adapter/ui-parser.cjs", first["files"])
             self.assertIn("node_modules/@paperclipai/hermes-paperclip-adapter/gateway-ui-parser.cjs", first["files"])
