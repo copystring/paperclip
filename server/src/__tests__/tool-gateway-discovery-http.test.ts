@@ -36,6 +36,94 @@ suite("MCP discovery over HTTP", () => {
     await post("tools/call", { name: "paperclip_search_tools", arguments: {} }).expect(403);
   });
 
+  it("authorizes on-demand calls with their actual arguments when a field-absence policy hides the listing", async () => {
+    const fixture = await createListingFixture(db, 6);
+    await db.insert(connectionGrants).values({ companyId: fixture.company.id, connectionId: fixture.connection.id,
+      kind: "organization", status: "active", isDefault: true });
+    const initialCatalog = await createToolGatewayService(db).listToolsForNamedGateway({
+      gatewayId: fixture.namedGateway.id, bearerToken: fixture.token.token,
+    });
+    const toolName = initialCatalog.find((tool) => tool.catalogEntryId === fixture.entries[4]!.id)!.name;
+    await db.insert(toolPolicies).values({
+      companyId: fixture.company.id,
+      name: `Block missing query ${randomUUID()}`,
+      policyType: "block",
+      priority: 0,
+      selectors: { catalogEntryId: fixture.entries[4]!.id },
+      conditions: { arguments: { fieldAbsent: ["query"] } },
+    });
+    const calls: string[] = [];
+    const gateway = createToolGatewayService(db, {
+      remoteHttpRequest: async (_url, init) => {
+        const body = JSON.parse(String(init.body));
+        if (body.method === "tools/call") calls.push(body.params.name);
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id,
+          result: body.method === "initialize"
+            ? { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "fixture", version: "1" } }
+            : { content: [{ type: "text", text: "fixture result" }] },
+        }), { headers: { "content-type": "application/json" } });
+      },
+    });
+    const app = express().use(express.json()).use(mcpGatewayProtocolRoutes(gateway));
+    const post = (method: string, params?: unknown) => request(app)
+      .post(`/mcp/gateways/${fixture.namedGateway.gatewayPublicId}?catalog=on-demand`)
+      .set("Authorization", `Bearer ${fixture.token.token}`).send({ jsonrpc: "2.0", id: 1, method, params });
+    const listed = await post("tools/list").expect(200);
+    expect(listed.body.result.tools.some((tool: { name: string }) => tool.name === toolName)).toBe(false);
+    const search = await post("tools/call", {
+      name: "paperclip_search_tools", arguments: { query: toolName },
+    }).expect(200);
+    expect(JSON.parse(search.body.result.content[0].text).tools).toEqual([]);
+
+    const withQuery = await post("tools/call", {
+      name: "paperclip_call_tool", arguments: { name: toolName, arguments: { query: "recent" } },
+    });
+    expect(withQuery.status, JSON.stringify(withQuery.body)).toBe(200);
+    const withoutQuery = await post("tools/call", {
+      name: "paperclip_call_tool", arguments: { name: toolName, arguments: {} },
+    }).expect(403);
+    expect(withoutQuery.body.error.data.reasonCode).toBe("deny_policy_block");
+    expect(calls).toEqual(["tool_0004"]);
+  });
+
+  it("counts an on-demand search and each wrapped call once against protocol rate limits", async () => {
+    const fixture = await createListingFixture(db, 6);
+    await db.insert(connectionGrants).values({ companyId: fixture.company.id, connectionId: fixture.connection.id,
+      kind: "organization", status: "active", isDefault: true });
+    const initialCatalog = await createToolGatewayService(db).listToolsForNamedGateway({
+      gatewayId: fixture.namedGateway.id, bearerToken: fixture.token.token,
+    });
+    const toolName = initialCatalog.find((tool) => tool.catalogEntryId === fixture.entries[4]!.id)!.name;
+    const calls: string[] = [];
+    const gateway = createToolGatewayService(db, {
+      mcpGatewayProtocolLimits: {
+        tokenRequests: { windowMs: 60_000, max: 2 },
+        gatewayRequests: { windowMs: 60_000, max: 2 },
+      },
+      remoteHttpRequest: async (_url, init) => {
+        const body = JSON.parse(String(init.body));
+        if (body.method === "tools/call") calls.push(body.params.name);
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id,
+          result: body.method === "initialize"
+            ? { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "fixture", version: "1" } }
+            : { content: [{ type: "text", text: "fixture result" }] },
+        }), { headers: { "content-type": "application/json" } });
+      },
+    });
+    const app = express().use(express.json()).use(mcpGatewayProtocolRoutes(gateway));
+    const post = (params: unknown) => request(app)
+      .post(`/mcp/gateways/${fixture.namedGateway.gatewayPublicId}?catalog=on-demand`)
+      .set("Authorization", `Bearer ${fixture.token.token}`)
+      .send({ jsonrpc: "2.0", id: 1, method: "tools/call", params });
+
+    await post({ name: "paperclip_search_tools", arguments: { query: toolName } }).expect(200);
+    const firstCall = await post({ name: "paperclip_call_tool", arguments: { name: toolName, arguments: { query: "recent" } } });
+    expect(firstCall.status, JSON.stringify(firstCall.body)).toBe(200);
+    const limited = await post({ name: "paperclip_call_tool", arguments: { name: toolName, arguments: { query: "again" } } }).expect(429);
+    expect(limited.body.error.data.reasonCode).toBe("gateway_rate_limited");
+    expect(calls).toEqual(["tool_0004"]);
+  });
+
   it("finishes an admitted provider call when token cleanup runs during dispatch", async () => {
     const fixture = await createListingFixture(db, 6);
     await db.insert(connectionGrants).values({ companyId: fixture.company.id, connectionId: fixture.connection.id,
@@ -116,7 +204,7 @@ suite("MCP discovery over HTTP", () => {
       companyId: fixture.company.id, name: `Revoke ${randomUUID()}`, policyType: "block", priority: 0,
       selectors: { catalogEntryId: fixture.entries[4]!.id },
     });
-    await post("tools/call", callParams).expect(onDemand ? 404 : 403);
+    await post("tools/call", callParams).expect(403);
     expect(calls).toHaveLength(1);
     const after = await post("tools/list").expect(200);
     expect(after.body.result.tools.some((tool: { name: string }) => tool.name === read.name)).toBe(false);

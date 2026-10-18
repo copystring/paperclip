@@ -586,6 +586,76 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     await tempDb?.cleanup();
   });
 
+  it("validates on-demand calls against caller schema before injecting managed connector arguments", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({
+      body: {
+        jsonrpc: "2.0",
+        id: body?.id,
+        result: { content: [{ type: "text", text: "Honcho result" }] },
+      },
+    }));
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        applicationKey: "honcho",
+        toolName: "search_memory",
+        url: remote.url,
+        riskLevel: "read",
+        connectionConfig: {
+          sourceTemplateKey: "honcho",
+          connectionMethodKey: "mcp-api-key",
+          methodConfig: { workspaceId: "team-workspace" },
+        },
+      });
+      await db.update(toolCatalogEntries).set({
+        inputSchema: {
+          type: "object",
+          properties: { workspace_id: { type: "string" }, query: { type: "string" } },
+          required: ["workspace_id", "query"],
+          additionalProperties: false,
+        },
+      }).where(eq(toolCatalogEntries.id, catalogEntry.id));
+      const toolName = expectedConnectedToolName({
+        applicationKey: application.applicationKey,
+        connectionId: connection.id,
+        toolName: catalogEntry.toolName,
+      });
+      await allowToolsForAgent(db, company.id, agent.id, [toolName]);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const listedTool = (await gateway.listToolsForSession(session.token)).find((tool) => tool.name === toolName)!;
+      expect(listedTool.parametersSchema).toMatchObject({
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+        additionalProperties: false,
+      });
+      expect(JSON.stringify(listedTool.parametersSchema)).not.toContain("workspace_id");
+
+      await expect(gateway.executeTool({
+        sessionToken: session.token,
+        tool: toolName,
+        parameters: { query: "recent decisions" },
+        validateParametersSchema: true,
+      })).resolves.toMatchObject({ status: "completed" });
+      expect(remote.requests.filter((entry) => entry.body?.method === "tools/call").at(-1)?.body).toMatchObject({
+        params: { name: "search_memory", arguments: { query: "recent decisions", workspace_id: "team-workspace" } },
+      });
+
+      await expect(gateway.executeTool({
+        sessionToken: session.token,
+        tool: toolName,
+        parameters: { query: "recent decisions", workspace_id: "forged-workspace" },
+        validateParametersSchema: true,
+      })).rejects.toMatchObject({ code: "mcp_tool_catalog_arguments_invalid" });
+      expect(remote.requests.filter((entry) => entry.body?.method === "tools/call")).toHaveLength(1);
+    } finally {
+      await remote.close();
+    }
+  });
+
   it("preserves provider tool errors in MCP responses and failed invocation audits", async () => {
     const company = await createCompany(db);
     const remote = await startFakeRemoteMcpServer(({ body }) => ({

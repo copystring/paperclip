@@ -24,10 +24,13 @@ pass the reference's `expectedHash` when continuing. A changed value returns 409
 instead of silently combining revisions. No schema or instruction is truncated.
 
 Search and schema/text retrieval reload the authorized catalog on every request.
-Both catalog wrappers require the token's `tools/list` and `tools/call` actions.
-The call wrapper resolves an exact currently visible name and validates arguments
-against that tool's current schema without coercion, defaults or property removal.
-It then dispatches through the original `executeTool` path: run/company/identity,
+Search requires the token's `tools/list` and `tools/call` actions. The call wrapper
+uses the original `executeTool` path once: it resolves the exact current target,
+validates arguments against that tool's schema without coercion, defaults or
+property removal, before projecting server-managed provider fields. Policy still
+evaluates the actual governed arguments used for execution.
+Listing visibility with empty arguments is not an execution permission gate.
+Each incoming call consumes the normal protocol limits once. Run/company/identity,
 current grants, profiles, work-mode policy, approvals, invocation auditing and
 provider error handling remain authoritative. Discovery never authorizes execution.
 Direct application names are rejected in the opted-in projection; existing

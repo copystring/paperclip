@@ -22,7 +22,6 @@ import {
   createMcpToolCatalogDefinitions,
   searchMcpToolCatalog,
   parseMcpToolCall,
-  validateCatalogToolArguments,
   McpToolCatalogError,
 } from "../services/mcp-tool-catalog.js";
 
@@ -191,24 +190,20 @@ async function handleMcpGatewayProtocol(
         return;
       }
       if (onDemandCatalog) {
-        // Discovery is never a grant. Every page/schema and call reloads the
-        // existing authorized catalog, and execution still reauthorizes through
-        // executeTool (including approvals, token actions and invocation audit).
+        // Discovery is never a grant. Search reloads the authorized catalog;
+        // calls use executeTool's fresh target/argument-aware authorization.
         if (name !== "paperclip_search_tools" && name !== "paperclip_call_tool") {
           throw new ToolGatewayHttpError(404, "Use paperclip_search_tools and paperclip_call_tool in this catalog.", "catalog_tool_unknown");
         }
-        const tools = await discoveryRequest(req, res, (signal) => toolGateway.listToolsForNamedGateway({
-          ...locator, bearerToken: token, callerHeaders: headers, signal, requireToolCallAction: true,
-        }));
         if (name === "paperclip_search_tools") {
+          const tools = await discoveryRequest(req, res, (signal) => toolGateway.listToolsForNamedGateway({
+            ...locator, bearerToken: token, callerHeaders: headers, signal, requireToolCallAction: true,
+          }));
           const result = searchMcpToolCatalog(tools, parameters);
           res.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }], isError: false } });
           return;
         }
         const call = parseMcpToolCall(parameters);
-        const tool = tools.find((candidate) => candidate.name === call.name);
-        if (!tool) throw new ToolGatewayHttpError(404, "The tool is not in the current authorized catalog.", "catalog_tool_unknown");
-        validateCatalogToolArguments(tool, call.arguments);
         name = call.name;
         parameters = call.arguments;
       }
@@ -218,6 +213,7 @@ async function handleMcpGatewayProtocol(
         gatewayPublicId: locator.gatewayPublicId ?? null,
         tool: name,
         parameters,
+        ...(onDemandCatalog ? { validateParametersSchema: true } : {}),
         callerHeaders: req.headers,
       });
       const resultRecord = result.result && typeof result.result === "object" && !Array.isArray(result.result)

@@ -3,6 +3,7 @@ import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 import { mcpGatewayProtocolRoutes } from "../routes/tool-gateway.js";
 import { ToolGatewayHttpError, type ToolGatewayService } from "../services/tool-gateway.js";
+import { validateCatalogToolArguments } from "../services/mcp-tool-catalog.js";
 
 function fixture() {
   let visible = [{ name: "app:action", displayName: "Action", description: "Approval required.",
@@ -11,17 +12,24 @@ function fixture() {
   const authorize = (input: { bearerToken?: string; sessionToken?: string }) => {
     if ((input.bearerToken ?? input.sessionToken) !== "valid") throw new ToolGatewayHttpError(401, "Invalid token", "token_invalid");
   };
+  const provider = vi.fn(async () => ({ status: "completed", result: { data: { ok: true } } }));
   const gateway = {
     initializeNamedGatewayProtocol: vi.fn(async (input) => { authorize(input); return {}; }),
     listToolsForNamedGateway: vi.fn(async (input) => { authorize(input); return structuredClone(visible); }),
-    executeTool: vi.fn(async (input) => { authorize(input); return { status: "completed", result: { data: { ok: true } } }; }),
+    executeTool: vi.fn(async (input) => {
+      authorize(input);
+      const tool = visible.find(tool => tool.name === input.tool);
+      if (!tool) throw new ToolGatewayHttpError(404, "Unknown tool", "tool_unknown");
+      if (input.validateParametersSchema) validateCatalogToolArguments(tool, input.parameters);
+      return provider();
+    }),
     executeContextForNamedGateway: vi.fn(async (input) => { authorize(input); return { resources: [] }; }),
   };
   const app = express().use(express.json()).use(mcpGatewayProtocolRoutes(gateway as unknown as ToolGatewayService));
   const post = (method: string, params?: unknown, mode = "?catalog=on-demand", token = "valid") => request(app)
     .post(`/mcp/gateways/fixture${mode}`).set("Authorization", `Bearer ${token}`).set("X-Catalog-Test", "caller")
     .send({ jsonrpc: "2.0", id: 7, method, params });
-  return { gateway, post, revoke: () => { visible = []; } };
+  return { gateway, provider, post, revoke: () => { visible = []; } };
 }
 
 describe("on-demand named gateway catalog over HTTP", () => {
@@ -42,22 +50,24 @@ describe("on-demand named gateway catalog over HTTP", () => {
   });
 
   it("reauthorizes search and call and preserves the exact existing invocation inputs", async () => {
-    const { post, gateway, revoke } = fixture();
+    const { post, gateway, provider, revoke } = fixture();
     const search = await post("tools/call", { name: "paperclip_search_tools", arguments: { query: "Example" } }).expect(200);
     const result = JSON.parse(search.body.result.content[0].text);
     expect(result.tools[0]).toMatchObject({ name: "app:action", description: "Approval required.", risk: "write" });
     await post("tools/call", { name: "paperclip_call_tool", arguments: { name: result.tools[0].name, arguments: { value: "äÖ😀" } } }).expect(200);
     expect(gateway.executeTool).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       sessionToken: "valid", gatewayPublicId: "fixture", tool: "app:action", parameters: { value: "äÖ😀" },
+      validateParametersSchema: true,
       callerHeaders: expect.objectContaining({ "x-catalog-test": "caller" }),
     }));
     revoke();
     const after = await post("tools/call", { name: "paperclip_search_tools", arguments: { query: "Example" } }).expect(200);
     expect(JSON.parse(after.body.result.content[0].text).tools).toEqual([]);
     await post("tools/call", { name: "paperclip_call_tool", arguments: { name: "app:action", arguments: { value: "x" } } }).expect(404);
-    expect(gateway.listToolsForNamedGateway).toHaveBeenCalledTimes(4);
+    expect(gateway.listToolsForNamedGateway).toHaveBeenCalledTimes(2);
     expect(gateway.listToolsForNamedGateway).toHaveBeenLastCalledWith(expect.objectContaining({ requireToolCallAction: true }));
-    expect(gateway.executeTool).toHaveBeenCalledTimes(1);
+    expect(gateway.executeTool).toHaveBeenCalledTimes(2);
+    expect(provider).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -66,10 +76,10 @@ describe("on-demand named gateway catalog over HTTP", () => {
     { name: "paperclip_call_tool", arguments: { name: "app:action", arguments: { value: "x", extra: true } } },
     { name: "paperclip_call_tool", arguments: { name: "app:action", arguments: [] } },
   ])("rejects invalid wrapper/target arguments before dispatch: %j", async (params) => {
-    const { post, gateway } = fixture();
+    const { post, provider } = fixture();
     const result = await post("tools/call", params).expect(400);
     expect(result.body.error.code).toBe(-32602);
-    expect(gateway.executeTool).not.toHaveBeenCalled();
+    expect(provider).not.toHaveBeenCalled();
   });
 
   it("does not accept guessed direct names in on-demand mode, and keeps legacy direct calls", async () => {
