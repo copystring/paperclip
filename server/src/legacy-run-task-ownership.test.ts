@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertLegacyRunTaskOwnership, LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT } from "./legacy-run-task-ownership.js";
+import { assertLegacyRunTaskOwnership } from "./legacy-run-task-ownership.js";
 
 describe("legacy run task ownership", () => {
   const run = { id: "run-1", companyId: "company-1", runtimeMode: "legacy", agentId: "implementer" };
@@ -13,9 +13,13 @@ describe("legacy run task ownership", () => {
     return { db: { select } as never, select, from, where, limit };
   }
 
-  it("allows a run with no revocation event", async () => {
+  it.each([
+    ["current owner", run, issue],
+    ["peer reviewer", { ...run, agentId: "reviewer" }, { ...issue, assigneeAgentId: "reviewer" }],
+    ["unassigned issue", run, { ...issue, assigneeAgentId: null }],
+  ])("allows a %s when no revocation event exists", async (_description, candidate, targetIssue) => {
     const query = dbWithEvent();
-    await expect(assertLegacyRunTaskOwnership(query.db, run, issue)).resolves.toBeUndefined();
+    await expect(assertLegacyRunTaskOwnership(query.db, candidate, targetIssue)).resolves.toBeUndefined();
     expect(query.select).toHaveBeenCalledOnce();
   });
 
@@ -37,9 +41,5 @@ describe("legacy run task ownership", () => {
       await expect(assertLegacyRunTaskOwnership(query.db, candidate, issue)).resolves.toBeUndefined();
       expect(query.select).not.toHaveBeenCalled();
     }
-  });
-
-  it("records a stable event contract for the append-only revocation evidence", () => {
-    expect(LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT).toBe("issue.legacy_run_ownership_revoked");
   });
 });

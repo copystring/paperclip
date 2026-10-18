@@ -40,6 +40,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { instanceSettingsService } from "../services/instance-settings.ts";
+import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
 import {
   clampIssueListLimit,
   deriveIssueCommentRunLogAttribution,
@@ -6749,6 +6750,17 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
       issueId: seeded.issueId,
       ownerAgentId: seeded.assigneeAgentId,
     });
+    await expect(assertLegacyRunTaskOwnership(db, {
+      id: seeded.staleRunId,
+      companyId: original!.companyId,
+      runtimeMode: "legacy",
+      agentId: seeded.assigneeAgentId,
+    }, {
+      id: randomUUID(),
+      companyId: original!.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      assigneeUserId: null,
+    })).resolves.toBeUndefined();
 
     // A delayed writer can replace the entire context with its stale in-memory
     // copy. The event is independent of that snapshot and remains authoritative.
