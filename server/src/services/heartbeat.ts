@@ -1402,20 +1402,25 @@ export function heartbeatService(
     return runControl.cancelBudgetScopeWork(...args);
   }
 
-  function releaseIssueExecutionAndPromote(...args: Parameters<typeof runControl.releaseIssueExecutionAndPromote>) {
+  async function releaseIssueExecutionAndPromote(...args: Parameters<typeof runControl.releaseIssueExecutionAndPromote>) {
     const [run, options] = args;
+    const activeRun = !options?.deferredPostCommitEffects && activeRunExecutions.has(run.id)
+      ? await getRun(run.id)
+      : null;
     // The deferred replay below belongs to the legacy process/lease cleanup
     // tail. Native completion owns its durable finalization and has no matching
     // post-cleanup replay, so deferring a native release here strands any wake
-    // admitted while its controller is still active.
-    if (run.runtimeMode === "legacy" && activeRunExecutions.has(run.id) && !options?.deferredPostCommitEffects) {
+    // admitted while its controller is still active. The persisted run is the
+    // authoritative mode because this callback's shared release contract only
+    // carries identity fields.
+    if (activeRunExecutions.has(run.id) && activeRun?.runtimeMode === "legacy" && !options?.deferredPostCommitEffects) {
       const previous = deferredIssueExecutionReleases.get(run.id);
       deferredIssueExecutionReleases.set(run.id, {
         suppressImmediateRecovery: Boolean(previous?.suppressImmediateRecovery || options?.suppressImmediateRecovery),
       });
-      return Promise.resolve();
+      return;
     }
-    return runControl.releaseIssueExecutionAndPromote(...args);
+    await runControl.releaseIssueExecutionAndPromote(...args);
   }
 
   function releaseEnvironmentLeasesForRun(...args: Parameters<typeof runControl.releaseEnvironmentLeasesForRun>) {

@@ -49,6 +49,11 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+function isAgentExecutionStagePrincipal(value: unknown, agentId: string): boolean {
+  const principal = parseObject(value);
+  return principal.type === "agent" && principal.agentId === agentId;
+}
+
 /** Rebuild stage instructions from current company-scoped issue state for every wake. */
 export function refreshCurrentExecutionStageContext(input: {
   context: Record<string, unknown>;
@@ -70,8 +75,8 @@ export function refreshCurrentExecutionStageContext(input: {
   const previous = parseObject(input.context.executionStage);
   if (input.recovering) {
     const sameParticipant = executionStage?.wakeRole === "executor"
-      ? previous.returnAssignee?.type === "agent" && previous.returnAssignee.agentId === input.agentId
-      : previous.currentParticipant?.type === "agent" && previous.currentParticipant.agentId === input.agentId;
+      ? isAgentExecutionStagePrincipal(previous.returnAssignee, input.agentId)
+      : isAgentExecutionStagePrincipal(previous.currentParticipant, input.agentId);
     if (
       !executionStage ||
       previous.stageId !== executionStage.stageId ||
@@ -96,8 +101,8 @@ export function refreshCurrentExecutionStageContext(input: {
     previous.stageId === executionStage.stageId &&
     previous.wakeRole === executionStage.wakeRole &&
     (executionStage.wakeRole === "executor"
-      ? previous.returnAssignee?.type === "agent" && previous.returnAssignee.agentId === input.agentId
-      : previous.currentParticipant?.type === "agent" && previous.currentParticipant.agentId === input.agentId)
+      ? isAgentExecutionStagePrincipal(previous.returnAssignee, input.agentId)
+      : isAgentExecutionStagePrincipal(previous.currentParticipant, input.agentId))
   ) {
     executionStage.recoveryInstruction = recoveryInstruction;
   }
