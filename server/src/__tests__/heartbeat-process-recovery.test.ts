@@ -6461,7 +6461,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       await waitForPendingRunFailureReports();
 
       const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
-      expect(run).toMatchObject({ status: "failed", errorCode: "setup_failed", executionStage: "preparing", processStartedAt: null,
+      // The provider never started, but the awaited cleanup has settled the run.
+      expect(run).toMatchObject({ status: "failed", errorCode: "setup_failed", executionStage: "settled", controllerLeaseExpiresAt: null, processStartedAt: null,
         resultJson: {
           connectionFailure: { schemaVersion: 1, provider: "git", operation: "clone", reason: "dns_failure" },
           executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
