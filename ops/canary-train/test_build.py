@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -38,6 +39,26 @@ def make_npm_tarball(name: str, version: str, stamp: dict | None = None) -> tupl
 
 
 class IntegrityAndProvenanceTests(unittest.TestCase):
+    def test_resolves_canary_package_documents_from_registry_tag_urls(self):
+        version = "2026.1018.0-canary.9"
+        source = "a" * 40
+        bodies = {}
+        metadata = {}
+        for name in build.DEFAULT_PACKAGES:
+            payload, sri = make_npm_tarball(name, version, {"commit": source} if name == "@paperclipai/server" else None)
+            url = "https://registry.npmjs.org/tarballs/" + name.replace("/", "-") + ".tgz"
+            bodies[url] = payload
+            metadata[build.npm_url(name, "canary")] = {"name": name, "version": version, "dist": {"tarball": url, "integrity": sri}}
+        with patch.object(build, "http_json", side_effect=lambda url: metadata[url]) as request, patch.object(build, "http_bytes", side_effect=lambda url: bodies[url]):
+            resolved, docs, commit = build.resolve_canary()
+        self.assertEqual(resolved, version)
+        self.assertEqual(commit, source)
+        self.assertEqual(set(docs), set(build.DEFAULT_PACKAGES))
+        self.assertEqual([call.args[0] for call in request.call_args_list], [
+            "https://registry.npmjs.org/paperclipai/canary",
+            "https://registry.npmjs.org/@paperclipai%2Fserver/canary",
+        ])
+
     def test_npm_integrity_accepts_correct_sri_and_rejects_tampering(self):
         payload = b"canary package"
         sri = "sha512-" + base64.b64encode(hashlib.sha512(payload).digest()).decode()

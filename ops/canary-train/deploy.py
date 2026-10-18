@@ -933,6 +933,8 @@ class Deployer:
         try:
             os.replace(temp_link, link)
         except OSError:
+            if os.name != "nt":
+                raise
             # Windows may refuse replace-over-symlink even when both entries
             # are links. Linux keeps the atomic replace path above.
             if not link.is_symlink() or not temp_link.is_symlink():
