@@ -1399,7 +1399,11 @@ export function heartbeatService(
 
   function releaseIssueExecutionAndPromote(...args: Parameters<typeof runControl.releaseIssueExecutionAndPromote>) {
     const [run, options] = args;
-    if (activeRunExecutions.has(run.id) && !options?.deferredPostCommitEffects) {
+    // The deferred replay below belongs to the legacy process/lease cleanup
+    // tail. Native completion owns its durable finalization and has no matching
+    // post-cleanup replay, so deferring a native release here strands any wake
+    // admitted while its controller is still active.
+    if (run.runtimeMode === "legacy" && activeRunExecutions.has(run.id) && !options?.deferredPostCommitEffects) {
       const previous = deferredIssueExecutionReleases.get(run.id);
       deferredIssueExecutionReleases.set(run.id, {
         suppressImmediateRecovery: Boolean(previous?.suppressImmediateRecovery || options?.suppressImmediateRecovery),
