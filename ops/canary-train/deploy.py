@@ -43,6 +43,7 @@ HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 VERSION = re.compile(r"^\d{4}\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
 ASSET_NAMES = {"manifest.json", "payload.tar.gz"}
 MIGRATION_ROOT = "node_modules/@paperclipai/db/dist/migrations/"
+RUNNER_TARGETS = {"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"}
 
 
 def sha256(data: bytes) -> str:
@@ -394,9 +395,11 @@ class Deployer:
             shutil.rmtree(extraction)
             self._verify_candidate_files(staging, manifest)
             self._verify_migrations(staging, manifest)
+            self._verify_runner_release_assets(staging, manifest)
             self._apply_local_hooks(staging)
             self._verify_local_hook_files(staging)
             self._verify_registered_support_files()
+            self._verify_runner_release_assets(staging, manifest)
             candidate_files = {name: hash_file(staging.joinpath(*_safe_relative(name).parts))
                                for name in manifest["files"]}
             protected_files = self._protected_inventory(staging, manifest["packageMap"].values())
@@ -469,6 +472,96 @@ class Deployer:
             raise DeployError("Existing candidate migration inventory changed")
         self._verify_registered_support_files()
         self._verify_local_hook_files(candidate)
+        self._verify_runner_release_assets(candidate, manifest)
+
+    @staticmethod
+    def _canonical_json(value):
+        if isinstance(value, list):
+            return "[" + ",".join(Deployer._canonical_json(item) for item in value) + "]"
+        if isinstance(value, dict):
+            return "{" + ",".join(json.dumps(key, ensure_ascii=False) + ":" + Deployer._canonical_json(value[key])
+                                     for key in sorted(value)) + "}"
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _runner_binary_target(data: bytes):
+        if len(data) < 20:
+            return None
+        if data[:4] == b"\x7fELF" and data[4:6] == b"\x02\x01":
+            machine = int.from_bytes(data[18:20], "little")
+            return {62: "linux-x64", 183: "linux-arm64"}.get(machine)
+        if int.from_bytes(data[:4], "little") == 0xFEEDFACF:
+            cpu = int.from_bytes(data[4:8], "little")
+            return {0x01000007: "darwin-x64", 0x0100000C: "darwin-arm64"}.get(cpu)
+        return None
+
+    def _verify_runner_release_assets(self, candidate: Path, manifest: dict):
+        """Require release-assembled native runner targets in each staged runtime."""
+        roots = [PurePosixPath("node_modules/@paperclipai/server/dist/vendor/paperclip-runner")]
+        if "@paperclipai/paperclip-runner#dist" in manifest["packageMap"]:
+            roots.append(PurePosixPath("node_modules/@paperclipai/paperclip-runner/dist"))
+        manifest_files = manifest.get("files", {})
+
+        def read_hashed(relative: PurePosixPath):
+            name = relative.as_posix()
+            if name not in manifest_files:
+                raise DeployError(f"Native runner asset is absent from the verified payload inventory: {name}")
+            expected = manifest_files[name]
+            if not isinstance(expected, str) or not HEX_64.fullmatch(expected):
+                raise DeployError("Native runner asset has an invalid payload digest")
+            path = candidate.joinpath(*relative.parts)
+            cursor = candidate
+            for part in relative.parts:
+                cursor = cursor / part
+                if cursor.is_symlink():
+                    raise DeployError("Native runner asset path contains a symlink")
+            if not path.is_file() or hash_file(path) != expected:
+                raise DeployError(f"Native runner asset does not match the verified payload: {name}")
+            return path.read_bytes()
+
+        for root in roots:
+            release_manifest_path = root / "bin/release-manifest.json"
+            release_bytes = read_hashed(release_manifest_path)
+            release = _json_bytes(release_bytes, "Native runner release manifest")
+            if release.get("schema") != "paperclip.runner.release-binaries.v1" or release.get("sourceRevision") != manifest["patchedCommit"]:
+                raise DeployError("Native runner release manifest does not match the patched commit")
+            platforms = release.get("platforms")
+            if not isinstance(platforms, dict) or set(platforms) != RUNNER_TARGETS:
+                raise DeployError("Native runner release must contain all four supported platform targets")
+            for target in sorted(RUNNER_TARGETS):
+                entry = platforms[target]
+                expected_path = f"{target}/paperclip-runnerd"
+                digest = entry.get("sha256") if isinstance(entry, dict) else None
+                if (not isinstance(entry, dict) or entry.get("path") != expected_path or
+                        not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)):
+                    raise DeployError(f"Native runner {target} release entry is invalid")
+                relative = root / "bin" / _safe_relative(expected_path)
+                data = read_hashed(relative)
+                if sha256(data) != digest[7:] or self._runner_binary_target(data) != target:
+                    raise DeployError(f"Native runner {target} digest or architecture is invalid")
+                # The release assembler normalizes every published runner to
+                # 0755. Preserve that executable contract on Linux; checking
+                # only the bytes would allow a correctly hashed but unusable
+                # daemon to pass staging.
+                if target.startswith("linux-") and os.name != "nt":
+                    binary_path = candidate.joinpath(*relative.parts)
+                    if stat.S_IMODE(binary_path.stat().st_mode) != 0o755:
+                        raise DeployError(f"Native runner {target} must have mode 0755")
+            provider_pack = release.get("remoteProviderPack")
+            if provider_pack is not None:
+                expected_path = root / "remote-provider-packs/linux-x64/provider-pack.json"
+                pack_bytes = read_hashed(expected_path)
+                pack = _json_bytes(pack_bytes, "Native runner remote provider pack")
+                payload = pack.get("payload") if isinstance(pack, dict) else None
+                identity = pack.get("digest") if isinstance(pack, dict) else None
+                digest = "sha256:" + hashlib.sha256(self._canonical_json(payload).encode("utf-8")).hexdigest()
+                if (not isinstance(pack, dict) or pack.get("schema") != "paperclip-runner/remote-provider-pack/v1" or
+                        not isinstance(provider_pack, dict) or provider_pack.get("target") != "linux-x64" or
+                        provider_pack.get("sourceRevision") != manifest["patchedCommit"] or
+                        provider_pack.get("digest") != identity or identity != digest or
+                        not isinstance(payload, dict) or payload.get("runnerSourceRevision") != manifest["patchedCommit"] or
+                        payload.get("target") != {"platform": "linux", "architecture": "x64"}):
+                    raise DeployError("Native runner remote provider-pack reference is invalid")
 
     def _remove_inactive_owned_candidate(self, candidate: Path, manifest: dict):
         root = self.installs.resolve(strict=True)
@@ -560,6 +653,8 @@ class Deployer:
                     continue
                 if not member.isfile() or member.issym() or member.islnk() or member.isdev():
                     raise DeployError("Release archive contains a non-regular file")
+                if not isinstance(member.mode, int) or member.mode < 0 or member.mode & ~0o777:
+                    raise DeployError("Release archive contains an unsafe file mode")
                 name = path.as_posix()
                 if name in seen or name not in expected_files:
                     raise DeployError("Release archive contains a duplicate or unmanifested path")
@@ -574,6 +669,7 @@ class Deployer:
                 out.parent.mkdir(parents=True, exist_ok=True)
                 with out.open("wb") as stream:
                     stream.write(data)
+                os.chmod(out, member.mode)
             if seen != set(expected_files):
                 raise DeployError("Release archive is missing manifest-listed files")
 
@@ -952,6 +1048,7 @@ class Deployer:
         try:
             if migration_diff.get("added") or migration_diff.get("changed") or migration_diff.get("removed"):
                 raise DeployError("Candidate database migration inventory is not identical; activation refused")
+            self._verify_runner_release_assets(candidate, manifest)
             self.assert_no_work(token)
             owner = self.start_drain(token)
             self.verify_owned_drain(token, owner)
@@ -965,6 +1062,7 @@ class Deployer:
                     active_migrations != migration_diff.get("inventory")):
                 raise DeployError("Active migration baseline changed after candidate staging")
             self.verify_owned_drain(token, owner)
+            self._verify_runner_release_assets(candidate, manifest)
             # The symlink and install receipt are two coordinated pieces of
             # state; mark cutover before either is mutated so partial writes
             # are always repaired on failure.

@@ -423,6 +423,8 @@ class ShardedTestReceiptTests(unittest.TestCase):
 
 
 class BuildReceiptGateTests(unittest.TestCase):
+    native_evidence = {"sourceRevision": "b" * 40, "targets": {target: {"sha256": "sha256:" + "0" * 64} for target in build.RUNNER_RELEASE_TARGETS}, "providerPack": {"sha256": "0" * 64}}
+
     def fixture(self, root):
         workspace = root / "source"
         output = root / "output"
@@ -441,8 +443,10 @@ class BuildReceiptGateTests(unittest.TestCase):
                 subprocess.run(["git", *args], cwd=workspace, check=True, capture_output=True)
             with patch.object(build, "load_provenance", return_value=(provenance, [])), \
                  patch.object(build, "validate_test_receipts", return_value=({}, [{"passed": True}] * 9)), \
+                 patch.object(build, "validate_runner_artifact_inputs", return_value={}), \
+                 patch.object(build, "assemble_runner_artifacts", return_value=self.native_evidence), \
                  patch.object(build, "run_checked"), patch.object(build, "runtime_directories", return_value={}):
-                build.build(workspace, output, Path(temp) / "receipts")
+                build.build(workspace, output, Path(temp) / "receipts", Path(temp) / "native", Path(temp) / "pack.json")
             self.assertEqual(build.git(workspace, "status", "--porcelain").stdout, b"")
             for package_dir in build.RELEASE_SKILLS_PACKAGE_DIRS:
                 self.assertFalse((workspace / package_dir / "skills").exists())
@@ -452,9 +456,11 @@ class BuildReceiptGateTests(unittest.TestCase):
                     dirty.write_text("unexpected source change")
                     with patch.object(build, "load_provenance", return_value=(provenance, [])), \
                          patch.object(build, "validate_test_receipts", return_value=({}, [])), \
+                         patch.object(build, "validate_runner_artifact_inputs", return_value={}), \
+                         patch.object(build, "assemble_runner_artifacts", return_value=self.native_evidence), \
                          patch.object(build, "run_checked"):
                         with self.assertRaisesRegex(build.TrainError, "source changes"):
-                            build.build(workspace, output, Path(temp) / "receipts")
+                            build.build(workspace, output, Path(temp) / "receipts", Path(temp) / "native", Path(temp) / "pack.json")
                     if dirty_kind == "tracked":
                         dirty.write_text("canonical skill")
                     else:
@@ -466,10 +472,12 @@ class BuildReceiptGateTests(unittest.TestCase):
             commands = []
             with patch.object(build, "load_provenance", return_value=(provenance, [])), \
                  patch.object(build, "validate_test_receipts", return_value=({}, [{"passed": True}] * 9)), \
+                 patch.object(build, "validate_runner_artifact_inputs", return_value={}), \
+                 patch.object(build, "assemble_runner_artifacts", return_value=self.native_evidence), \
                  patch.object(build, "run_checked", side_effect=lambda command, _workspace: commands.append(command)), \
                  patch.object(build, "runtime_directories", return_value={}), \
                  patch.object(build, "git", return_value=type("Result", (), {"stdout": b""})()):
-                result = build.build(workspace, output, Path(temp) / "receipts")
+                result = build.build(workspace, output, Path(temp) / "receipts", Path(temp) / "native", Path(temp) / "pack.json")
             self.assertNotIn(["pnpm", "test:run"], commands)
             self.assertTrue(result["quality"]["tests"])
             self.assertEqual(len(result["testEvidence"]), 9)
@@ -484,6 +492,80 @@ class BuildReceiptGateTests(unittest.TestCase):
                 with self.assertRaisesRegex(build.TrainError, "missing lane"):
                     build.build(workspace, output, Path(temp) / "receipts")
             self.assertEqual(commands, [])
+
+
+class RunnerArtifactAssemblyTests(unittest.TestCase):
+    source_commit = "b" * 40
+
+    def fixture(self, root: Path):
+        workspace = root / "source"
+        output = root / "artifacts"
+        pack = root / "provider-pack.json"
+        package = workspace / "packages/paperclip-runner"
+        (package / "scripts").mkdir(parents=True)
+        (package / "scripts/stage-release-runner-binaries.mjs").write_text("// upstream assembler")
+        (package / "dist/bin").mkdir(parents=True)
+        (workspace / "server/dist/vendor/paperclip-runner").mkdir(parents=True)
+        pack.write_text(json.dumps({"payload": {"runnerSourceRevision": self.source_commit}}))
+        output.mkdir()
+        targets = {}
+        for target in build.RUNNER_RELEASE_TARGETS:
+            target_dir = output / target
+            target_dir.mkdir()
+            binary = b"daemon " + target.encode()
+            (target_dir / "paperclip-runnerd").write_bytes(binary)
+            receipt = {"sourceRevision": self.source_commit, "target": target, "sha256": "sha256:" + build.sha256(binary), "buildMetadata": {"packageVersion": "canary"}}
+            (target_dir / "receipt.json").write_text(json.dumps(receipt))
+            targets[target] = {"path": f"{target}/paperclip-runnerd", "sha256": receipt["sha256"]}
+        return workspace, output, pack, targets
+
+    def test_upstream_assembler_is_used_then_same_source_bins_and_pack_are_vendored(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace, artifacts, pack, targets = self.fixture(Path(temp))
+
+            def assemble(command, cwd):
+                self.assertEqual(command[0:2], ["node", str(workspace / "packages/paperclip-runner/scripts/stage-release-runner-binaries.mjs")])
+                self.assertEqual(command[2:], ["assemble-daemons", str(artifacts.resolve()), self.source_commit])
+                bin_root = workspace / "packages/paperclip-runner/dist/bin"
+                for target in build.RUNNER_RELEASE_TARGETS:
+                    destination = bin_root / targets[target]["path"]
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes((artifacts / target / "paperclip-runnerd").read_bytes())
+                release = {"sourceRevision": self.source_commit, "platforms": targets, "remoteProviderPack": {"target": "linux-x64", "sourceRevision": self.source_commit, "digest": "sha256:" + "1" * 64}}
+                (bin_root / "release-manifest.json").write_text(json.dumps(release))
+
+            with patch.object(build, "run_checked", side_effect=assemble):
+                evidence = build.assemble_runner_artifacts(workspace, artifacts, pack, self.source_commit)
+            self.assertEqual(set(evidence["targets"]), set(build.RUNNER_RELEASE_TARGETS))
+            self.assertEqual(evidence["sourceRevision"], self.source_commit)
+            self.assertEqual((workspace / "server/dist/vendor/paperclip-runner/bin/release-manifest.json").is_file(), True)
+            self.assertEqual((workspace / "server/dist/vendor/paperclip-runner/remote-provider-packs/linux-x64/provider-pack.json").read_bytes(), pack.read_bytes())
+
+    def test_missing_target_fails_closed_before_assembler_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace, artifacts, pack, _ = self.fixture(Path(temp))
+            for item in (artifacts / "darwin-x64").iterdir():
+                item.unlink()
+            (artifacts / "darwin-x64").rmdir()
+            with patch.object(build, "run_checked") as assembler:
+                with self.assertRaisesRegex(build.TrainError, "exactly the four"):
+                    build.assemble_runner_artifacts(workspace, artifacts, pack, self.source_commit)
+                assembler.assert_not_called()
+
+    def test_wrong_source_receipt_or_provider_pack_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace, artifacts, pack, _ = self.fixture(Path(temp))
+            receipt_path = artifacts / "linux-x64/receipt.json"
+            receipt = json.loads(receipt_path.read_text())
+            receipt["sourceRevision"] = "c" * 40
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(build.TrainError, "exact patched source"):
+                build.validate_runner_artifact_inputs(artifacts, pack, self.source_commit)
+            receipt["sourceRevision"] = self.source_commit
+            receipt_path.write_text(json.dumps(receipt))
+            pack.write_text('{"payload":{"runnerSourceRevision":"' + "c" * 40 + '"}}')
+            with self.assertRaisesRegex(build.TrainError, "provider pack"):
+                build.validate_runner_artifact_inputs(artifacts, pack, self.source_commit)
 
 
 class ArtifactTests(unittest.TestCase):
@@ -563,6 +645,20 @@ class ArtifactTests(unittest.TestCase):
         stamp = workspace / "server/dist/build-info.json"
         stamp.parent.mkdir(parents=True, exist_ok=True)
         stamp.write_text(json.dumps({"commit": commit}))
+        native_root = workspace / "server/dist/vendor/paperclip-runner"
+        native_targets = {}
+        for target in build.RUNNER_RELEASE_TARGETS:
+            relative = f"{target}/paperclip-runnerd"
+            binary = b"daemon " + target.encode()
+            (native_root / "bin" / relative).parent.mkdir(parents=True, exist_ok=True)
+            (native_root / "bin" / relative).write_bytes(binary)
+            native_targets[target] = {"path": relative, "sha256": "sha256:" + build.sha256(binary)}
+        (native_root / "remote-provider-packs/linux-x64").mkdir(parents=True, exist_ok=True)
+        (native_root / "remote-provider-packs/linux-x64/provider-pack.json").write_text("{}")
+        (native_root / "bin/release-manifest.json").write_text(json.dumps({
+            "sourceRevision": commit, "platforms": native_targets,
+            "remoteProviderPack": {"target": "linux-x64", "sourceRevision": commit},
+        }))
         output = root / "artifact"
         output.mkdir()
         (output / "provenance.json").write_text(json.dumps({
@@ -578,8 +674,18 @@ class ArtifactTests(unittest.TestCase):
         }
         (output / "build.json").write_text(json.dumps({
             "version": "2026.1018.0-canary.1", "sourceCommit": source_commit, "patchCommit": commit,
-            "quality": {"frozenInstall": True, "typecheck": True, "tests": True, "build": True, "standalonePackages": True, "serverUi": True},
+            "quality": {"frozenInstall": True, "typecheck": True, "tests": True, "build": True, "standalonePackages": True, "serverUi": True, "nativeRunnerArtifacts": True},
             "runtimeTrees": runtime_trees,
+            "nativeRunnerEvidence": {
+                "sourceRevision": commit,
+                "targets": {target: {
+                    "path": f"{target}/paperclip-runnerd",
+                    "sha256": "sha256:" + build.sha256(b"daemon " + target.encode()),
+                    "receiptSha256": "0" * 64,
+                    "buildMetadata": {"packageVersion": "canary"},
+                } for target in build.RUNNER_RELEASE_TARGETS},
+                "providerPack": {"path": "remote-provider-packs/linux-x64/provider-pack.json", "sha256": build.sha256(b"{}"), "target": "linux-x64"},
+            },
         }))
         return workspace, output
 
