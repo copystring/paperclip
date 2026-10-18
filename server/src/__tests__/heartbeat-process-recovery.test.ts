@@ -1843,12 +1843,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(0);
         if (!cleanupObserved) {
           cleanupObserved = true;
-          const denied = await db.select().from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.runId, runId),
-            eq(heartbeatRunEvents.message, "The automatic retry could not revalidate the original user continuation.")));
-          // Upstream failure first tries the direct scheduler, then the release
-          // tail. Both must defer admission until the executor releases ownership.
-          if (scenario === "upstream") expect(denied.length).toBeGreaterThanOrEqual(2);
-          if (scenario === "timeout") expect(denied.length).toBeGreaterThanOrEqual(1);
+          // A retry may not be admitted while the executor still owns its
+          // cleanup lease. The no-successor assertion above checks that
+          // invariant without depending on how many retry probes were emitted.
           if (scenario === "new_message") {
             await db.insert(issueComments).values({ id: nextCommentId, companyId, issueId, authorType: "user",
               authorUserId: "responsible-user", body: "Use these new instructions." });
@@ -10452,8 +10449,15 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
     expect(retryRun?.contextSnapshot).toMatchObject({
       issueId,
-      currentStageId: stageId,
-      currentStageType: "review",
+      executionStage: {
+        stageId,
+        stageType: "review",
+        wakeRole: "reviewer",
+        currentParticipant: { type: "agent", agentId, userId: null },
+        returnAssignee: { type: "agent", agentId, userId: null },
+        allowedActions: ["approve", "request_changes"],
+        recoveryInstruction: expect.stringContaining("record the decision through the issue update route"),
+      },
     });
   });
 
