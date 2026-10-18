@@ -222,6 +222,24 @@ describe("OpenCode local skill injection", () => {
     for (const prompt of prompts) expect(prompt).not.toContain("Execution contract:");
     expect(prompts[1]).toContain("You are agent agent-1 (OpenCode).");
     expect(prompts[1]).toContain("Connection tools:");
+    expect(prompts[1]).toContain("command -v python3");
+    expect(prompts[1]).toContain("Get-Command python3, python, py");
+    expect(prompts[1]).toContain("py -3 --version");
+    expect(prompts[1]).toContain("availability already verified for this same shell and execution target");
+    expect(prompts[1]).toContain("combine the check with the intended operation in one shell invocation when practical");
+    expect(prompts[1]).toContain("do not spend a separate model round on preflight alone");
+    expect(prompts[1]).toContain("Repeat discovery after the shell or target changes");
+    expect(prompts[1]).toContain("Never infer executable availability from the Paperclip host");
+    expect(prompts[1]).toContain("command -v rg");
+    expect(prompts[1]).toContain("use `grep`");
+    expect(prompts[1]).toContain("Select-String");
+    expect(prompts[1]).toContain("PowerShell `ConvertFrom-Json`");
+    expect(prompts[1]).toContain("check the transport result and confirm the HTTP status is successful before parsing the body");
+    expect(prompts[1]).toContain("If the status is non-2xx or the body is unexpected");
+    expect(prompts[1]).toContain("Never append a `curl -w` status marker");
+    expect(prompts[1]).toContain("do not blindly retry a parse failure");
+    expect(prompts[1]).toContain("follow the search tool's documented query semantics");
+    expect(prompts[1]).toContain("no result from a narrower filter or mismatched query does not prove the tool is unavailable");
   });
 
   it.each(["fresh", "resumed", "recovery"] as const)(
