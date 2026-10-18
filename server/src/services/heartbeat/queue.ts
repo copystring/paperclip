@@ -1200,6 +1200,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           eq(issues.id, issueId), eq(issues.companyId, run.companyId),
           eq(issues.assigneeAgentId, agent.id), eq(issues.executionRunId, claimedRun.id),
           eq(issues.status, "in_review"),
+          sql`(
+            coalesce(${issues.executionState}->>'status', '') <> 'pending' OR
+            coalesce(${issues.executionState}->>'currentStageType', '') NOT IN ('review', 'approval')
+          )`,
         ));
       }
     }

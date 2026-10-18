@@ -1763,10 +1763,12 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
   });
 
   it.each([
-    ["accepted", "connection_intent"],
-    ["rejected", "connection_intent"],
-    ["rejected", "request_confirmation"],
-  ])("resumes a %s %s outcome and promotes the claimed review task", async (interactionStatus, interactionKind) => {
+    ["accepted", "connection_intent", null],
+    ["rejected", "connection_intent", null],
+    ["rejected", "request_confirmation", null],
+    ["accepted", "connection_intent", "review"],
+    ["accepted", "connection_intent", "approval"],
+  ])("resumes a %s %s outcome and preserves pending stage=%s", async (interactionStatus, interactionKind, pendingStage) => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const issueId = randomUUID();
     const interactionId = randomUUID();
@@ -1779,9 +1781,16 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
         .from(issues)
         .where(eq(issues.id, issueId))
         .then((rows) => rows[0] ?? null);
-      expect(claimedIssue).toEqual({ status: "in_progress", executionRunId: checkedRunId });
+      expect(claimedIssue).toEqual({
+        status: pendingStage ? "in_review" : "in_progress",
+        executionRunId: checkedRunId,
+      });
     };
-    await db.insert(issues).values({ id: issueId, companyId, title: "Waiting for connection", status: "in_review", priority: "medium", assigneeAgentId: agentId });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Waiting for connection", status: "in_review", priority: "medium", assigneeAgentId: agentId,
+      executionState: pendingStage ? { status: "pending", currentStageId: randomUUID(), currentStageIndex: 0,
+        currentStageType: pendingStage, currentParticipant: { type: "agent", agentId, userId: null },
+        returnAssignee: { type: "agent", agentId, userId: null }, reviewRequest: null,
+        completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null } : null });
     await db.insert(issueComments).values({
       id: wakeCommentId,
       companyId,
