@@ -399,6 +399,41 @@ class DrainTests(unittest.TestCase):
                 d.verify_owned_drain("token", owner)
 
 
+class HealthTests(unittest.TestCase):
+    def test_uses_existing_operator_identity_for_protected_version_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = deployer(Path(tmp))
+            d.load_token = lambda: "fixture-operator-token"
+            d._read_install = lambda: {"version": "2026.1018.0-canary.10"}
+            d.clock = iter(range(10)).__next__
+            calls = []
+
+            def health(path, method="GET", body=None, token=None):
+                calls.append((path, token))
+                # Mirrors Paperclip authenticated mode: anonymous health still
+                # proves liveness and commit, but does not expose the version.
+                data = {"status": "ok", "commit": "a" * 40}
+                if token == "fixture-operator-token":
+                    data["version"] = "2026.1018.0-canary.10"
+                return data
+
+            d.api_json = health
+            self.assertTrue(d._wait_health("2026.1018.0-canary.10", "a" * 40, timeout=2))
+            self.assertEqual(calls, [("/health", "fixture-operator-token")])
+
+    def test_authenticated_health_still_requires_exact_runtime_identity(self):
+        for change in ({"version": "wrong"}, {"commit": "b" * 40}, {"status": "starting"}):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
+                d = deployer(Path(tmp))
+                d.load_token = lambda: "fixture-operator-token"
+                d._read_install = lambda: {"version": "2026.1018.0-canary.10"}
+                d.clock = iter(range(10)).__next__
+                data = {"status": "ok", "version": "2026.1018.0-canary.10", "commit": "a" * 40, **change}
+                d.api_json = lambda *args, **kwargs: data
+                with patch("deploy.time.sleep"):
+                    self.assertFalse(d._wait_health("2026.1018.0-canary.10", "a" * 40, timeout=2))
+
+
 class ActivationTests(unittest.TestCase):
     def make_install(self, root: Path):
         cli = root / ".paperclip/cli"
