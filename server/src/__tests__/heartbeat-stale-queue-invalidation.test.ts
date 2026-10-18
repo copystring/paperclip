@@ -1823,6 +1823,6 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     await heartbeat.waitForRunExecutionDrain(runId);
     expect(countExecuteCallsForRun(runId)).toBe(1);
     await waitForCondition(async () => claimedIssue !== null);
-    expect(claimedIssue).toEqual({ status: "in_progress", executionRunId: runId });
+    expect(claimedIssue).toEqual({ status: pendingStage ? "in_review" : "in_progress", executionRunId: runId });
   });
 });
