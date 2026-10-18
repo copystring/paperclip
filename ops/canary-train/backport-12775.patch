@@ -1,0 +1,123 @@
+diff --git a/server/src/__tests__/error-handler.test.ts b/server/src/__tests__/error-handler.test.ts
+index 8ef380af6..02332ee1f 100644
+--- a/server/src/__tests__/error-handler.test.ts
++++ b/server/src/__tests__/error-handler.test.ts
+@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
+ import { HttpError } from "../errors.js";
+ import { errorHandler } from "../middleware/error-handler.js";
+ import { mcpDiscoveryHttpFailure, retainMcpConnectionFailure } from "../services/mcp-connection-failure.js";
++import { ToolGatewayHttpError } from "../services/tool-gateway.js";
+ 
+ const recordResponsibleUserDenialOnActiveRunMock = vi.hoisted(() => vi.fn());
+ const captureExceptionMock = vi.hoisted(() => vi.fn());
+@@ -383,4 +384,66 @@ describe("errorHandler", () => {
+       },
+     );
+   });
++
++  it("returns ToolGatewayHttpError status and reason code without reporting a client rejection as a crash", () => {
++    const req = makeReq();
++    const res = makeRes() as any;
++    const err = new ToolGatewayHttpError(
++      409,
++      "Tool action request requires formal board approval before execution",
++      "formal_approval_required",
++      { approvalId: "approval-1" },
++    );
++
++    errorHandler(err, req, res, vi.fn() as unknown as NextFunction);
++
++    expect(res.status).toHaveBeenCalledWith(409);
++    expect(res.json).toHaveBeenCalledWith({
++      error: "Tool action request requires formal board approval before execution",
++      reasonCode: "formal_approval_required",
++      details: { approvalId: "approval-1" },
++    });
++    expect(res.err).toBeUndefined();
++    expect(res.__errorContext).toBeUndefined();
++    expect(captureExceptionMock).not.toHaveBeenCalled();
++    expect(telemetryMocks.trackErrorHandlerCrash).not.toHaveBeenCalled();
++  });
++
++  it("still reports a ToolGatewayHttpError as a server error when its status is >= 500", () => {
++    const req = makeReq();
++    const res = makeRes() as any;
++    const err = new ToolGatewayHttpError(502, "Remote MCP tool call timed out", "tool_timeout");
++
++    errorHandler(err, req, res, vi.fn() as unknown as NextFunction);
++
++    expect(res.status).toHaveBeenCalledWith(502);
++    expect(res.err).toBe(err);
++    expect(res.__errorContext?.error?.message).toBe("Remote MCP tool call timed out");
++    expect(captureExceptionMock).toHaveBeenCalledWith(err);
++  });
++
++  it("sanitizes a ToolGatewayHttpError reason code on secret-sensitive setup routes", () => {
++    const req = {
++      ...makeReq(),
++      method: "POST",
++      originalUrl: "/api/chat-endpoints/endpoint-1/setup",
++      body: { credentials: { botToken: "setup-reason-token" } },
++    } as unknown as Request;
++    const res = makeRes() as any;
++    const err = new ToolGatewayHttpError(
++      409,
++      "Rejected setup-reason-token",
++      "setup-reason-token",
++      { explanation: "Rejected setup-reason-token" },
++    );
++
++    errorHandler(err, req, res, vi.fn() as unknown as NextFunction);
++
++    expect(res.status).toHaveBeenCalledWith(409);
++    expect(res.json).toHaveBeenCalledWith({
++      error: "Rejected [REDACTED]",
++      reasonCode: "[REDACTED]",
++      details: { explanation: "Rejected [REDACTED]" },
++    });
++  });
+ });
+diff --git a/server/src/middleware/error-handler.ts b/server/src/middleware/error-handler.ts
+index 4300267c8..9369fefa5 100644
+--- a/server/src/middleware/error-handler.ts
++++ b/server/src/middleware/error-handler.ts
+@@ -170,6 +170,7 @@ export function errorHandler(
+       !Array.isArray(responseDetailsValue)
+         ? (responseDetailsValue as Record<string, unknown>)
+         : null;
++    const reasonCode = (err as { reasonCode?: unknown }).reasonCode;
+     recordResponsibleUserDenialFromHttpError(req, details);
+     if (err.status >= 500) {
+       const reportableError = sanitizeSecretSensitiveError(req, err);
+@@ -196,6 +197,9 @@ export function errorHandler(
+         ? { error: "Internal server error" }
+         : {
+             error: sanitizeSecretSensitiveResponse(req, err.message),
++            ...(typeof reasonCode === "string"
++              ? { reasonCode: sanitizeSecretSensitiveResponse(req, reasonCode) }
++              : {}),
+             ...(typeof responseDetails?.code === "string"
+               ? { code: responseDetails.code }
+               : {}),
+diff --git a/server/src/services/tool-gateway.ts b/server/src/services/tool-gateway.ts
+index 393278dd4..e7ebef0b3 100644
+--- a/server/src/services/tool-gateway.ts
++++ b/server/src/services/tool-gateway.ts
+@@ -347,14 +347,14 @@ export interface ToolGatewaySession {
+ 
+ export type ToolGatewayRuntimeSlot = ToolRuntimeSlotView;
+ 
+-export class ToolGatewayHttpError extends Error {
++export class ToolGatewayHttpError extends HttpError {
+   constructor(
+-    public readonly status: number,
++    status: number,
+     message: string,
+     public readonly reasonCode: string,
+     public readonly details: Record<string, unknown> = {},
+   ) {
+-    super(message);
++    super(status, message, details);
+   }
+ }
+ 

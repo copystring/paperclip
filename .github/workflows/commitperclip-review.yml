@@ -34,6 +34,7 @@ jobs:
           node-version: '24'
 
       - name: Generate commitperclip token
+        if: github.repository == 'paperclipai/paperclip'
         id: token
         run: |
           TOKEN=$(node .github/scripts/get-bot-token.mjs)
@@ -48,7 +49,7 @@ jobs:
         run: node .github/scripts/run-quality-gates.mjs
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ steps.token.outputs.value }}
+          GH_TOKEN: ${{ steps.token.outputs.value || github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "upstreamRepository": "paperclipai/paperclip",
+  "packageNames": ["paperclipai", "@paperclipai/server"],
+  "patches": [
+    {
+      "number": 12775,
+      "repository": "paperclipai/paperclip",
+      "head": "ed23290012d3889c2fa18f8ae04355b542128bf5",
+      "integrationPatch": {
+        "number": 12775,
+        "path": "backport-12775.patch",
+        "sha256": "0148bf0e79ef2d73a8643529666d149396f7467bb9212280695c8dcf29b75831"
+      }
+    },
+    {
+      "number": 16716,
+      "repository": "paperclipai/paperclip",
+      "head": "7439228b29dcde9499456024a0362276d6b49a36"
+    },
+    {
+      "number": 14909,
+      "repository": "paperclipai/paperclip",
+      "head": "b18a27930577c27e478c27d970a53ee7e9ed9e9f"
+    }
+  ]
+}
