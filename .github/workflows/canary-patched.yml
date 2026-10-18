@@ -13,6 +13,11 @@ on:
 permissions:
   contents: read
 
+# PR checks are read-only and independent; a release run owns its entire train.
+concurrency:
+  group: canary-patched-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   controller-tests:
     if: github.repository == 'copystring/paperclip'
@@ -24,37 +29,24 @@ jobs:
           persist-credentials: false
       - run: python3 -m unittest discover -s ops/canary-train -p 'test_*.py' -v
       - run: node --test .github/scripts/check-pr-test-coverage.test.mjs
-  build:
-    # Read-only controller PR tests must not wait behind a release build.
-    # Only source assembly, publication and release generation share this lock.
-    concurrency:
-      group: canary-patched-release
-      cancel-in-progress: false
+
+  assemble:
     needs: controller-tests
     if: github.repository == 'copystring/paperclip' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
-    permissions:
-      contents: write
-    env:
-      NODE_OPTIONS: --max-old-space-size=6144
+    timeout-minutes: 20
+    outputs:
+      needed: ${{ steps.update.outputs.needed }}
+      matrix: ${{ steps.snapshot.outputs.matrix }}
+      source_sha256: ${{ steps.snapshot.outputs.sha256 }}
     steps:
-      - name: Checkout build controller
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
-        with:
-          version: 9.15.4
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 24
           package-manager-cache: false
-      - name: Controller regression tests
-        run: python3 -m unittest discover -s ops/canary-train -p 'test_*.py' -v
       - name: Assemble exact published Canary and pinned patches
         env:
           GH_TOKEN: ${{ github.token }}
@@ -68,20 +60,133 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 ops/canary-train/publish.py --check --output "$RUNNER_TEMP/paperclip-output"
-      - name: Verify candidate and build runtime packages
+      - name: Freeze source and complete test plan
         if: steps.update.outputs.needed == 'true'
+        id: snapshot
+        run: |
+          python3 ops/canary-train/build.py plan --workspace "$RUNNER_TEMP/paperclip-source" --output "$RUNNER_TEMP/paperclip-output"
+          tar -czf "$RUNNER_TEMP/canary-source.tgz" -C "$RUNNER_TEMP" paperclip-source paperclip-output
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          plan = json.loads((root / 'paperclip-output/test-plan.json').read_text())
+          matrix = {'include': [{'lane': lane['id']} for lane in plan['lanes']]}
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('matrix=' + json.dumps(matrix, separators=(',', ':')) + '\n')
+              output.write('sha256=' + hashlib.sha256((root / 'canary-source.tgz').read_bytes()).hexdigest() + '\n')
+          PY
+      - name: Share immutable source within this run
+        if: steps.update.outputs.needed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: canary-prepared-source
+          path: ${{ runner.temp }}/canary-source.tgz
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
+  verify-tests:
+    needs: assemble
+    if: needs.assemble.outputs.needed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      max-parallel: 9
+      matrix: ${{ fromJSON(needs.assemble.outputs.matrix) }}
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: canary-prepared-source
+          path: ${{ runner.temp }}/prepared
+      - name: Verify and extract the prepared source
+        env:
+          EXPECTED_SOURCE_SHA256: ${{ needs.assemble.outputs.source_sha256 }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, pathlib
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'prepared/canary-source.tgz'
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == os.environ['EXPECTED_SOURCE_SHA256'], 'Prepared source digest mismatch'
+          PY
+          tar -xzf "$RUNNER_TEMP/prepared/canary-source.tgz" -C "$RUNNER_TEMP"
+      - name: Run complete assigned test lane
+        env:
+          TEST_LANE: ${{ matrix.lane }}
+        run: >-
+          python3 ops/canary-train/build.py test --lane "$TEST_LANE"
+          --workspace "$RUNNER_TEMP/paperclip-source" --output "$RUNNER_TEMP/paperclip-output"
+      - name: Retain successful lane proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: canary-test-${{ matrix.lane }}
+          path: ${{ runner.temp }}/paperclip-output/test-${{ matrix.lane }}.json
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
+  build:
+    needs: [assemble, verify-tests]
+    if: needs.assemble.outputs.needed == 'true' && needs.verify-tests.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - name: Checkout build controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: canary-prepared-source
+          path: ${{ runner.temp }}/prepared
+      - name: Verify and extract the prepared source
+        env:
+          EXPECTED_SOURCE_SHA256: ${{ needs.assemble.outputs.source_sha256 }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, pathlib
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'prepared/canary-source.tgz'
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == os.environ['EXPECTED_SOURCE_SHA256'], 'Prepared source digest mismatch'
+          PY
+          tar -xzf "$RUNNER_TEMP/prepared/canary-source.tgz" -C "$RUNNER_TEMP"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: canary-test-*
+          path: ${{ runner.temp }}/paperclip-test-receipts
+          merge-multiple: true
+      - name: Verify every test proof and build runtime packages
         run: >-
           python3 ops/canary-train/build.py build
-          --workspace "$RUNNER_TEMP/paperclip-source"
-          --output "$RUNNER_TEMP/paperclip-output"
+          --test-receipts "$RUNNER_TEMP/paperclip-test-receipts"
+          --workspace "$RUNNER_TEMP/paperclip-source" --output "$RUNNER_TEMP/paperclip-output"
       - name: Package verified runtime output
-        if: steps.update.outputs.needed == 'true'
         run: >-
           python3 ops/canary-train/build.py package
-          --workspace "$RUNNER_TEMP/paperclip-source"
-          --output "$RUNNER_TEMP/paperclip-output"
+          --workspace "$RUNNER_TEMP/paperclip-source" --output "$RUNNER_TEMP/paperclip-output"
       - name: Publish green candidate and maintained source branch
-        if: steps.update.outputs.needed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 ops/canary-train/publish.py --source "$RUNNER_TEMP/paperclip-source" --output "$RUNNER_TEMP/paperclip-output"
