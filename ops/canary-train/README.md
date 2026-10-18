@@ -27,6 +27,14 @@ python3 ops/canary-train/build.py package \
 
 The manifest records the official npm version and tarball digests, exact upstream and patched commits/trees, pinned PR heads and outcomes, package-map inventory, archive digest, compiled migration digests, and quality-gate results. The workflow may add its run ID, attempt, controller commit, and workflow reference before publication. Production credentials and private settings do not belong in the artifact.
 
+## Instance consumer
+
+`deploy.py` is a standalone service-account executable. Keeping release validation, ownership checks, the idle hold, cutover, and rollback in one auditable file allows the instance to pin and atomically install a single consumer without importing unverified updater code from a candidate. Its regression tests cover partial cutover failures, rejected restarts, retry idempotency, migration drift, and file ownership boundaries.
+
+An instance timer polls the public fork for a completed successful workflow release. It retains existing local settings through hash-pinned service-owned hooks. It never needs a GitHub write token, provider credentials from CI, or extra database backups. New or changed migrations defer activation for a separate compatibility review. Active tasks, queued runs, or an unsafe idle report also defer activation. Old generated candidates are pruned only when their ownership receipt proves they belong to this controller; the active payload and recorded installation history are retained.
+
+The controller workflow runs hourly; identical green builds are skipped. PR heads remain pinned until deliberately reviewed. A patch is retired automatically when the exact published Canary includes its merged commit or already contains the verified patch. A changed unreviewed PR head or unresolved source conflict blocks publication.
+
 ## Local checks
 
 ```sh
