@@ -64,7 +64,7 @@
     {
       "number": 16723,
       "repository": "paperclipai/paperclip",
-      "head": "e7e78baa4b6b5af76c843ebbef1a30193ba2ebe8"
+      "head": "903ba6dc792ba52525e125c153677370d1601b0b"
     },
     {
       "number": 8,
@@ -75,6 +75,11 @@
         "path": "backport-installed-recovery.patch",
         "sha256": "965f2cc8b277f3b4687ccbba4ac808ba5fbfb674d87bcd1d297f0b07ee581160"
       }
+    },
+    {
+      "number": 11,
+      "repository": "copystring/paperclip",
+      "head": "1b88cd4a939d1cac00941029b2646c891aba4e65"
     }
   ]
 }

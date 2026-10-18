@@ -61,7 +61,7 @@ class DependencyCacheWorkflowTests(unittest.TestCase):
         for target, runner in (("linux-x64", "ubuntu-24.04"), ("linux-arm64", "ubuntu-24.04-arm"),
                                ("darwin-arm64", "macos-15"), ("darwin-x64", "macos-15-intel")):
             self.assertIn(f"- target: {target}\n            runner: {runner}", self.text)
-        self.assertIn("timeout-minutes: 30", self.text)
+        self.assertIn("timeout-minutes: 45", self.text)
         self.assertIn("needs: [assemble, verify-tests, runner-artifacts]", self.text)
         self.assertIn("needs.runner-artifacts.result == 'success'", self.text)
         self.assertIn("--runner-artifacts", self.text)
