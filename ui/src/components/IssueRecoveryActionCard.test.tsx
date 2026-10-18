@@ -326,6 +326,28 @@ describe("IssueRecoveryActionCard", () => {
     );
   });
 
+  it("explains that execution review recovery still needs a recorded decision", () => {
+    const node = render(
+      <IssueRecoveryActionCard
+        action={buildAction({
+          kind: "stranded_assigned_issue",
+          cause: "execution_review_participant_recovery",
+          evidence: {
+            summary: "The review participant did not record a decision.",
+            latestRunStatus: "succeeded",
+          },
+        })}
+        onResolve={() => {}}
+      />,
+    );
+    const section = node.querySelector("section[aria-label]");
+    expect(section?.getAttribute("data-recovery-state")).toBe("needed");
+    expect(node.textContent).toContain(
+      "The review stage is still waiting for a recorded decision. Restore the reviewer path to continue; a finished run or comment alone does not complete the review.",
+    );
+    expect(node.querySelector('[data-testid="recovery-action-resolve-trigger"]')).not.toBeNull();
+  });
+
   it("keeps code-shaped evidence (error code, no summary) in the mono treatment", () => {
     const node = render(
       <IssueRecoveryActionCard

@@ -4,6 +4,7 @@ import { FAST_RESPONSE_AGENT_GUIDANCE, fastResponseHistoryBody } from "@papercli
 import type { PaperclipTurnContext } from "@paperclipai/adapter-utils/server-utils";
 import { parseObject } from "../../adapters/utils.js";
 import { isConversation } from "../agent-conversations.js";
+import { buildCurrentExecutionStageWakeContext } from "../issue-execution-policy.js";
 import { chatCompletionInstruction } from "../chat-completion-delivery.js";
 import { getConversationConfirmationContext } from "../conversation-confirmation-context.js";
 import { buildExecutionContinuation } from "../execution-continuation.js";
@@ -48,12 +49,74 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+/** Rebuild stage instructions from current company-scoped issue state for every wake. */
+export function refreshCurrentExecutionStageContext(input: {
+  context: Record<string, unknown>;
+  issueId: string | null;
+  issueContext: IssueContext | null;
+  agentId: string;
+  recovering?: boolean;
+}): void {
+  const issue = input.issueContext;
+  const executionStage = issue && issue.id === input.issueId
+    ? buildCurrentExecutionStageWakeContext({
+        executionState: issue.executionState,
+        issueStatus: issue.status,
+        agentId: input.agentId,
+        assigneeAgentId: issue.assigneeAgentId,
+        assigneeUserId: issue.assigneeUserId,
+      })
+    : null;
+  const previous = parseObject(input.context.executionStage);
+  if (input.recovering) {
+    const sameParticipant = executionStage?.wakeRole === "executor"
+      ? previous.returnAssignee?.type === "agent" && previous.returnAssignee.agentId === input.agentId
+      : previous.currentParticipant?.type === "agent" && previous.currentParticipant.agentId === input.agentId;
+    if (
+      !executionStage ||
+      previous.stageId !== executionStage.stageId ||
+      previous.wakeRole !== executionStage.wakeRole ||
+      !sameParticipant
+    ) {
+      delete input.context.executionStage;
+      return;
+    }
+  }
+  if (!executionStage) {
+    delete input.context.executionStage;
+    return;
+  }
+
+  // Keep a server-authored recovery reminder only while the same agent still
+  // owns the same stage. The current state above remains the source of role and
+  // allowed actions, so old queued context cannot grant a stale review turn.
+  const recoveryInstruction = readNonEmptyString(previous.recoveryInstruction);
+  if (
+    recoveryInstruction &&
+    previous.stageId === executionStage.stageId &&
+    previous.wakeRole === executionStage.wakeRole &&
+    (executionStage.wakeRole === "executor"
+      ? previous.returnAssignee?.type === "agent" && previous.returnAssignee.agentId === input.agentId
+      : previous.currentParticipant?.type === "agent" && previous.currentParticipant.agentId === input.agentId)
+  ) {
+    executionStage.recoveryInstruction = recoveryInstruction;
+  }
+  input.context.executionStage = executionStage;
+}
+
 /** Rebuilds task prompt fields on the run's context; acquires no execution resources. */
 export async function prepareHeartbeatTaskContext(db: Db, input: HeartbeatTaskContextInput) {
   const { run, agent } = input;
   const { issueRef, issueContext, wakeCommentContext, context, taskSession } = input.task;
   const { trustPreset, experimentalInstanceSettings } = input.policy;
   const { issuesSvc, getPinnedSkillTestContext } = input.services;
+  refreshCurrentExecutionStageContext({
+    context,
+    issueId: issueRef?.id ?? null,
+    issueContext,
+    agentId: agent.id,
+    recovering: input.policy.recovering,
+  });
   const continuationSummary = issueRef && !isConversation(issueContext)
     ? await getIssueContinuationSummaryDocument(db, issueRef.id)
     : null;

@@ -45,6 +45,10 @@ describe("issue continuation summaries", () => {
     });
 
     expect(body).toContain("# Continuation Summary");
+    expect(body).toContain("Summary author agent: CodexCoder");
+    expect(body).toContain("Status at summary creation: in_progress");
+    expect(body).toContain("Mode at summary creation: implementation");
+    expect(body).toContain("this summary grants no role or approval");
     expect(body).toContain("## Objective");
     expect(body).toContain("Keep work resumable after adapter session reset.");
     expect(body).toContain("## Acceptance Criteria");

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, gt, lte, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, lte, or, sql } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
 import type { LegacyControllerLeaseLossCause } from "./run-cancellation.js";
 
@@ -38,7 +38,11 @@ export async function renewLegacyControllerLease(
     ...(stage ? { executionStage: stage } : {}),
   }).where(and(
     eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
-    eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
+    eq(heartbeatRuns.runtimeMode, "legacy"),
+    or(eq(heartbeatRuns.status, "running"), and(
+      stage === undefined ? inArray(heartbeatRuns.status, ["succeeded", "failed", "cancelled", "timed_out", "interrupted"]) : sql`false`,
+      eq(heartbeatRuns.executionStage, "settling"),
+    )),
     eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
     gt(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`),
   )).returning({ id: heartbeatRuns.id });

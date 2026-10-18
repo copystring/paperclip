@@ -67,6 +67,28 @@ describe("parseOpenCodeJsonl", () => {
     expect(parsed.summary).toBe("Recovered and completed the task");
     expect(parsed.errorMessage).toBeNull();
     expect(parsed.toolErrors).toEqual(["File not found: e2b-adapter-result.txt"]);
+    expect(parsed.hasCompletedToolAction).toBe(false);
+  });
+
+  it("recognizes a completed tool action even when the run has no assistant text", () => {
+    const parsed = parseOpenCodeJsonl(JSON.stringify({
+      type: "tool_use",
+      part: { tool: "bash", state: { status: "completed", output: "updated" } },
+    }));
+
+    expect(parsed.summary).toBe("");
+    expect(parsed.hasCompletedToolAction).toBe(true);
+  });
+
+  it("does not treat step boundaries or whitespace text as a response", () => {
+    const parsed = parseOpenCodeJsonl([
+      JSON.stringify({ type: "step_start", sessionID: "session-empty" }),
+      JSON.stringify({ type: "text", sessionID: "session-empty", part: { text: "  \n  " } }),
+      JSON.stringify({ type: "step_finish", sessionID: "session-empty", part: { reason: "stop", tokens: { input: 0, output: 0 } } }),
+    ].join("\n"));
+
+    expect(parsed.summary).toBe("");
+    expect(parsed.hasCompletedToolAction).toBe(false);
   });
 
   it("detects unknown session errors", () => {

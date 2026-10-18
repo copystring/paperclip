@@ -34,7 +34,10 @@ import { issueService } from "../../../services/issues.js";
 import { issueRecoveryActionService } from "../../../services/issue-recovery-actions.js";
 import { readContinuationAttempt } from "../../../services/recovery/run-liveness-continuations.js";
 import { withRecoveryContext } from "../../../services/recovery/status-only-context.js";
-import { parseIssueExecutionState } from "../../../services/issue-execution-policy.js";
+import {
+  buildExecutionStageWakeContext,
+  parseIssueExecutionState,
+} from "../../../services/issue-execution-policy.js";
 import {
   queuedCommentIdsFromWakePayload,
   withQueuedCommentIdsInWakePayload,
@@ -576,6 +579,15 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
 
     async queueReviewParticipantRecoveryRun({ companyId, issue, finishingRun, recoveryAgent, sessionBefore, now }) {
       const executionState = parseIssueExecutionState(issue.executionState);
+      const executionStage = executionState
+        ? buildExecutionStageWakeContext({
+            state: executionState,
+            wakeRole:
+              executionState.currentStageType === "approval" ? "approver" : "reviewer",
+            recoveryInstruction:
+              "The previous reviewer run ended without a saved decision for this pending stage. Finish the review and record the decision through the issue update route below. Do not treat comments or prose as a saved decision.",
+          })
+        : null;
       const wakeupRequest = await tx
         .insert(agentWakeupRequests)
         .values({
@@ -589,8 +601,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
               issueId: issue.id,
               retryOfRunId: finishingRun.id,
               retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON,
-              currentStageId: executionState?.currentStageId ?? null,
-              currentStageType: executionState?.currentStageType ?? null,
+              ...(executionStage ? { executionStage } : {}),
             },
             "normal_model",
           ),
@@ -619,10 +630,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
               retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON,
               source: "issue.execution_review_recovery",
               retryOfRunId: finishingRun.id,
-              currentStageId: executionState?.currentStageId ?? null,
-              currentStageType: executionState?.currentStageType ?? null,
-              reviewRecoveryInstruction:
-                "The previous reviewer run ended while this execution-review stage was still pending. Submit the review decision now, or mark the issue blocked with the exact unblock action.",
+              ...(executionStage ? { executionStage } : {}),
             },
             "normal_model",
           ),
@@ -1019,7 +1027,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
     async withIssueExecutionLock(input, fn): Promise<ReleaseTransactionResult & { run: RunSnapshot }> {
       return db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
-        const run = await tx
+        let run = await tx
           .select()
           .from(heartbeatRuns)
           .where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId)))
@@ -1027,7 +1035,6 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
         if (!run) {
           throw new Error(`wake-queue: run ${input.runId} was not found while releasing issue execution`);
         }
-        const runSnapshot = toRunSnapshot(run);
         const contextIssueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
 
         // Lock the context issue (if any) and every issue that still references this
@@ -1054,6 +1061,23 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
                 for update
               `,
         );
+
+        // A terminal status is written before the legacy controller has
+        // finished its resource cleanup. Keep the issue lock and deferred
+        // queue intact until that same controller settles its renewable lease.
+        // Lock in issue -> run order, matching issue writes and terminalization.
+        const [currentRun] = await tx.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),
+        )).for("update");
+        if (!currentRun) throw new Error(`wake-queue: run ${input.runId} disappeared while releasing issue execution`);
+        run = currentRun;
+        if (run.runtimeMode === "legacy" && run.executionStage === "settling" &&
+            run.controllerBootId && run.controllerLeaseExpiresAt &&
+            run.controllerLeaseExpiresAt > new Date() &&
+            ["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status)) {
+          return { outcome: { kind: "released" }, postCommitEffects: [], run: toRunSnapshot(run) };
+        }
+        const runSnapshot = toRunSnapshot(run);
 
         const candidateIssues = await tx
           .select()
