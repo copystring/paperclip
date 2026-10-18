@@ -102,11 +102,6 @@ if [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_API_KEY:-}" || -z "${PAPERC
   exit 1
 fi
 
-# A successful PATCH always returns the updated issue JSON. An empty body or a
-# connection-level failure means the write did NOT land, even when a pipeline
-# exit code says otherwise, so verify the response instead of inferring success.
-# Two attempts total: the shared heartbeat policy stops a control-plane write
-# after two consecutive failures, so the helper must not send a third.
 max_attempts=2
 attempt=1
 while :; do
@@ -132,16 +127,22 @@ while :; do
 
   if [[ "$curl_exit" -eq 0 && "$http_code" == 2* ]]; then
     if [[ -z "$body" ]]; then
-      printf 'Issue update FAILED: HTTP %s with an empty response body. A real update echoes the issue JSON; treat this write as not saved.\n' "$http_code" >&2
+      printf 'Issue update unconfirmed: HTTP %s with an empty response body. Inspect the issue before retrying.\n' "$http_code" >&2
       exit 1
     fi
-    if [[ -n "$status" ]]; then
-      returned_status="$(jq -r '.status // empty' <<<"$body" 2>/dev/null || true)"
-      if [[ "$returned_status" != "$status" ]]; then
-        printf 'Issue update FAILED: server echoed status %s instead of requested %s.\n' "${returned_status:-<none>}" "$status" >&2
-        printf '%s\n' "$body" >&2
-        exit 1
-      fi
+    if ! jq -se \
+      --arg issue_id "$issue_id" \
+      --arg status "$status" \
+      --arg comment "$comment" \
+      '
+        length == 1 and
+        (.[0] | type == "object" and
+          (.id == $issue_id or (.identifier | type == "string" and ascii_upcase == ($issue_id | ascii_upcase))) and
+          ($status == "" or .status == $status) and
+          ($comment == "" or (.comment | type == "object" and .body == $comment)))
+      ' >/dev/null 2>&1 <<<"$body"; then
+      printf 'Issue update unconfirmed: HTTP %s response did not match the requested issue, status, and comment. Inspect the issue before retrying.\n' "$http_code" >&2
+      exit 1
     fi
     printf '%s\n' "$body"
     exit 0
@@ -154,8 +155,13 @@ while :; do
     exit 1
   fi
 
+  if [[ -n "$comment" ]]; then
+    printf 'Issue update outcome is ambiguous (curl exit %s, HTTP %s); inspect the issue before retrying the comment.\n' "$curl_exit" "${http_code:-000}" >&2
+    exit 1
+  fi
+
   if (( attempt >= max_attempts )); then
-    printf 'Issue update FAILED after %d attempts (curl exit %s, HTTP %s). The status/comment was NOT saved — report this write as failed, do not assume it landed.\n' "$max_attempts" "$curl_exit" "${http_code:-000}" >&2
+    printf 'Issue update unconfirmed after %d attempts (curl exit %s, HTTP %s). Inspect the issue before retrying.\n' "$max_attempts" "$curl_exit" "${http_code:-000}" >&2
     [[ -n "$body" ]] && printf '%s\n' "$body" >&2
     exit 1
   fi

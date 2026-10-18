@@ -8955,16 +8955,19 @@ export function createToolGatewayService(
       bearerToken: string;
       callerHeaders?: Record<string, string | string[] | undefined>;
       signal?: AbortSignal;
+      /** A catalog search delivered through MCP tools/call must also retain that token action gate. */
+      requireToolCallAction?: boolean;
     }): Promise<ToolGatewayDescriptor[]> {
       input.signal?.throwIfAborted();
       const session = await namedGatewaySessionFromBearer({
         gatewayId: input.gatewayId ?? null,
         gatewayPublicId: input.gatewayPublicId ?? null,
         bearerToken: input.bearerToken,
-        protocolMethod: "tools/list",
+        protocolMethod: input.requireToolCallAction ? "tools/call" : "tools/list",
         callerHeaders: input.callerHeaders,
       });
       await assertGatewayTokenAction(session, "tools/list");
+      if (input.requireToolCallAction) await assertGatewayTokenAction(session, "tools/call");
       const tools = await listToolsForContext(session, input.signal);
       await writeAudit({
         session,

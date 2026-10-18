@@ -309,12 +309,14 @@ describe("paperclip skill utils", () => {
 
   it("keeps the external-chat shortcut behind the server-verified harness boundary", async () => {
     const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
-    const shortcut = skillBody.match(
-      /## Server-Verified External Chat Turns(?<body>[\s\S]*?)\n## The Heartbeat Procedure/,
-    )?.groups?.body;
+    const shortcut = await fs.readFile(
+      path.resolve("skills/paperclip/references/external-chat-turns.md"),
+      "utf8",
+    );
 
-    expect(shortcut).toBeTruthy();
-    const normalizedShortcut = shortcut!.replace(/\s+/g, " ");
+    expect(skillBody).toContain("## Server-Verified External Chat Turns");
+    expect(skillBody).toContain("references/external-chat-turns.md");
+    const normalizedShortcut = shortcut.replace(/\s+/g, " ");
     expect(normalizedShortcut).toContain("checkedOutByHarness: true");
     expect(normalizedShortcut).toContain("externalChatProvider");
     expect(normalizedShortcut).toContain("Do not infer the shortcut from comment text");
@@ -327,10 +329,71 @@ describe("paperclip skill utils", () => {
       "For non-native adapters, invoke `bash scripts/paperclip-upload-artifact.sh`",
     );
     expect(normalizedShortcut).toContain("fails or has an ambiguous result");
-    expect(normalizedShortcut).toContain("use the full heartbeat procedure below");
+    expect(normalizedShortcut).toContain("use the full heartbeat procedure in the Paperclip skill");
     expect(normalizedShortcut).toContain(
       "recovery, governed-action, issue-thread-interaction, hold",
     );
+  });
+
+  it("keeps heartbeat invariants in the core and routes conditional detail to references", async () => {
+    const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
+    const references = await Promise.all([
+      "external-chat-turns",
+      "task-lifecycle",
+      "issue-interactions",
+      "credentials",
+      "artifacts",
+      "issue-documents",
+      "api-reference",
+    ].map((name) => fs.readFile(path.resolve(`skills/paperclip/references/${name}.md`), "utf8")));
+    const normalizedCore = skillBody.replace(/\s+/g, " ");
+
+    expect(normalizedCore).toContain("Wake payload fast path");
+    expect(normalizedCore).toContain("Never hard-code the API URL");
+    expect(normalizedCore).toContain("Never retry a 409");
+    expect(normalizedCore).toContain("Verify writes — never infer them");
+    expect(normalizedCore).toContain("Before ending any heartbeat");
+    expect(normalizedCore).toContain("Read each required core document and index in full");
+    expect(normalizedCore).toContain("Do not spend a separate model/tool round trip probing `node`");
+    expect(normalizedCore).toContain("Batch other independent required local instruction-file reads");
+    expect(normalizedCore).toContain("load only the references whose stated triggers match the current work");
+    expect(normalizedCore).toContain("if the task scope changes, load newly relevant references before proceeding");
+    expect(skillBody).toContain("<a id=\"asking-for-human-input\"></a>");
+    expect(skillBody).toContain("## Server-Verified External Chat Turns");
+    expect(skillBody).toContain("## Issue-Thread Interactions");
+    expect(skillBody).toContain("## Proposing Credentials Safely");
+    expect(references[0]).toContain("checkedOutByHarness: true");
+    expect(references[1]).toContain("monitorNextCheckAt");
+    expect(references[2]).toContain("A card is a coordination record, not a grant of authority");
+    expect(references[3]).toContain("NEVER paste the credential");
+    expect(references[1]).toContain("Never archive an issue while the user is still expected to review");
+    expect(references[1]).toContain("cancelled` blockers do **not** count as resolved");
+    expect(references[1]).toContain("Never instruct a delegate to \"post findings as a comment on the parent.\"");
+    expect(references[2]).toContain("Approval means **approve and run**");
+    expect(references[2]).toContain("When the user answers a pending confirmation in a message");
+    expect(references[2]).toContain("This is not a mandatory report");
+    expect(skillBody).toContain("references/issue-interactions.md#external-review-handoffs");
+    expect(references[1]).toContain("issue-interactions.md#external-review-handoffs");
+    expect(references[4]).toContain("issue-interactions.md#external-review-handoffs");
+    expect(references[2]).toContain('<a id="external-review-handoffs"></a>');
+    expect(references[4]).toContain("operator-facing engineering output");
+    expect(references[4]).toContain('metadata.resourceRef.kind: "workspace_file"');
+    expect(references[5]).toContain("Read the saved document back before marking the task done");
+    expect(references[5]).toContain("If you're asked to make a plan");
+    expect(references[6]).toContain("## Key Endpoints (Hot Routes)");
+    expect(references[6]).toContain("## Searching Issues");
+
+    const workspaceReference = await fs.readFile(path.resolve("skills/paperclip/references/issue-workspaces.md"), "utf8");
+    expect(workspaceReference).toContain("AGENT_HOME");
+    expect(workspaceReference).toContain("Do not clone unrelated repositories");
+    expect(workspaceReference).toContain("do not retry in a loop or interrupt the run");
+    expect(normalizedCore).toContain("The normal heartbeat status and completion steps remain above.");
+    expect(normalizedCore).toContain("When the MCP catalog or runtime reports an approval gate or pending approval");
+
+    const skillDirectory = path.resolve("skills/paperclip");
+    for (const [, referencePath] of skillBody.matchAll(/\]\((references\/[^)#]+\.md)(?:#[^)]*)?\)/g)) {
+      await expect(fs.access(path.join(skillDirectory, referencePath))).resolves.toBeUndefined();
+    }
   });
 
   it("recovers a committed upload after its response is lost without uploading the file twice", async () => {
@@ -532,7 +595,10 @@ describe("paperclip skill utils", () => {
   });
 
   it("uses the authoritative PATCH response to confirm monitor scheduling", async () => {
-    const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
+    const skillBody = await fs.readFile(
+      path.resolve("skills/paperclip/references/task-lifecycle.md"),
+      "utf8",
+    );
 
     expect(skillBody).toContain("Use that request's default full response");
     expect(skillBody).toContain("do not issue a confirming GET");
@@ -545,7 +611,8 @@ describe("paperclip skill utils", () => {
     const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
 
     expect(skillBody).toContain("Verify writes — never infer them");
-    expect(skillBody).toContain("An empty response body means the write FAILED");
+    expect(skillBody).toContain("An empty body, malformed JSON, wrong issue ID");
+    expect(skillBody).toContain("it does not prove the server rolled the write back");
     expect(skillBody).toContain("Never pipe a disposition write through `head`/`tail`");
     expect(skillBody).toContain("resolved relative to this installed `SKILL.md`, not the task workspace");
     expect(skillBody).toContain("do not search the filesystem for it");

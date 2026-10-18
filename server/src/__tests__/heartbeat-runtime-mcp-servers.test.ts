@@ -146,7 +146,7 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
     expect(first[0]).toMatchObject({
       name: "paperclip-assigned",
       connectionId: expect.stringMatching(/^assignment:[a-f0-9]{64}$/),
-      url: expect.stringMatching(/^https:\/\/paperclip\.example\.test\/mcp\/gateways\/gw_[a-f0-9]{32}$/),
+      url: expect.stringMatching(/^https:\/\/paperclip\.example\.test\/mcp\/gateways\/gw_[a-f0-9]{32}\?catalog=on-demand$/),
       token: expect.stringMatching(/^pcgw_/),
     });
     expect(JSON.stringify(first)).not.toContain(uninstalledConnection!.id);

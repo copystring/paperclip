@@ -1237,7 +1237,9 @@ export async function buildPaperclipRuntimeMcpServers(input: {
   return [
     {
       name: ASSIGNED_MCP_SERVER_NAME,
-      url: `${paperclipApiBaseUrl()}/mcp/gateways/${gateway!.gatewayPublicId}`,
+      // Opt in only the server-owned runtime projection. Ordinary MCP clients
+      // keep their direct catalog; the URL also binds the ACP session identity.
+      url: `${paperclipApiBaseUrl()}/mcp/gateways/${gateway!.gatewayPublicId}?catalog=on-demand`,
       token: token.token,
       connectionId: `assignment:${assignmentDigest}`,
     },

@@ -18,6 +18,13 @@ import { buildGatewayToolCallResult } from "../services/tool-gateway-mcp-result.
 import { forbidden, HttpError } from "../errors.js";
 import { accessService } from "../services/index.js";
 import { listConnectionLifecycleEvents } from "../services/tool-connection-activity.js";
+import {
+  createMcpToolCatalogDefinitions,
+  searchMcpToolCatalog,
+  parseMcpToolCall,
+  validateCatalogToolArguments,
+  McpToolCatalogError,
+} from "../services/mcp-tool-catalog.js";
 
 const TOOL_ACTIVITY_EVENT_TYPES = [
   "call_completed",
@@ -84,6 +91,7 @@ async function handleMcpGatewayProtocol(
       return;
     }
     const headers = callerHeaders(req);
+    const onDemandCatalog = req.query.catalog === "on-demand";
     const body = (req.body ?? {}) as { jsonrpc?: string; id?: unknown; method?: string; params?: Record<string, unknown> };
     const id = body.id ?? null;
     if (body.method === "initialize") {
@@ -123,12 +131,12 @@ async function handleMcpGatewayProtocol(
         id,
         result: {
           tools: [
-            ...tools.map((tool) => ({
+            ...(onDemandCatalog ? structuredClone(createMcpToolCatalogDefinitions(tools)) : tools.map((tool) => ({
             name: tool.name,
             title: tool.displayName,
             description: tool.description,
             inputSchema: tool.parametersSchema ?? { type: "object", properties: {} },
-            })),
+            }))),
             {
               name: "paperclip_list_resources",
               description: "List resources from fully assigned MCP connections.",
@@ -156,7 +164,8 @@ async function handleMcpGatewayProtocol(
     }
     if (body.method === "tools/call") {
       const params = body.params ?? {};
-      const name = typeof params.name === "string" ? params.name : "";
+      let name = typeof params.name === "string" ? params.name : "";
+      let parameters = params.arguments ?? {};
       if (!name) {
         res.status(400).json({ jsonrpc: "2.0", id, error: { code: -32602, message: "params.name is required" } });
         return;
@@ -181,12 +190,34 @@ async function handleMcpGatewayProtocol(
         res.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: false } });
         return;
       }
+      if (onDemandCatalog) {
+        // Discovery is never a grant. Every page/schema and call reloads the
+        // existing authorized catalog, and execution still reauthorizes through
+        // executeTool (including approvals, token actions and invocation audit).
+        if (name !== "paperclip_search_tools" && name !== "paperclip_call_tool") {
+          throw new ToolGatewayHttpError(404, "Use paperclip_search_tools and paperclip_call_tool in this catalog.", "catalog_tool_unknown");
+        }
+        const tools = await discoveryRequest(req, res, (signal) => toolGateway.listToolsForNamedGateway({
+          ...locator, bearerToken: token, callerHeaders: headers, signal, requireToolCallAction: true,
+        }));
+        if (name === "paperclip_search_tools") {
+          const result = searchMcpToolCatalog(tools, parameters);
+          res.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }], isError: false } });
+          return;
+        }
+        const call = parseMcpToolCall(parameters);
+        const tool = tools.find((candidate) => candidate.name === call.name);
+        if (!tool) throw new ToolGatewayHttpError(404, "The tool is not in the current authorized catalog.", "catalog_tool_unknown");
+        validateCatalogToolArguments(tool, call.arguments);
+        name = call.name;
+        parameters = call.arguments;
+      }
       const result = await toolGateway.executeTool({
         sessionToken: token,
         gatewayId: locator.gatewayId ?? null,
         gatewayPublicId: locator.gatewayPublicId ?? null,
         tool: name,
-        parameters: params.arguments ?? {},
+        parameters,
         callerHeaders: req.headers,
       });
       const resultRecord = result.result && typeof result.result === "object" && !Array.isArray(result.result)
@@ -219,6 +250,11 @@ async function handleMcpGatewayProtocol(
     res.status(404).json({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
   } catch (err) {
     if (res.destroyed) return;
+    if (err instanceof McpToolCatalogError) {
+      res.status(err.statusCode).json({ jsonrpc: "2.0", id: req.body?.id ?? null,
+        error: { code: err.statusCode >= 500 ? -32603 : -32602, message: err.message, data: { reasonCode: err.code } } });
+      return;
+    }
     if (err instanceof ToolGatewayHttpError) {
       const id = (req.body as { id?: unknown } | undefined)?.id ?? null;
       // Provider tool failures are MCP tool results, not successful calls or

@@ -92,3 +92,11 @@ When the Paperclip MCP tools are available, prefer these issue-scoped tools:
 - `paperclipWaitForIssueWorkspaceService` — waits until a selected service is running and returns its URL when exposed.
 
 These tools resolve the issue's workspace id for you, so QA agents do not need to know the lower-level execution workspace endpoint first.
+
+**Operational constraints retained from the skill entrypoint**
+
+Use the task's provided working directory for task files. `AGENT_HOME` holds personal instructions and memory; provider home is runtime-managed. A task does not need a project or Git repository. Do not clone unrelated repositories or place task output in home to compensate for a missing project.
+
+Use `get_workspace` to inspect the current folder, pending selection, and capabilities. Use `list_workspaces` for authorized existing folders and `list_project_repositories` for repository choices. `select_workspace` and `prepare_repository` express intent; the harness validates and prepares it. Respect `next_normal_admission` responses: keep the current root, do not claim the requested checkout exists, and do not retry in a loop or interrupt the run. Project assignment alone does not relocate files. See this reference for the API equivalents.
+
+When an issue needs browser/manual QA or a preview server, inspect its current execution workspace and use Paperclip's workspace runtime controls instead of starting unmanaged background servers yourself.

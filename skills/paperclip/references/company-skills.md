@@ -264,3 +264,11 @@ curl -sS -X POST "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/agents"
   - `POST /api/companies/:companyId/exports/preview`
   - `POST /api/companies/:companyId/exports`
 - Use skill-only import when the task is specifically to add a skill to the company library without importing the surrounding company/team/package structure.
+
+**Operational constraints retained from the skill entrypoint**
+
+Authorized managers can install company skills independently of hiring, then assign or remove those skills on agents.
+
+- Install and inspect company skills with the company skills API.
+- Assign skills to existing agents with `POST /api/agents/{agentId}/skills/sync` and an explicit `add`, `remove`, or `replace` mode. Prefer `add`; `replace` overwrites the complete desired skill set.
+- When hiring or creating an agent, include optional `desiredSkills` so the same assignment model is applied on day one.

@@ -3033,6 +3033,9 @@ describe("shared ACPX engine runtime behavior", () => {
         getServers: () => [{ ...server, connectionId: "connection-2", token: "token-two" }],
       },
     });
+    const changedCatalog = await runExecutor(baseConfig, {
+      runtimeMcp: { getServers: () => [{ ...server, url: `${server.url}?catalog=on-demand`, token: "token-two" }] },
+    });
 
     expect(first.runtimeOptions[0]?.mcpServers).toEqual([{
       type: "http",
@@ -3048,6 +3051,11 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(JSON.stringify(first.result.sessionParams)).not.toContain("token-one");
     expect(first.result.sessionParams?.configFingerprint).toBe(rotatedToken.result.sessionParams?.configFingerprint);
     expect(first.result.sessionParams?.configFingerprint).not.toBe(changedSet.result.sessionParams?.configFingerprint);
+    expect(changedCatalog.runtimeOptions[0]?.mcpServers).toEqual([{
+      type: "http", name: "github", url: `${server.url}?catalog=on-demand`,
+      headers: [{ name: "Authorization", value: "Bearer token-two" }],
+    }]);
+    expect(first.result.sessionParams?.configFingerprint).not.toBe(changedCatalog.result.sessionParams?.configFingerprint);
   });
 });
 

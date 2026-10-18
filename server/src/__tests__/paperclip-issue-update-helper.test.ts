@@ -7,11 +7,6 @@ import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-// End-to-end coverage for the skill-bundled issue update helper: the helper must
-// only exit 0 when the server confirms the write by echoing the update, must
-// classify failures (retry connection-level faults and 5xx, never retry a
-// definitive 4xx), and must stop at two attempts total to honor the shared
-// bounded-write-retry rule.
 const HELPER_PATH = path.resolve("skills/paperclip/scripts/paperclip-issue-update.sh");
 const REPO_HELPER_PATH = path.resolve("scripts/paperclip-issue-update.sh");
 
@@ -100,23 +95,39 @@ describe("paperclip issue update helper", () => {
     });
   }
 
-  const doneArgs = ["--issue-id", "issue-1", "--status", "done", "--comment", "closing note"];
+  const comment = "Abgeschlossen\n\n- Status: bereit ✅\n- Mehrzeiliger Nachweis";
+  const doneArgs = ["--issue-id", "issue-1", "--status", "done", "--comment", comment];
 
-  it("exits 0 and prints the issue JSON when the server echoes the requested status", async () => {
+  it("combines status and an exact Unicode multiline comment in one confirmed PATCH", async () => {
     const { baseUrl, requests } = await startServer((request, _attempt, res) => {
       const payload = JSON.parse(request.body) as { status?: string; comment?: string };
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ id: "issue-1", status: payload.status }));
+      res.end(JSON.stringify({ id: "issue-1", status: payload.status, comment: { body: payload.comment } }));
     });
 
     const result = await runHelper(baseUrl, doneArgs);
 
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({ id: "issue-1", status: "done" });
+    expect(JSON.parse(result.stdout)).toMatchObject({ id: "issue-1", status: "done", comment: { body: comment } });
     expect(requests).toHaveLength(1);
     expect(requests[0]?.method).toBe("PATCH");
     expect(requests[0]?.url).toBe("/api/issues/issue-1");
-    expect(JSON.parse(requests[0]?.body ?? "{}")).toEqual({ status: "done", comment: "closing note" });
+    expect(JSON.parse(requests[0]?.body ?? "{}")).toEqual({ status: "done", comment });
+  });
+
+  it("confirms an issue addressed by identifier when the response carries its UUID", async () => {
+    const { baseUrl, requests } = await startServer((request, _attempt, res) => {
+      const payload = JSON.parse(request.body) as { status?: string; comment?: string };
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "f4c2ca29-1051-4d25-9da0-4e91748c2376", identifier: "TST-123", status: payload.status, comment: { body: payload.comment } }));
+    });
+
+    const result = await runHelper(baseUrl, ["--issue-id", "tst-123", "--status", "done", "--comment", comment]);
+
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ identifier: "TST-123", status: "done", comment: { body: comment } });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe("/api/issues/tst-123");
   });
 
   it.each([".claude/skills", "codex-home/skills"])(
@@ -154,11 +165,11 @@ describe("paperclip issue update helper", () => {
     cleanupFns.push(() => fs.rm(root, { recursive: true, force: true }));
     const result = await runHelper("", [...doneArgs, "--dry-run"], { helper: REPO_HELPER_PATH, cwd: root });
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ status: "done", comment: "closing note" });
+    expect(JSON.parse(result.stdout)).toEqual({ status: "done", comment });
   });
 
   it("fails an empty 2xx body instead of treating it as success", async () => {
-    const { baseUrl } = await startServer((_request, _attempt, res) => {
+    const { baseUrl, requests } = await startServer((_request, _attempt, res) => {
       res.writeHead(200, { "content-length": "0" });
       res.end();
     });
@@ -168,18 +179,66 @@ describe("paperclip issue update helper", () => {
     expect(result.code).toBe(1);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("empty response body");
+    expect(requests).toHaveLength(1);
   });
 
-  it("fails when the server echoes a different status than requested", async () => {
-    const { baseUrl } = await startServer((_request, _attempt, res) => {
+  it.each([
+    ["wrong issue id", { id: "issue-2", status: "done", comment: { body: comment } }],
+    ["wrong id and identifier", { id: "other-uuid", identifier: "TST-999", status: "done", comment: { body: comment } }],
+    ["missing comment", { id: "issue-1", status: "done" }],
+    ["different comment", { id: "issue-1", status: "done", comment: { body: "different" } }],
+    ["different status", { id: "issue-1", status: "in_progress", comment: { body: comment } }],
+    ["non-object JSON", ["issue-1", "done", comment]],
+  ])("does not confirm a 2xx response with %s", async (_caseName, responseBody) => {
+    const { baseUrl, requests } = await startServer((_request, _attempt, res) => {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ id: "issue-1", status: "in_progress" }));
+      res.end(JSON.stringify(responseBody));
     });
 
     const result = await runHelper(baseUrl, doneArgs);
 
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain("echoed status in_progress");
+    expect(result.stderr).toContain("unconfirmed");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("does not confirm invalid JSON or replay the comment", async () => {
+    const { baseUrl, requests } = await startServer((_request, _attempt, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{invalid");
+    });
+
+    const result = await runHelper(baseUrl, doneArgs);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("unconfirmed");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("rejects multiple JSON values even when the last object matches", async () => {
+    const { baseUrl, requests } = await startServer((_request, _attempt, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(`${JSON.stringify({ id: "other-issue" })}\n${JSON.stringify({ id: "issue-1", status: "done", comment: { body: comment } })}`);
+    });
+
+    const result = await runHelper(baseUrl, doneArgs);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("unconfirmed");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("does not replay a comment after a 5xx ambiguous outcome", async () => {
+    const { baseUrl, requests } = await startServer((_request, _attempt, res) => {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "unavailable" }));
+    });
+
+    const result = await runHelper(baseUrl, doneArgs);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("outcome is ambiguous");
+    expect(requests).toHaveLength(1);
   });
 
   it("does not retry a definitive 4xx rejection", async () => {
@@ -207,14 +266,14 @@ describe("paperclip issue update helper", () => {
       res.end(JSON.stringify({ id: "issue-1", status: payload.status }));
     });
 
-    const result = await runHelper(baseUrl, doneArgs);
+    const result = await runHelper(baseUrl, ["--issue-id", "issue-1", "--status", "done"]);
 
     expect(result.code).toBe(0);
     expect(requests).toHaveLength(2);
     expect(result.stderr).toContain("retrying");
   });
 
-  it("stops after two attempts on connection-level failure and reports the write as not saved", async () => {
+  it("does not replay a comment after a connection-level failure", async () => {
     // Bind and close a listener so the port is real but refuses connections.
     const probe = http.createServer();
     await new Promise<void>((resolve) => {
@@ -228,7 +287,6 @@ describe("paperclip issue update helper", () => {
     const result = await runHelper(`http://127.0.0.1:${port}`, doneArgs);
 
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain("FAILED after 2 attempts");
-    expect(result.stderr).toContain("NOT saved");
+    expect(result.stderr).toContain("outcome is ambiguous");
   }, 15_000);
 });

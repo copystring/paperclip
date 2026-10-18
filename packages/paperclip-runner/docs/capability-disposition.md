@@ -11,12 +11,12 @@ the authoritative rows.
 
 Only two sources are normative:
 
-1. The Paperclip skill and its seven references (`SKILL.md` plus
-   `references/*.md`), contributing **153 headings**.
+1. The Paperclip skill and its twelve references (`SKILL.md` plus
+   `references/*.md`), contributing **188 headings**.
 2. The Paperclip Evals corpus, contributing **106 cases across 16 groups**.
 
-Together these produce **259 normative rows**. The legacy Paperclip MCP tool
-surface (**41 tools**) is not a production capability surface; each MCP name is
+Together these produce **294 normative rows**. The legacy Paperclip MCP tool
+surface (**42 tools**) is not a production capability surface; each MCP name is
 folded one-to-one into a normative eval row as a traceability alias and inherits
 that row's disposition. The contract prints the alias index only so the
 normative target is easy to audit.

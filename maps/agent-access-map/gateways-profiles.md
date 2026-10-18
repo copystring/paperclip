@@ -97,6 +97,14 @@ approvals and revocation checks remain independent. Regression coverage lives in
 [assigned-tool tests](../../server/src/services/native-runtime/assigned-mcp-tools.test.ts);
 these fixtures do not certify a live external-client journey.
 
+Server-owned assigned runtime gateways opt into the
+[on-demand catalog](../../doc/runtime-mcp-catalog.md). Search returns complete
+schemas on demand; calls retain current authorization, token-action gates,
+approvals and audit. Ordinary clients keep direct discovery. Focused protocol
+and real PostgreSQL revocation tests live in
+[catalog HTTP tests](../../server/src/__tests__/mcp-tool-catalog-http.test.ts) and
+[discovery HTTP tests](../../server/src/__tests__/tool-gateway-discovery-http.test.ts).
+
 ## `tokens`
 
 Review: `baseline`.

@@ -7,9 +7,13 @@
     "skills/paperclip/references/artifacts.md",
     "skills/paperclip/references/cases.md",
     "skills/paperclip/references/company-skills.md",
+    "skills/paperclip/references/credentials.md",
+    "skills/paperclip/references/external-chat-turns.md",
     "skills/paperclip/references/issue-documents.md",
+    "skills/paperclip/references/issue-interactions.md",
     "skills/paperclip/references/issue-workspaces.md",
     "skills/paperclip/references/routines.md",
+    "skills/paperclip/references/task-lifecycle.md",
     "skills/paperclip/references/workflows.md"
   ],
   "toolMappings": {
