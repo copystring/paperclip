@@ -221,6 +221,22 @@ class FailClosedPolicyTests(unittest.TestCase):
 
 
 class PlanConstructionTests(unittest.TestCase):
+    def test_detects_exec_file_sync_cargo_hook_but_not_build_command_assertions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp)
+            hook = workspace / "server/src/__tests__/dot-runner.test.ts"
+            assertion = workspace / "server/src/__tests__/docker-build-stamp.test.ts"
+            hook.parent.mkdir(parents=True)
+            hook.write_text('execFileSync("cargo", ["build", "--release", "--locked"]);')
+            assertion.write_text('expect(native).toContain("cargo build --release");')
+            self.assertEqual(
+                build.native_runner_prerequisite_files(
+                    workspace,
+                    ["server/src/__tests__/dot-runner.test.ts", "server/src/__tests__/docker-build-stamp.test.ts"],
+                ),
+                ["server/src/__tests__/dot-runner.test.ts"],
+            )
+
     def make_dry_run(self, duplicate_server=False, unknown_group=False):
         groups = sorted(build.EXPECTED_GENERAL_GROUPS)
         if unknown_group:
@@ -247,6 +263,10 @@ class PlanConstructionTests(unittest.TestCase):
                 if group == "general-server":
                     index = int(args[args.index("--shard-index") + 1])
                     count = int(args[args.index("--shard-count") + 1])
+                    for suite in [item for shard in server for item in shard]:
+                        source = _workspace / suite
+                        source.parent.mkdir(parents=True, exist_ok=True)
+                        source.write_text('execFileSync("cargo"' if suite == "server/0.test.ts" else "ordinary suite")
                     if count == 1:
                         return {"selectedGeneralServerSuites": [item for shard in server for item in shard]}
                     return {"selectedGeneralServerSuites": server[index]}
@@ -268,6 +288,8 @@ class PlanConstructionTests(unittest.TestCase):
             self.assertEqual(len(plan["lanes"]), 9)
             self.assertEqual(plan["serverInventoryCount"], 4)
             self.assertEqual(plan["serializedInventoryCount"], 3)
+            self.assertTrue(plan["lanes"][0]["nativeRunnerPreflight"])
+            self.assertFalse(any(lane["nativeRunnerPreflight"] for lane in plan["lanes"][1:]))
             self.assertEqual([lane["id"] for lane in plan["lanes"][-2:]], ["serialized-1-of-2", "serialized-2-of-2"])
             self.assertEqual(build.load_test_plan(output / "test-plan.json", provenance), plan)
 
@@ -294,13 +316,16 @@ class ShardedTestReceiptTests(unittest.TestCase):
                 "general-workspaces-c": ["@paperclipai/db"],
             },
             "lanes": [
-                {"id": f"general-server-{i + 1}-of-4", "mode": "general", "group": "general-server", "shardIndex": i, "shardCount": 4}
+                {"id": f"general-server-{i + 1}-of-4", "mode": "general", "group": "general-server", "shardIndex": i, "shardCount": 4,
+                 "nativeRunnerFiles": [], "nativeRunnerPreflight": False}
                 for i in range(4)
             ] + [
-                {"id": group, "mode": "general", "group": group, "shardIndex": 0, "shardCount": 1}
+                {"id": group, "mode": "general", "group": group, "shardIndex": 0, "shardCount": 1,
+                 "nativeRunnerFiles": [], "nativeRunnerPreflight": False}
                 for group in ("general-workspaces-a", "general-workspaces-b", "general-workspaces-c")
             ] + [
-                {"id": f"serialized-{i + 1}-of-2", "mode": "serialized", "group": "serialized", "shardIndex": i, "shardCount": 2}
+                {"id": f"serialized-{i + 1}-of-2", "mode": "serialized", "group": "serialized", "shardIndex": i, "shardCount": 2,
+                 "nativeRunnerFiles": [], "nativeRunnerPreflight": False}
                 for i in range(2)
             ],
         }
@@ -310,7 +335,8 @@ class ShardedTestReceiptTests(unittest.TestCase):
         (directory / "test-plan.json").write_bytes(build.canonical_json(self.plan))
         digest = build.sha256(build.canonical_json(self.plan))
         for lane in self.plan["lanes"]:
-            receipt = {"schemaVersion": 1, **self.provenance, "planDigest": digest, "lane": lane, "frozenInstall": True, "passed": True}
+            receipt = {"schemaVersion": 1, **self.provenance, "planDigest": digest, "lane": lane, "frozenInstall": True,
+                       "runnerBinariesPrebuilt": lane["nativeRunnerPreflight"], "passed": True}
             if mutate:
                 receipt = mutate(lane, receipt)
             (directory / f"test-{lane['id']}.json").write_bytes(build.canonical_json(receipt))
@@ -323,6 +349,39 @@ class ShardedTestReceiptTests(unittest.TestCase):
             self.assertEqual(len(plan["lanes"]), 9)
             self.assertEqual(len(receipts), 9)
             self.assertTrue(all(item["passed"] is True for item in receipts))
+
+    def test_runner_binaries_are_prebuilt_only_for_lanes_with_native_runner_suites(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, output = root / "source", root / "output"
+            workspace.mkdir()
+            output.mkdir()
+            self.plan["lanes"][0]["nativeRunnerFiles"] = ["server/src/__tests__/dot-runner.test.ts"]
+            self.plan["lanes"][0]["nativeRunnerPreflight"] = True
+            (output / "test-plan.json").write_bytes(build.canonical_json(self.plan))
+            commands = []
+            def fake_git(_workspace, *args):
+                return type("Result", (), {"stdout": b"prepared-head" if args == ("rev-parse", "HEAD") else b""})()
+            with patch.object(build, "load_provenance", return_value=(self.provenance, [])), \
+                 patch.object(build, "git", side_effect=fake_git), \
+                 patch.object(build, "run_checked", side_effect=lambda command, cwd: commands.append((command, cwd))):
+                receipt = build.run_test_lane(workspace, output, "general-server-1-of-4")
+                build.run_test_lane(workspace, output, "general-server-2-of-4")
+            cargo_commands = [command for command, _ in commands if command[0] == "cargo"]
+            self.assertEqual(len(cargo_commands), 1)
+            self.assertEqual(cargo_commands[0][1:], [
+                "build", "--release", "--manifest-path", "runner/Cargo.toml", "--locked",
+                "-p", "paperclip-runner-core", "--bin", "paperclip-runnerd", "--bin", "fake-codex-app-server",
+            ])
+            first_lane_commands = [command for command, _ in commands[:3]]
+            self.assertEqual(first_lane_commands, [
+                ["pnpm", "install", "--frozen-lockfile"],
+                ["pnpm", "run", "build:rust"],
+                cargo_commands[0],
+            ])
+            self.assertEqual(receipt["runnerBinariesPrebuilt"], True)
+            ordinary = json.loads((output / "test-general-server-2-of-4.json").read_text())
+            self.assertFalse(ordinary["runnerBinariesPrebuilt"])
 
     def test_rejects_missing_lane(self):
         with tempfile.TemporaryDirectory() as temp:

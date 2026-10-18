@@ -34,6 +34,10 @@ EXPECTED_GENERAL_GROUPS = {
     "general-chat", "general-server-native-runner", "general-workspaces-a", "general-workspaces-b",
     "general-workspaces-c",
 }
+NATIVE_RUNNER_TEST_MARKERS = (
+    'execFileSync("cargo"', "execFileSync('cargo'",
+    "existsSync(defaultCapabilityRunnerdBinary())", "existsSync(fakeCodexAppServer)",
+)
 DEPENDENCY_FILES = {
     "pnpm-lock.yaml", "pnpm-workspace.yaml", "package-lock.json",
     "npm-shrinkwrap.json", "yarn.lock", "bun.lock", "bun.lockb", ".npmrc",
@@ -545,6 +549,21 @@ def _unique_string_list(value: Any, label: str) -> list[str]:
     return value
 
 
+def native_runner_prerequisite_files(workspace: Path, suites: list[str]) -> list[str]:
+    """Find selected test files that build or require local Runner binaries."""
+    root = workspace.resolve()
+    required = []
+    for suite in suites:
+        relative = safe_relative_path(suite)
+        resolved = workspace.joinpath(*relative.parts).resolve(strict=True)
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            raise TrainError(f"test suite escapes the prepared source or is not a file: {suite}")
+        contents = resolved.read_text(encoding="utf-8")
+        if any(marker in contents for marker in NATIVE_RUNNER_TEST_MARKERS):
+            required.append(relative.as_posix())
+    return required
+
+
 def create_test_plan(workspace: Path, output: Path) -> dict[str, Any]:
     provenance, _ = load_provenance(workspace, output)
     inventory = wrapper_dry_run(workspace, "--mode", "all")
@@ -556,12 +575,15 @@ def create_test_plan(workspace: Path, output: Path) -> dict[str, Any]:
         raise TrainError("upstream all dry-run returned an unexpected mode")
 
     server_shards: list[list[str]] = []
+    native_files_by_shard: list[list[str]] = []
     for index in range(4):
         result = wrapper_dry_run(
             workspace, "--mode", "general", "--group", "general-server",
             "--shard-index", str(index), "--shard-count", "4",
         )
-        server_shards.append(_unique_string_list(result.get("selectedGeneralServerSuites"), "general-server suites"))
+        shard_files = _unique_string_list(result.get("selectedGeneralServerSuites"), "general-server suites")
+        server_shards.append(shard_files)
+        native_files_by_shard.append(native_runner_prerequisite_files(workspace, shard_files))
     server_inventory_result = wrapper_dry_run(
         workspace, "--mode", "general", "--group", "general-server",
         "--shard-index", "0", "--shard-count", "1",
@@ -611,10 +633,14 @@ def create_test_plan(workspace: Path, output: Path) -> dict[str, Any]:
         workspace_projects[group] = projects
         lane_specs.append((group, "general", group, 0, 1))
     lane_specs.extend((f"serialized-{index + 1}-of-2", "serialized", "serialized", index, 2) for index in range(2))
-    lanes = [
-        {"id": lane_id, "mode": mode, "group": group, "shardIndex": index, "shardCount": count}
-        for lane_id, mode, group, index, count in lane_specs
-    ]
+    lanes = []
+    for lane_id, mode, group, index, count in lane_specs:
+        native_files = native_files_by_shard[index] if group == "general-server" else []
+        lanes.append({
+            "id": lane_id, "mode": mode, "group": group, "shardIndex": index, "shardCount": count,
+            "nativeRunnerFiles": native_files,
+            "nativeRunnerPreflight": bool(native_files),
+        })
     if len(lanes) != 9 or len({lane["id"] for lane in lanes}) != 9:
         raise TrainError("internal lane plan is incomplete or duplicated")
     plan = {
@@ -655,9 +681,21 @@ def load_test_plan(path: Path, provenance: dict[str, Any]) -> dict[str, Any]:
         {"id": f"serialized-{i + 1}-of-2", "mode": "serialized", "group": "serialized", "shardIndex": i, "shardCount": 2}
         for i in range(2)
     ]
+    if not isinstance(lanes, list) or len(lanes) != len(expected):
+        raise TrainError("test plan lane set or inventory metadata is invalid")
+    for lane, base in zip(lanes, expected, strict=True):
+        if not isinstance(lane, dict) or any(lane.get(key) != value for key, value in base.items()):
+            raise TrainError("test plan lane set or inventory metadata is invalid")
+        native_files = _unique_string_list(lane.get("nativeRunnerFiles"), "native Runner test files")
+        if (
+            lane.get("nativeRunnerPreflight") is not (len(native_files) > 0)
+            or (lane["group"] != "general-server" and native_files)
+        ):
+            raise TrainError("test plan native Runner preflight contract is invalid")
+        for path in native_files:
+            safe_relative_path(path)
     if (
-        lanes != expected
-        or type(plan.get("serverInventoryCount")) is not int or plan["serverInventoryCount"] < 1
+        type(plan.get("serverInventoryCount")) is not int or plan["serverInventoryCount"] < 1
         or type(plan.get("serializedInventoryCount")) is not int or plan["serializedInventoryCount"] < 0
     ):
         raise TrainError("test plan lane set or inventory metadata is invalid")
@@ -681,6 +719,13 @@ def run_test_lane(workspace: Path, output: Path, lane_id: str) -> dict[str, Any]
         raise TrainError(f"unknown test lane: {lane_id}")
     head_before = git(workspace, "rev-parse", "HEAD").stdout.decode().strip()
     run_checked(["pnpm", "install", "--frozen-lockfile"], workspace)
+    if lane["nativeRunnerPreflight"]:
+        runner_package = workspace / "packages" / "paperclip-runner"
+        run_checked(["pnpm", "run", "build:rust"], runner_package)
+        run_checked([
+            "cargo", "build", "--release", "--manifest-path", "runner/Cargo.toml", "--locked",
+            "-p", "paperclip-runner-core", "--bin", "paperclip-runnerd", "--bin", "fake-codex-app-server",
+        ], runner_package)
     if lane["mode"] == "general":
         command = ["pnpm", "run", "test:run:general", "--", "--group", lane["group"]]
         if lane["shardCount"] > 1:
@@ -698,6 +743,7 @@ def run_test_lane(workspace: Path, output: Path, lane_id: str) -> dict[str, Any]
         "planDigest": sha256(canonical_json(plan)),
         "lane": lane,
         "frozenInstall": True,
+        "runnerBinariesPrebuilt": lane["nativeRunnerPreflight"],
         "passed": True,
     }
     write_json(output / f"test-{lane_id}.json", receipt)
@@ -737,6 +783,7 @@ def validate_test_receipts(directory: Path, provenance: dict[str, Any], plan_pat
             or receipt.get("planDigest") != digest
             or lane != expected_by_id[lane_id]
             or receipt.get("frozenInstall") is not True
+            or receipt.get("runnerBinariesPrebuilt") is not expected_by_id[lane_id].get("nativeRunnerPreflight")
             or receipt.get("passed") is not True
         ):
             raise TrainError(f"test receipt does not prove its exact lane and source: {path.name}")
