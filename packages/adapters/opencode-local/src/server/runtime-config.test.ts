@@ -590,8 +590,10 @@ describe("prepareOpenCodeRuntimeConfig", () => {
   it("adds only delivered HTTP MCP servers with a Bearer header and preserves user servers on collision", async () => {
     const { createHash } = await import("node:crypto");
     const connectionId = "fixture-connection";
-    const suffix = createHash("sha256").update(`${connectionId}\0${0}`).digest("hex").slice(0, 16).toUpperCase();
-    const collidedName = `paperclip_${suffix}`;
+    const suffix = createHash("sha256").update(`${connectionId}\0${0}`).digest("hex").toUpperCase();
+    const collidedName = `paperclip_${suffix.slice(0, 12)}`;
+    const assignedName = `paperclip_${suffix.slice(0, 10)}_1`;
+    expect(collidedName.length).toBeLessThanOrEqual(22);
     const suppliedToken = "fixture-token-not-a-real-credential";
     const configHome = await makeConfigHome({
       mcp: {
@@ -621,13 +623,15 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     expect(runtimeConfig.theme).toBe("system");
     expect(runtimeConfig.mcp[collidedName]).toEqual({ type: "local", command: ["user-owned-server"] });
     expect(runtimeConfig.mcp.other).toEqual({ type: "remote", url: "https://user.example/mcp", enabled: true });
-    expect(runtimeConfig.mcp[`${collidedName}_1`]).toMatchObject({
+    expect(runtimeConfig.mcp[assignedName]).toMatchObject({
       type: "remote",
       url: "https://paperclip.example/mcp/gateways/run-scoped",
       enabled: true,
       oauth: false,
+      timeout: 30_000,
       headers: { Authorization: `Bearer ${suppliedToken}` },
     });
+    expect(assignedName.length).toBeLessThanOrEqual(22);
     expect(serializedConfig).toContain(`Bearer ${suppliedToken}`);
     expect(prepared.notes.join("\n")).not.toContain(suppliedToken);
     expect(Object.keys(prepared.env).filter((key) => key.startsWith("PAPERCLIP_OPENCODE_MCP_TOKEN_"))).toEqual([]);
@@ -974,5 +978,149 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     expect(prepared.env).toEqual({ XDG_CONFIG_HOME: configHome });
     expect(prepared.notes).toEqual([]);
     await prepared.cleanup();
+  });
+
+  it.each([false, true])("adds run-scoped MCP servers without changing permission policy (skip=%s)", async (skip) => {
+    const configHome = await makeConfigHome({
+      permission: { bash: "ask", "mcp__existing__write": "deny" },
+      mcp: {
+        "paperclip-assigned": { type: "remote", url: "https://user.example/mcp", enabled: true },
+        existing: { type: "remote", url: "https://existing.example/mcp", enabled: true },
+      },
+      provider: { custom: { models: { "example/model": {} } } },
+      small_model: "example/model",
+    });
+    const token = "run-scoped-fixture-secret";
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: { dangerouslySkipPermissions: skip },
+      runtimeMcpServers: [
+        { name: "paperclip-assigned", connectionId: `assignment:${"a".repeat(64)}`, url: "https://paperclip.example/mcp/one", token },
+        { name: "paperclip-assigned", connectionId: `assignment:${"b".repeat(64)}`, url: "https://paperclip.example/mcp/two", token: "second-run-token" },
+      ],
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+
+    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
+    const runtimeConfig = JSON.parse(await fs.readFile(runtimeConfigPath, "utf8")) as {
+      mcp: Record<string, unknown>;
+      permission?: unknown;
+      provider?: unknown;
+      small_model?: unknown;
+    };
+    expect(runtimeConfig.mcp).toMatchObject({
+      "paperclip-assigned": { url: "https://user.example/mcp" },
+      existing: { url: "https://existing.example/mcp" },
+      "paperclip-assigned_2": {
+        type: "remote",
+        url: "https://paperclip.example/mcp/one",
+        enabled: true,
+        oauth: false,
+        timeout: 30_000,
+        headers: { Authorization: `Bearer ${token}` },
+      },
+      "paperclip-assigned_3": {
+        type: "remote",
+        url: "https://paperclip.example/mcp/two",
+        headers: { Authorization: "Bearer second-run-token" },
+      },
+    });
+    const generatedNames = ["paperclip-assigned_2", "paperclip-assigned_3"];
+    const gatewayMetaActionNames = [
+      `mcp.app-gallery-files:${"read_sensitive_metadata".padEnd(103 - "mcp.app-gallery-files:".length, "x")}`,
+      `mcp.app-gallery-files:${"update_sensitive_metadata".padEnd(104 - "mcp.app-gallery-files:".length, "y")}`,
+    ];
+    const composedToolNames = generatedNames.flatMap((serverName) =>
+      gatewayMetaActionNames.map((toolName) => `${serverName}__${toolName}`),
+    );
+    expect(gatewayMetaActionNames.map((name) => name.length)).toEqual([103, 104]);
+    expect(generatedNames.every((name) => name.length <= 22)).toBe(true);
+    expect(composedToolNames.every((name) => name.length <= 128)).toBe(true);
+    expect(new Set(composedToolNames).size).toBe(composedToolNames.length);
+    expect(JSON.stringify(runtimeConfig.mcp)).not.toContain("a".repeat(64));
+    expect(JSON.stringify(runtimeConfig.mcp)).not.toContain("b".repeat(64));
+    expect(runtimeConfig.permission).toEqual(skip ? "allow" : { bash: "ask", "mcp__existing__write": "deny" });
+    expect(runtimeConfig.provider).toEqual({ custom: { models: { "example/model": {} } } });
+    expect(runtimeConfig.small_model).toBe("example/model");
+    if (process.platform !== "win32") {
+      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
+    }
+    expect(JSON.stringify(prepared.notes)).not.toContain(token);
+    expect(JSON.parse(await fs.readFile(path.join(configHome, "opencode", "opencode.json"), "utf8"))).toMatchObject({
+      permission: { bash: "ask" },
+      mcp: { "paperclip-assigned": { url: "https://user.example/mcp" } },
+    });
+
+    await prepared.cleanup();
+    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
+    await expect(fs.access(prepared.env.XDG_CONFIG_HOME)).rejects.toThrow();
+  });
+
+  it("keeps a readable short label and deterministically bounds long labels", async () => {
+    const configHome = await makeConfigHome();
+    const servers = [{
+      name: "Paperclip project tools with a long descriptive label",
+      connectionId: `assignment:${"c".repeat(64)}`,
+      url: "https://paperclip.example/mcp",
+      token: "fixture-token",
+    }];
+    const first = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: { dangerouslySkipPermissions: false },
+      runtimeMcpServers: servers,
+    });
+    cleanupPaths.add(first.env.XDG_CONFIG_HOME);
+    const firstConfig = JSON.parse(
+      await fs.readFile(path.join(first.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+    ) as { mcp: Record<string, unknown> };
+    const [firstName] = Object.keys(firstConfig.mcp);
+    expect(firstName).toMatch(/^Paperclip_pro_[a-f0-9]{8}$/);
+    expect(firstName.length).toBeLessThanOrEqual(22);
+
+    await first.cleanup();
+    cleanupPaths.delete(first.env.XDG_CONFIG_HOME);
+    const second = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: { dangerouslySkipPermissions: false },
+      runtimeMcpServers: servers,
+    });
+    cleanupPaths.add(second.env.XDG_CONFIG_HOME);
+    const secondConfig = JSON.parse(
+      await fs.readFile(path.join(second.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+    ) as { mcp: Record<string, unknown> };
+    expect(Object.keys(secondConfig.mcp)).toEqual([firstName]);
+    await second.cleanup();
+    cleanupPaths.delete(second.env.XDG_CONFIG_HOME);
+  });
+
+  it("does not follow a user config symlink when writing the run secret", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-symlink-test-"));
+    cleanupPaths.add(root);
+    const configHome = path.join(root, "config");
+    const externalConfig = path.join(root, "external.json");
+    const configDir = path.join(configHome, "opencode");
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.writeFile(externalConfig, JSON.stringify({ theme: "system" }), "utf8");
+    await fs.symlink(externalConfig, path.join(configDir, "opencode.json"));
+
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: { dangerouslySkipPermissions: false },
+      runtimeMcpServers: [{
+        name: "Assigned tools",
+        connectionId: "connection-1",
+        url: "https://paperclip.example/mcp",
+        token: "fixture-secret",
+      }],
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
+    expect((await fs.lstat(runtimeConfigPath)).isSymbolicLink()).toBe(false);
+    expect(await fs.readFile(externalConfig, "utf8")).toBe(JSON.stringify({ theme: "system" }));
+    if (process.platform !== "win32") {
+      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
+    }
+    await prepared.cleanup();
+    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
   });
 });

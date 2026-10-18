@@ -6,6 +6,8 @@ import type { AdapterRuntimeMcpServer } from "@paperclipai/adapter-utils";
 import { asBoolean } from "@paperclipai/adapter-utils/server-utils";
 import { PAPERCLIP_TASK_TOOLS_SOURCE } from "./task-tools.js";
 
+const MAX_RUNTIME_MCP_SERVER_NAME_LENGTH = 22;
+
 type PreparedOpenCodeRuntimeConfig = {
   env: Record<string, string>;
   notes: string[];
@@ -647,17 +649,23 @@ export async function prepareOpenCodeRuntimeConfig(input: {
           throw new Error("A Paperclip runtime MCP server has an invalid HTTP binding.");
         }
         const identity = `${server.connectionId}\0${index}`;
-        const suffix = createHash("sha256").update(identity).digest("hex").slice(0, 16).toUpperCase();
-        const baseName = `paperclip_${suffix}`;
-        let name = baseName;
-        let collision = 1;
-        while (Object.hasOwn(nextMcp, name)) name = `${baseName}_${collision++}`;
+        const hash = createHash("sha256").update(identity).digest("hex").toUpperCase();
+        const prefix = "paperclip_";
+        let collision = 0;
+        let name: string;
+        do {
+          const collisionSuffix = collision === 0 ? "" : `_${collision}`;
+          const hashLength = MAX_RUNTIME_MCP_SERVER_NAME_LENGTH - prefix.length - collisionSuffix.length;
+          name = `${prefix}${hash.slice(0, hashLength)}${collisionSuffix}`;
+          collision += 1;
+        } while (Object.hasOwn(nextMcp, name));
         nextMcp[name] = {
           type: "remote",
           url: server.url,
           enabled: true,
           oauth: false,
           headers: { Authorization: `Bearer ${server.token}` },
+          timeout: 30_000,
         };
       }
       nextConfig.mcp = nextMcp;

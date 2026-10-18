@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -165,6 +165,18 @@ describe("opencode remote execution", () => {
     const managedRemoteWorkspace = "/remote/workspace/.paperclip-runtime/runs/run-1/workspace";
     await mkdir(workspaceDir, { recursive: true });
     await mkdir(alternateWorkspaceDir, { recursive: true });
+    const stagedMcpConfigs: Record<string, unknown>[] = [];
+    const syncMock = syncDirectoryToSsh as unknown as {
+      mockReset: () => void;
+      mockImplementation: (implementation: (input: { localDir: string; remoteDir: string }) => Promise<void>) => void;
+    };
+    syncMock.mockReset();
+    syncMock.mockImplementation(async (input) => {
+      if (input.remoteDir.endsWith("/xdgConfig")) {
+        const configText = await readFile(path.join(input.localDir, "opencode", "opencode.json"), "utf8");
+        stagedMcpConfigs.push(JSON.parse(configText) as Record<string, unknown>);
+      }
+    });
 
     const result = await execute({
       runId: "run-1",
@@ -192,6 +204,14 @@ describe("opencode remote execution", () => {
           XDG_CONFIG_HOME: path.join(rootDir, "config"),
           ...(managed ? { HOME: "/var/folders/qa-managed", XDG_DATA_HOME: "/var/folders/qa-managed/data" } : {}),
         },
+      },
+      runtimeMcp: {
+        getServers: () => [{
+          name: "Remote MCP fixture",
+          connectionId: "remote-mcp-fixture",
+          url: "https://paperclip.example/api/mcp/remote-run",
+          token: "remote-run-secret",
+        }],
       },
       context: {
         paperclipWorkspace: {
@@ -237,6 +257,14 @@ describe("opencode remote execution", () => {
         port: 2222,
         username: "fixture",
         remoteCwd: managedRemoteWorkspace,
+      },
+    });
+    expect(stagedMcpConfigs).toHaveLength(1);
+    expect(stagedMcpConfigs[0]?.mcp).toMatchObject({
+      Remote_MCP_fixture: {
+        url: "https://paperclip.example/api/mcp/remote-run",
+        headers: { Authorization: "Bearer remote-run-secret" },
+        oauth: false,
       },
     });
     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledTimes(1);
