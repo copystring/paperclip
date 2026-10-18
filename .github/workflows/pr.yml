@@ -2,6 +2,11 @@ name: PR
 
 on:
   pull_request:
+    # Controller-only changes have their own Linux regression workflow.
+    # The generated runtime is fully checked against its exact Canary source.
+    paths-ignore:
+      - ops/canary-train/**
+      - .github/workflows/canary-patched.yml
 
 permissions:
   actions: read

@@ -5,16 +5,13 @@ on:
     paths:
       - ops/canary-train/**
       - .github/workflows/canary-patched.yml
+      - .github/workflows/pr.yml
   workflow_dispatch:
   schedule:
     - cron: '23 * * * *'
 
 permissions:
   contents: read
-
-concurrency:
-  group: canary-patched-release
-  cancel-in-progress: false
 
 jobs:
   controller-tests:
@@ -28,6 +25,11 @@ jobs:
       - run: python3 -m unittest discover -s ops/canary-train -p 'test_*.py' -v
       - run: node --test .github/scripts/check-pr-test-coverage.test.mjs
   build:
+    # Read-only controller PR tests must not wait behind a release build.
+    # Only source assembly, publication and release generation share this lock.
+    concurrency:
+      group: canary-patched-release
+      cancel-in-progress: false
     needs: controller-tests
     if: github.repository == 'copystring/paperclip' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
