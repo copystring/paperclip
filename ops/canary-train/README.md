@@ -12,6 +12,9 @@ python3 ops/canary-train/build.py prepare \
   --workspace "$RUNNER_TEMP/canary-source" \
   --output "$RUNNER_TEMP/canary-output"
 python3 ops/canary-train/build.py build \
+  --test-receipts "$RUNNER_TEMP/canary-test-receipts" \
+  --runner-artifacts "$RUNNER_TEMP/canary-runner-artifacts" \
+  --provider-pack "$RUNNER_TEMP/canary-provider-pack/provider-pack.json" \
   --workspace "$RUNNER_TEMP/canary-source" \
   --output "$RUNNER_TEMP/canary-output"
 python3 ops/canary-train/build.py package \
@@ -40,6 +43,10 @@ The manifest records the official npm version and tarball digests, exact upstrea
 `deploy.py` is a standalone service-account executable. Keeping release validation, ownership checks, the idle hold, cutover, and rollback in one auditable file allows the instance to pin and atomically install a single consumer without importing unverified updater code from a candidate. Its regression tests cover partial cutover failures, rejected restarts, retry idempotency, migration drift, and file ownership boundaries.
 
 An instance timer polls the public fork for a completed successful workflow release. It retains existing local settings through hash-pinned service-owned hooks. It never needs a GitHub write token, provider credentials from CI, or extra database backups. New or changed migrations defer activation for a separate compatibility review. Active tasks, queued runs, or an unsafe idle report also defer activation. Old generated candidates are pruned only when their ownership receipt proves they belong to this controller; the active payload and recorded installation history are retained.
+
+The registered patch set includes the original recovery/UI fixes, the installed 27-commit source series, and the newer OpenCode/MCP/discovery/catalog fixes. Compatibility integration diffs are pinned alongside their original PR heads; each diff must match the API-verified file inventory. The source-series input is a frozen fork PR against its original base, rather than a compiled runtime overlay.
+
+The `review-tool-access` instance registration requires `sourceReplacement` with the exact `repository`, `number` and `head` of the reviewed source-series PR. Its historical script and bundle remain hash-checked but are never executed on the new runtime. The verified release must prove that source patch was applied or is already part of the published source. This proof is checked again on reuse and before cutover. Private Codex authentication and instruction-policy hooks, plus the independent tool-error probe, remain required.
 
 The controller workflow runs hourly; identical green builds are skipped. PR heads remain pinned until deliberately reviewed. A patch is retired automatically when the exact published Canary includes its merged commit or already contains the verified patch. A changed unreviewed PR head or unresolved source conflict blocks publication.
 
