@@ -29,6 +29,21 @@ function setup() {
 function task() { return { retryMs: 5000, run: vi.fn(async () => {}), hasPending: vi.fn(async () => false) }; }
 
 describe("delivery work coordinator", () => {
+  it("preserves absolute maintenance deadlines while the clock advances during scheduling", async () => {
+    const s = setup(), t = task();
+    const due = Date.now() + 60_000;
+    const clockNow = Date.now.bind(Date);
+    let ticks = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clockNow() + ticks++);
+    try {
+      await s.coordinator.register(DELIVERY_QUEUES.email, { ...t, nextRunAt: () => due }).ready;
+      expect(s.coordinator.nextWakeAt()).toBe(due);
+      expect(s.onError).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("leaves empty queues with no deadlines, timers, or periodic queries", async () => {
     const s = setup();
     const tasks = Object.values(DELIVERY_QUEUES).map(queue => {

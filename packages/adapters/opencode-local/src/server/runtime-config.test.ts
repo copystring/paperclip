@@ -33,6 +33,73 @@ async function makeConfigHome(initialConfig?: Record<string, unknown>) {
 }
 
 describe("prepareOpenCodeRuntimeConfig", () => {
+  it("preserves configured model modalities when the inline layer defines that model", async () => {
+    const configHome = await makeConfigHome({
+      provider: { gateway: { models: { vision: { modalities: ["text", "image"] } } } },
+    });
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: {
+        XDG_CONFIG_HOME: configHome,
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { gateway: { models: { vision: {} } } } }),
+      },
+      config: { model: "gateway/vision", dangerouslySkipPermissions: false },
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+
+    expect(JSON.parse(prepared.env.OPENCODE_CONFIG_CONTENT!)).toMatchObject({
+      provider: { gateway: { models: { vision: { modalities: ["text", "image"] } } } },
+    });
+    await prepared.cleanup();
+    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
+  });
+
+  it.each([true, false])("prepares explicit remote runtime settings without reading host config (skipPermissions=%s)", async (skipPermissions) => {
+    const configHome = await makeConfigHome({ theme: "host-only", permission: { bash: "deny" } });
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: {
+        XDG_CONFIG_HOME: configHome,
+        PAPERCLIP_OPENCODE_PROVIDERS: JSON.stringify({ gateway: {
+          npm: "@ai-sdk/openai-compatible",
+          options: { baseURL: "https://gateway.example/v1", apiKey: "{env:GATEWAY_KEY}" },
+          models: { "gateway/model": { name: "Gateway Model" } },
+        } }),
+        GATEWAY_KEY: "runtime-key-value",
+        PAPERCLIP_OPENCODE_SMALL_MODEL: "gateway/model",
+      },
+      config: { model: "gateway/model", dangerouslySkipPermissions: skipPermissions },
+      targetIsRemote: true,
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME!);
+
+    expect(prepared.runtimeConfigHome).toBe(prepared.env.XDG_CONFIG_HOME);
+    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME!, "opencode", "opencode.json");
+    const runtimeConfig = JSON.parse(await fs.readFile(runtimeConfigPath, "utf8")) as Record<string, unknown>;
+    expect(runtimeConfig.theme).toBeUndefined();
+    expect(runtimeConfig).toMatchObject({
+      provider: { gateway: { options: { apiKey: "runtime-key-value" } } },
+      small_model: "gateway/model",
+    });
+    expect(runtimeConfig.permission).toBe(skipPermissions ? "allow" : undefined);
+    expect(prepared.notes.join(" ")).not.toContain("runtime-key-value");
+
+    await prepared.cleanup();
+    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME!);
+    await expect(fs.access(prepared.env.XDG_CONFIG_HOME!)).rejects.toThrow();
+  });
+
+  it("does not create a remote config when permissions are enabled and no runtime settings need transport", async () => {
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: {},
+      config: { dangerouslySkipPermissions: false },
+      targetIsRemote: true,
+    });
+
+    expect(prepared.runtimeConfigHome).toBeNull();
+    expect(prepared.env.XDG_CONFIG_HOME).toBeUndefined();
+    expect(prepared.notes).toEqual([]);
+    await prepared.cleanup();
+  });
+
   it("ships task tools privately and removes them with the runtime configuration", async () => {
     const configHome = await makeConfigHome();
     const prepared = await prepareOpenCodeRuntimeConfig({ env: { XDG_CONFIG_HOME: configHome }, config: {} });

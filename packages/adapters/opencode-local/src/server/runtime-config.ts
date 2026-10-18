@@ -9,6 +9,7 @@ import { PAPERCLIP_TASK_TOOLS_SOURCE } from "./task-tools.js";
 type PreparedOpenCodeRuntimeConfig = {
   env: Record<string, string>;
   notes: string[];
+  runtimeConfigHome: string | null;
   taskToolsPath?: string;
   cleanup: () => Promise<void>;
 };
@@ -149,6 +150,27 @@ function configuredModelRef(raw: unknown): { provider: string; model: string } |
   const separator = raw.indexOf("/");
   if (separator <= 0 || separator === raw.length - 1) return null;
   return { provider: raw.slice(0, separator).trim(), model: raw.slice(separator + 1).trim() };
+}
+
+/** Carry explicit disk/provider modality metadata into OpenCode's inline config. */
+function preserveExplicitModelModalities(
+  env: Record<string, string>, providers: unknown, model: unknown,
+): Record<string, string> {
+  const ref = configuredModelRef(model);
+  if (!ref || !isPlainObject(providers)) return env;
+  const provider = providers[ref.provider];
+  if (!isPlainObject(provider) || !isPlainObject(provider.models)) return env;
+  const definition = provider.models[ref.model];
+  if (!isPlainObject(definition) || definition.modalities === undefined) return env;
+  try {
+    const inline = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}");
+    const entry = inline?.provider?.[ref.provider]?.models?.[ref.model];
+    if (!isPlainObject(entry) || entry.modalities !== undefined) return env;
+    entry.modalities = definition.modalities;
+    return { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify(inline) };
+  } catch {
+    return env;
+  }
 }
 
 function parseConfigContent(raw: unknown): Record<string, unknown> | null {
@@ -386,30 +408,26 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   targetIsRemote?: boolean;
 }): Promise<PreparedOpenCodeRuntimeConfig> {
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
-  const runtimeMcpServers = input.runtimeMcp ?? [];
+  const targetIsRemote = input.targetIsRemote === true;
+  const runtimeMcpServers = targetIsRemote ? [] : (input.runtimeMcp ?? []);
   const selectedModel = configuredModelRef(input.config.model);
-  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || input.targetIsRemote)) {
+  const hasExplicitRemoteSettings = Boolean(
+    (input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS)?.trim() ||
+    (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim(),
+  );
+  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || targetIsRemote) &&
+      (!targetIsRemote || !hasExplicitRemoteSettings)) {
     return {
       env: input.env,
       notes: [],
+      runtimeConfigHome: null,
       cleanup: async () => {},
     };
   }
 
-  // For remote execution targets the host XDG_CONFIG_HOME path is meaningless
-  // (and actively harmful — it leaks a macOS-only path into the remote Linux
-  // env). Callers that need to ship a runtime opencode config to the remote
-  // box do that via prepareAdapterExecutionTargetRuntime in execute.ts; this
-  // host-fs helper is local-only.
-  if (input.targetIsRemote) {
-    return {
-      env: input.env,
-      notes: [],
-      cleanup: async () => {},
-    };
-  }
-
-  const sourceConfigDir = path.join(resolveXdgConfigHome(input.env), "opencode");
+  // Remote targets need an isolated runtime config only when managed settings
+  // must be shipped. Never copy a host config directory into a remote run.
+  const sourceConfigDir = targetIsRemote ? null : path.join(resolveXdgConfigHome(input.env), "opencode");
   const runtimeConfigHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-config-"));
   const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
   const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
@@ -418,16 +436,18 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     await fs.mkdir(runtimeConfigDir, { recursive: true, mode: 0o700 });
     await fs.chmod(runtimeConfigHome, 0o700);
     await fs.chmod(runtimeConfigDir, 0o700);
-    try {
-      await fs.cp(sourceConfigDir, runtimeConfigDir, {
-        recursive: true,
-        force: true,
-        errorOnExist: false,
-        dereference: false,
-      });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
-        throw err;
+    if (sourceConfigDir) {
+      try {
+        await fs.cp(sourceConfigDir, runtimeConfigDir, {
+          recursive: true,
+          force: true,
+          errorOnExist: false,
+          dereference: false,
+        });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
+          throw err;
+        }
       }
     }
     // Copying the user's config may restore looser directory permissions.
@@ -451,7 +471,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     // hard-coded) so the gateway URL, key env, and model list stay declarative.
     const existingProvider = isPlainObject(existingConfig.provider) ? existingConfig.provider : {};
     let nextProvider = existingProvider;
-    if (skipPermissions) {
+    if (skipPermissions || targetIsRemote) {
       const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
       const gatewayProviders = parseProviderConfig(
         input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS,
@@ -494,13 +514,13 @@ export async function prepareOpenCodeRuntimeConfig(input: {
 
     const nextConfig: Record<string, unknown> = { ...existingConfig };
     if (skipPermissions) nextConfig.permission = "allow";
-    if (skipPermissions && Object.keys(nextProvider).length > 0) {
+    if ((skipPermissions || targetIsRemote) && Object.keys(nextProvider).length > 0) {
       nextConfig.provider = nextProvider;
     }
 
     let timeoutPluginInstalled = false;
     let timeoutAuthContent: string | undefined;
-    if (!input.targetIsRemote && selectedModel) {
+    if (!targetIsRemote && selectedModel) {
       const fileProvider = isPlainObject(nextProvider[selectedModel.provider])
         ? nextProvider[selectedModel.provider] as Record<string, unknown>
         : {};
@@ -602,7 +622,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     // for the anthropic provider); when that provider is repointed at a gateway that
     // does not serve that exact model, the title-gen call fails and aborts the run.
     // Setting small_model to a gateway-served model keeps every call on supported models.
-    const smallModel = skipPermissions
+    const smallModel = skipPermissions || targetIsRemote
       ? (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim()
       : undefined;
     if (smallModel) {
@@ -654,17 +674,20 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     await fs.chmod(temporaryConfigPath, 0o600);
     await fs.rename(temporaryConfigPath, runtimeConfigPath);
 
-    const taskToolsPath = path.join(runtimeConfigHome, "paperclip-task-tools.mjs");
-    await fs.writeFile(taskToolsPath, PAPERCLIP_TASK_TOOLS_SOURCE, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    const taskToolsPath = targetIsRemote ? undefined : path.join(runtimeConfigHome, "paperclip-task-tools.mjs");
+    if (taskToolsPath) {
+      await fs.writeFile(taskToolsPath, PAPERCLIP_TASK_TOOLS_SOURCE, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    }
 
     const preparedEnv = {
-        ...input.env,
+        ...preserveExplicitModelModalities(input.env, nextProvider, input.config.model),
         XDG_CONFIG_HOME: runtimeConfigHome,
         ...(timeoutPluginInstalled && timeoutAuthContent ? { OPENCODE_AUTH_CONTENT: timeoutAuthContent } : {}),
       };
     return {
       env: preparedEnv,
       notes,
+      runtimeConfigHome,
       taskToolsPath,
       cleanup: async () => {
         await fs.rm(runtimeConfigHome, { recursive: true, force: true });

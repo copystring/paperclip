@@ -65,6 +65,7 @@ import { removeMaintainerOnlySkillSymlinks } from "@paperclipai/adapter-utils/se
 import { apiKeyBillingType } from "@paperclipai/adapter-utils/api-billing-type";
 import { prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
+import { prepareManagedModelImageInput } from "./model-input.js";
 import { resolveOpenCodeSkillsHome } from "./skills.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -415,6 +416,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     env,
     config,
     runtimeMcp: ctx.runtimeMcp?.getServers(),
+    targetIsRemote: executionTargetIsRemote,
   });
   const taskToolsGuidance = !executionTargetIsRemote && preparedRuntimeConfig.taskToolsPath
     && env.PAPERCLIP_API_URL && env.PAPERCLIP_API_KEY && env.PAPERCLIP_TASK_ID
@@ -427,8 +429,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         "set-monitor --at ISO_TIME --timeout-at ISO_TIME --max-attempts N --notes TEXT: schedules one monitor on the current eligible task, preserving other execution-policy fields and tighter existing budgets, then confirms by readback. It never changes status or automatically retries. After a conflict or uncertain transport outcome inspect current state before any further write. If no useful independent work remains, use this durable path and end the run instead of sleeping or polling.",
         "These helpers do not validate result claims or grant additional authority. Trace success criteria to the authorized task or primary source. Compute/check derived values with an actual tool invocation; an earlier agent document or a succeeded run is not independent proof.",
       ].join("\n") : "";
-  const localRuntimeConfigHome =
-    preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
+  const localRuntimeConfigHome = preparedRuntimeConfig.runtimeConfigHome ?? "";
   try {
     const runtimeEnv = Object.fromEntries(
       Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
@@ -469,6 +470,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       resolvedCommand,
     });
     if (!executionTargetIsRemote) {
+      await prepareManagedModelImageInput({
+        runId, target: executionTarget, cwd, env: preparedRuntimeConfig.env,
+        model, managed: Boolean(config.managedAiConnection), localEnvironment: runtimeEnv,
+      });
+      Object.assign(runtimeEnv, preparedRuntimeConfig.env);
       await ensureOpenCodeModelConfiguredAndAvailable({
         model,
         command,
@@ -584,6 +590,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           });
         }
       }
+      await prepareManagedModelImageInput({
+        runId, target: overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd),
+        cwd, env: preparedRuntimeConfig.env, model, managed: Boolean(config.managedAiConnection),
+      });
       await ensureRemoteOpenCodeModelConfiguredAndAvailable({
         runId,
         executionTarget,
