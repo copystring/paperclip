@@ -7,6 +7,7 @@ import { createToolGatewayService } from "../services/tool-gateway.js";
 import { RAILWAY_API_URL, RAILWAY_MCP_URL, RAILWAY_QUERIES } from "../services/railway.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { deploymentData, railwayAuthorizationMetadata, railwayResourceMetadata, target, targetData } from "./fixtures/railway/provider.js";
+import { mcpHttpHandshakeResponse } from "./helpers/mcp-http-handshake.js";
 const support = await getEmbeddedPostgresTestSupport();
 const actor = { actorType: "user" as const, actorId: "railway-reviewer" };
 const redirectUri = "http://localhost:3100/api/tools/oauth/callback";
@@ -41,11 +42,14 @@ const initialTools = [
       }
       if (url.replace(/\/$/, "") === RAILWAY_MCP_URL && init.method === "POST") {
         if (new Headers(init.headers).get("authorization") !== `Bearer ${token}`) return new Response("", { status: 401, headers: { "www-authenticate": 'Bearer resource_metadata="https://mcp.railway.com/.well-known/oauth-protected-resource"' } });
+        const payload = JSON.parse(body);
+        const handshake = mcpHttpHandshakeResponse(payload);
+        if (handshake) return handshake;
         if (JSON.parse(body).method === "tools/call") {
           expect(JSON.parse(body).params).toEqual({ name: "list-workspaces", arguments: {} });
-          return Response.json({ jsonrpc: "2.0", id: "paperclip-railway-workspace-probe", result: { structuredContent: { workspaces: [{ id: target.projectId }] } } });
+          return Response.json({ jsonrpc: "2.0", id: payload.id, result: { structuredContent: { workspaces: [{ id: target.projectId }] } } });
         }
-        return Response.json({ jsonrpc: "2.0", id: "paperclip-catalog-refresh", result: { tools } });
+        return Response.json({ jsonrpc: "2.0", id: payload.id, result: { tools } });
       }
       if (url.includes("oauth-protected-resource")) return Response.json(railwayResourceMetadata);
       if (url.includes("oauth-authorization-server")) return Response.json(railwayAuthorizationMetadata);

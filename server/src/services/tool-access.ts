@@ -218,6 +218,7 @@ import { logActivity } from "./activity-log.js";
 import { isSlackMcpAccessDisabledResponse } from "./slack-mcp-error.js";
 import {
   initializeMcpHttpSession,
+  requestMcpHttpToolsList,
   McpHttpInitializationError,
   getMcpHttpSession,
   forgetMcpHttpSessions,
@@ -2264,6 +2265,7 @@ function connectionSetupMutationFingerprint(
 ): string {
   return stableHash({
     name: row.name,
+    authKind: row.authKind,
     transport: row.transport,
     status: row.status,
     enabled: row.enabled,
@@ -7163,81 +7165,24 @@ export function toolAccessService(
       return sendRemote({ method: "POST", headers: mcpHttpRequestHeaders(requestHeaders),
         body: JSON.stringify({ jsonrpc: "2.0", id: listRequestId, method: "tools/list", params: cursor ? { cursor } : {} }) });
     };
-    const connectionConfig = asRecord(connection.config);
-    const sourceTemplateKey = typeof connectionConfig?.sourceTemplateKey === "string"
-      ? connectionConfig.sourceTemplateKey
-      : null;
-    const connectionMethodKey = typeof connectionConfig?.connectionMethodKey === "string"
-      ? connectionConfig.connectionMethodKey
-      : null;
-    const curatedMethodRequiresMcpSession = Boolean(
-      sourceTemplateKey && connectionMethodKey &&
-      getConnectableAppDefinition(sourceTemplateKey)?.methods.some((method) =>
-        method.key === connectionMethodKey && method.defaults?.mcpSessionRequired === true
-      ),
-    );
-    let usedInitializedSession = connectionConfig?.mcpSessionRequired === true || curatedMethodRequiresMcpSession;
-    let response: Response;
-    if (usedInitializedSession) {
+    let usedInitializedSession = false;
+    const discoverTools = async () => {
       try {
-        sessionHeaders = await getMcpHttpSession({ send: sendRemote, headers,
+        const result = await requestMcpHttpToolsList({
+          send: sendRemote,
+          headers,
           scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${endpoint}`,
-          requestId: listRequestId });
-        response = await sendToolsList(sessionHeaders);
+          requestId: listRequestId,
+        });
+        sessionHeaders = result.headers;
+        usedInitializedSession = true;
+        return result.response;
       } catch (error) {
         if (!(error instanceof McpHttpInitializationError) || !error.response) throw error;
-        response = error.response;
+        return error.response;
       }
-    } else {
-      response = await sendToolsList(headers);
-      // `tools/list` is read-only, so a 400 can safely be retried after the MCP
-      // initialize handshake. Stateful servers such as Supabase require the
-      // returned Mcp-Session-Id on every non-initialization request.
-      if (response.status === 400) {
-        try {
-          const sessionHeaders = await initializeMcpHttpSession({
-            send: sendRemote,
-            headers,
-            requestId: "paperclip-catalog-refresh",
-          });
-          response = await sendToolsList(sessionHeaders);
-          usedInitializedSession = response.ok;
-        } catch {
-          // Preserve the original HTTP failure below when this was not an MCP
-          // session requirement after all.
-        }
-      }
-    }
-    if (response.status === 404 && new Headers(sessionHeaders).has("mcp-session-id")) {
-      // MCP uses 404 for an expired server session. Discovery is read-only, so
-      // discard the stale session and retry it once with a new handshake.
-      forgetMcpHttpSessions(connection.id);
-      await response.body?.cancel().catch(() => undefined);
-      sessionHeaders = await getMcpHttpSession({ send: sendRemote, headers,
-        scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${endpoint}`,
-        requestId: listRequestId });
-      response = await sendToolsList(sessionHeaders);
-      if (response.status === 404) forgetMcpHttpSessions(connection.id);
-    }
-    if (
-      usedInitializedSession &&
-      connectionConfig?.mcpSessionRequired !== true
-    ) {
-      const nextConfig = { ...connection.config, mcpSessionRequired: true };
-      await db
-        .update(toolConnections)
-        .set({
-          config: nextConfig,
-          transportConfig: nextConfig,
-          updatedAt: now(),
-        })
-        .where(
-          and(
-            eq(toolConnections.id, connection.id),
-            eq(toolConnections.companyId, connection.companyId),
-          ),
-        );
-    }
+    };
+    let response = await discoverTools();
     if (isInsufficientConnectionScope(response)) {
       await response.body?.cancel().catch(() => undefined);
       throw unprocessable(INSUFFICIENT_CONNECTION_SCOPE_MESSAGE, { code: "oauth_insufficient_scope", connectionId: connection.id });
@@ -7246,6 +7191,7 @@ export function toolAccessService(
       response.status === 401 &&
       connection.credentialSource === "vercel_connect"
     ) {
+      await response.body?.cancel().catch(() => undefined);
       const grant = await vercelGrantForConnection(connection, actor);
       const credential = vercelCredentialFor(connection);
       const request = vercelTokenRequest({
@@ -7262,20 +7208,21 @@ export function toolAccessService(
           forceRefresh: true,
         })),
       };
-      response = await sendToolsList(headers);
+      response = await discoverTools();
     }
     if (
       response.status === 401 &&
       connection.authKind === "oauth" &&
       connection.credentialSource === "paperclip_vault"
     ) {
+      await response.body?.cancel().catch(() => undefined);
       headers = {
         ...projectedConnectionHeaders(connection),
         ...(await resolveCredentialHeaders(connection, actor, {
           forceRefresh: true,
         })),
       };
-      response = await sendToolsList(headers);
+      response = await discoverTools();
       if (
         response.status === 401 &&
         isPaperclipCloudConnectorStrategy(oauthConfig(connection).strategy)
@@ -7293,6 +7240,25 @@ export function toolAccessService(
             );
         }
       }
+    }
+    if (usedInitializedSession) {
+      await db
+        .update(toolConnections)
+        .set({
+          config: sql`${toolConnections.config} || '{"mcpSessionRequired":true}'::jsonb`,
+          transportConfig: sql`${toolConnections.transportConfig} || '{"mcpSessionRequired":true}'::jsonb`,
+          updatedAt: now(),
+        })
+        .where(
+          and(
+            eq(toolConnections.id, connection.id),
+            eq(toolConnections.companyId, connection.companyId),
+            or(
+              sql`${toolConnections.config}->'mcpSessionRequired' IS DISTINCT FROM 'true'::jsonb`,
+              sql`${toolConnections.transportConfig}->'mcpSessionRequired' IS DISTINCT FROM 'true'::jsonb`,
+            ),
+          ),
+        );
     }
     if (!response.ok) {
       if ((response.status === 401 || response.status === 403)
@@ -7934,21 +7900,16 @@ export function toolAccessService(
 
     const preserveQuarantine =
       isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret" || isDaytonaConnection(connection);
-    const normalizedConfig = preserveQuarantine
-      ? { ...connection.config, quarantineNewEntries: true }
+    const catalogConfigPatch = preserveQuarantine
+      ? { quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
-      ? { ...connection.config, quarantineNewEntries: false }
-      : connection.config;
-    const normalizedTransportConfig = preserveQuarantine
-      ? { ...connection.transportConfig, quarantineNewEntries: true }
-      : refreshOptions.enableAllByDefault
-      ? { ...connection.transportConfig, quarantineNewEntries: false }
-      : connection.transportConfig;
+      ? { quarantineNewEntries: false }
+      : {};
     const [updatedConnection] = await db
       .update(toolConnections)
       .set({
-        config: normalizedConfig,
-        transportConfig: normalizedTransportConfig,
+        config: sql`${toolConnections.config} || ${JSON.stringify(catalogConfigPatch)}::jsonb`,
+        transportConfig: sql`${toolConnections.transportConfig} || ${JSON.stringify(catalogConfigPatch)}::jsonb`,
         healthStatus: "ok",
         healthMessage: isAgentMailConnection(connection)
           ? "AgentMail API key is connected."
@@ -12905,8 +12866,10 @@ export function toolAccessService(
     // under Advanced authentication; on the simple path it starts from what the
     // operator supplied and is upgraded to `oauth` when discovery proves the
     // endpoint needs sign-in (see `remoteTools` and `startOAuth`).
-    const genericAuthKind: ToolConnectionAuthKind =
-      (remoteMcpConnector ? undefined : method?.auth) ??
+    const galleryAuthKind: ToolConnectionAuthKind | undefined =
+      remoteMcpConnector ? undefined : method?.auth;
+    const requestedAuthKind: ToolConnectionAuthKind =
+      galleryAuthKind ??
       (input.authMode === "oauth" || input.oauthClient
         ? "oauth"
         : input.authMode === "bearer" || input.authMode === "custom_headers"
@@ -12949,22 +12912,49 @@ export function toolAccessService(
       retainedConfig.sourceTemplateKey ??
       asRecord(retainedConnection?.transportConfig).sourceTemplateKey;
     // Setup forms never receive stored secret values. Treat an omitted value as
-    // "keep the existing secret" only while resuming the exact same curated
-    // provider and method. This prevents a retry from detaching a client secret
-    // or API key, without carrying credentials across a method/provider change.
+    // "keep the existing secret" only while reconnecting the same endpoint,
+    // auth method, and credential identity.
+    const candidateCredentialSecretRefs =
+      retainedPersonalIdentity?.grant?.credentialSecretRefs ??
+      retainedConnection?.credentialSecretRefs ??
+      [];
+    const sameGenericEndpoint = Boolean(
+      retainedConnection && !galleryEntry &&
+      retainedSource == null && retainedMethodKey == null &&
+      baseConfig.url === retainedConfig.url,
+    );
+    const retainedHeaderPaths = new Set(
+      candidateCredentialSecretRefs.map((ref) => ref.configPath),
+    );
+    const requestedAuthMode = input.authMode ?? "auto";
+    const genericAuthModeMatchesRetained =
+      (requestedAuthMode === "auto" && retainedConnection?.authKind !== "oauth") ||
+      (requestedAuthMode === "bearer" &&
+        retainedHeaderPaths.has("credentials.authorization")) ||
+      (requestedAuthMode === "custom_headers" &&
+        [...retainedHeaderPaths].some((path) => path.startsWith("headers.")));
     const canRetainCredentialMaterial = Boolean(
       retainedConnection &&
+      retainsIdentity &&
       previousGrantKind === requestedGrantKind &&
-      galleryEntry &&
-      retainedSource === galleryEntry.slug &&
-      retainedMethodKey === method?.key &&
-      (!remoteMcpConnector || (baseConfig.url === retainedConfig.url && genericAuthKind === retainedConnection.authKind)),
+      (galleryEntry
+        ? retainedSource === galleryEntry.slug &&
+          retainedMethodKey === method?.key &&
+          (!remoteMcpConnector ||
+            (baseConfig.url === retainedConfig.url &&
+              requestedAuthKind === retainedConnection.authKind))
+        : sameGenericEndpoint &&
+          !remoteUrlCredential?.secretUrl &&
+          genericAuthModeMatchesRetained),
     );
     const retainedCredentialSecretRefs = canRetainCredentialMaterial
-      ? (retainedPersonalIdentity?.grant?.credentialSecretRefs ??
-        retainedConnection?.credentialSecretRefs ??
-        [])
+      ? candidateCredentialSecretRefs
       : [];
+    const genericAuthKind: ToolConnectionAuthKind =
+      canRetainCredentialMaterial && requestedAuthMode === "auto" &&
+        [...retainedHeaderPaths].some((path) => path.startsWith("headers.") || path === "credentials.authorization")
+        ? "api_key"
+        : requestedAuthKind;
     const credentialPolicy: ToolConnectionCredentialPolicy =
       requestedGrantKind === "user"
         ? "per_user"
@@ -13615,6 +13605,9 @@ export function toolAccessService(
       let preserveConcurrentRevival = false;
       if (connectionRow && revivedConnectionPrevious) {
         const attemptedConnection = connectionRow;
+        let rollbackConnectionRestored:
+          | typeof toolConnections.$inferSelect
+          | null = null;
         try {
           await db.transaction(async (tx) => {
             const [latestConnection] = await tx
@@ -13638,11 +13631,12 @@ export function toolAccessService(
                 connectionSetupMutationFingerprint(attemptedConnection),
             );
             if (connectionMutationIsStillCurrent) {
-              await tx
+              [rollbackConnectionRestored] = await tx
                 .update(toolConnections)
                 .set({
                   agentInstructions: revivedConnectionPrevious.agentInstructions,
                   name: revivedConnectionPrevious.name,
+                  authKind: revivedConnectionPrevious.authKind,
                   transport: revivedConnectionPrevious.transport,
                   status: revivedConnectionPrevious.status,
                   enabled: revivedConnectionPrevious.enabled,
@@ -13657,7 +13651,8 @@ export function toolAccessService(
                   credentialPolicy: revivedConnectionPrevious.credentialPolicy,
                   updatedAt: new Date(),
                 })
-                .where(eq(toolConnections.id, revivedConnectionPrevious.id));
+                .where(eq(toolConnections.id, revivedConnectionPrevious.id))
+                .returning();
             } else {
               preserveConcurrentRevival = true;
             }
@@ -13704,6 +13699,13 @@ export function toolAccessService(
                   .delete(connectionGrants)
                   .where(eq(connectionGrants.id, current.id));
               }
+            }
+            if (connectionMutationIsStillCurrent && rollbackConnectionRestored) {
+              await syncCredentialBindings(
+                rollbackConnectionRestored,
+                [],
+                tx,
+              );
             }
           });
         } catch (rollbackError) {

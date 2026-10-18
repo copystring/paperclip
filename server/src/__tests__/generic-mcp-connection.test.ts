@@ -134,6 +134,21 @@ function jsonResponse(payload: unknown, status = 200): Response {
   } as unknown as Response;
 }
 
+function mcpRpcResponse(init?: RequestInit): Response {
+  const bodyText = typeof init?.body === "string" ? init.body : init?.body?.toString?.() ?? "";
+  const rpc = bodyText ? JSON.parse(bodyText) as Record<string, unknown> : {};
+  if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+  if (rpc.method === "initialize") {
+    const params = rpc.params as Record<string, unknown>;
+    return jsonResponse({ jsonrpc: "2.0", id: rpc.id, result: {
+      protocolVersion: params.protocolVersion,
+      capabilities: { tools: {} },
+      serverInfo: { name: "fixture", version: "1" },
+    } });
+  }
+  return jsonResponse({ jsonrpc: "2.0", id: rpc.id ?? "paperclip-catalog-refresh", result: { tools: FIXTURE_TOOLS } });
+}
+
 function unauthorizedMcpResponse(resourceMetadataUrl: string): Response {
   return {
     ok: false,
@@ -195,7 +210,10 @@ function installMcpOAuthFixture(options: FixtureOptions = {}) {
       : null;
     requests.push({ method, url: href, headers, body: parsedBody });
 
-    if (href === MCP_URL && method === "POST") {
+    const requestUrl = new URL(href);
+    const isMcpEndpoint = requestUrl.origin === MCP_ORIGIN &&
+      ["/mcp", "/other"].includes(requestUrl.pathname);
+    if (isMcpEndpoint && method === "POST") {
       if (auth === "oauth" && headers.authorization !== `Bearer ${accessToken}`) {
         return unauthorizedMcpResponse(resourceMetadataUrl);
       }
@@ -204,6 +222,15 @@ function installMcpOAuthFixture(options: FixtureOptions = {}) {
         if (supplied !== options.requiredHeader.value) return unauthorizedMcpResponse(resourceMetadataUrl);
       }
       const rpc = parsedBody as Record<string, unknown>;
+      if (rpc.method === "initialize") {
+        const params = rpc.params as Record<string, unknown>;
+        return jsonResponse({ jsonrpc: "2.0", id: rpc.id, result: {
+          protocolVersion: params.protocolVersion,
+          capabilities: { tools: {} },
+          serverInfo: { name: "fixture", version: "1" },
+        } });
+      }
+      if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
       if (rpc.method === "tools/call") {
         return jsonResponse({ jsonrpc: "2.0", id: rpc.id, result: {
           content: [{ type: "text", text: "Fixture meeting data" }],
@@ -515,11 +542,7 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       requests.push(String(url));
       if (String(url) === secretUrl && (init?.method ?? "GET").toUpperCase() === "POST") {
-        return jsonResponse({
-          jsonrpc: "2.0",
-          id: "paperclip-catalog-refresh",
-          result: { tools: FIXTURE_TOOLS },
-        });
+        return mcpRpcResponse(init);
       }
       return jsonResponse({ error: "not_found" }, 404);
     });
@@ -766,6 +789,165 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
     expect(serialized).not.toContain("phx_fixture_secret");
     // The header *name* is what review and diagnostics get to show.
     expect(serialized).toContain("X-Api-Key");
+  });
+
+  it("retains the same generic MCP credential on an auto reconnect", async () => {
+    const fixture = installMcpOAuthFixture({
+      auth: "header",
+      requiredHeader: { name: "X-Api-Key", value: "retained-fixture-key" },
+    });
+    const company = await createCompany(db);
+    const service = toolAccessService(db);
+    const connected = await service.connectGalleryApp(company.id, {
+      link: MCP_URL,
+      name: "Fixture retained credential",
+      authMode: "custom_headers",
+      credentialValues: { "headers.X-Api-Key": "retained-fixture-key" },
+    });
+    await db.update(toolConnections).set({ authKind: "none" }).where(eq(toolConnections.id, connected.connectionId));
+
+    const resumed = await service.connectGalleryApp(company.id, {
+      link: MCP_URL,
+      reconnectConnectionId: connected.connectionId,
+      authMode: "auto",
+    });
+
+    expect(resumed.connection.authKind).toBe("api_key");
+    expect(fixture.requests.filter((request) => request.url === MCP_URL && request.method === "POST").length).toBeGreaterThan(1);
+    expect(fixture.requests.filter((request) => request.url === MCP_URL && request.method === "POST").every((request) => request.headers["x-api-key"] === "retained-fixture-key")).toBe(true);
+    expect(JSON.stringify(resumed)).not.toContain("retained-fixture-key");
+  });
+
+  it("does not carry a generic MCP credential to a changed URL", async () => {
+    const fixture = installMcpOAuthFixture({ auth: "public" });
+    const company = await createCompany(db);
+    const service = toolAccessService(db);
+    const connected = await service.connectGalleryApp(company.id, {
+      link: MCP_URL,
+      name: "Fixture changed endpoint",
+      authMode: "custom_headers",
+      credentialValues: { "headers.X-Api-Key": "old-fixture-key" },
+    });
+
+    const resumed = await service.connectGalleryApp(company.id, {
+      link: `${MCP_ORIGIN}/other`,
+      reconnectConnectionId: connected.connectionId,
+      authMode: "none",
+    });
+
+    const changedEndpointRequests = fixture.requests.filter((request) => request.url === `${MCP_ORIGIN}/other` && request.method === "POST");
+    expect(changedEndpointRequests.length).toBeGreaterThan(0);
+    expect(changedEndpointRequests.every((request) => request.headers["x-api-key"] === undefined)).toBe(true);
+    expect(resumed.connection.credentialSecretRefs).toEqual([]);
+  });
+
+  it("clears retained generic MCP credentials when none is explicitly selected", async () => {
+    const fixture = installMcpOAuthFixture({ auth: "public" });
+    const company = await createCompany(db);
+    const service = toolAccessService(db);
+    const connected = await service.connectGalleryApp(company.id, {
+      link: MCP_URL,
+      name: "Fixture clear credential",
+      authMode: "custom_headers",
+      credentialValues: { "headers.X-Api-Key": "clear-fixture-key" },
+    });
+
+    const reconnectStart = fixture.requests.length;
+    const resumed = await service.connectGalleryApp(company.id, {
+      link: MCP_URL,
+      reconnectConnectionId: connected.connectionId,
+      authMode: "none",
+    });
+
+    expect(resumed.connection.authKind).toBe("none");
+    expect(resumed.connection.credentialSecretRefs).toEqual([]);
+    expect(fixture.requests.slice(reconnectStart).filter((request) => request.url === MCP_URL && request.method === "POST").every((request) => request.headers["x-api-key"] === undefined)).toBe(true);
+  });
+
+  it("rotates a generic MCP header credential on reconnect", async () => {
+    const fixture = installMcpOAuthFixture({ auth: "public" });
+    const company = await createCompany(db);
+    const service = toolAccessService(db);
+    const connected = await service.connectGalleryApp(company.id, {
+      link: MCP_URL,
+      name: "Fixture rotated credential",
+      authMode: "custom_headers",
+      credentialValues: { "headers.X-Api-Key": "old-rotation-key" },
+    });
+    const reconnectStart = fixture.requests.length;
+
+    const resumed = await service.connectGalleryApp(company.id, {
+      link: MCP_URL,
+      reconnectConnectionId: connected.connectionId,
+      authMode: "custom_headers",
+      credentialValues: { "headers.X-Api-Key": "new-rotation-key" },
+    });
+
+    expect(resumed.connection.authKind).toBe("api_key");
+    expect(fixture.requests.slice(reconnectStart).filter((request) => request.url === MCP_URL && request.method === "POST").every((request) => request.headers["x-api-key"] === "new-rotation-key")).toBe(true);
+    expect(JSON.stringify(resumed)).not.toContain("new-rotation-key");
+  });
+
+  it("replaces retained headers when reconnecting with a credential-bearing URL", async () => {
+    const fixture = installMcpOAuthFixture({ auth: "public" });
+    const company = await createCompany(db);
+    const service = toolAccessService(db);
+    const connected = await service.connectGalleryApp(company.id, {
+      link: `${MCP_URL}?token=old-url-token`,
+      name: "Fixture URL credential replacement",
+      authMode: "custom_headers",
+      credentialValues: { "headers.X-Api-Key": "old-header-key" },
+    });
+    const reconnectStart = fixture.requests.length;
+
+    const resumed = await service.connectGalleryApp(company.id, {
+      link: `${MCP_URL}?token=new-url-token`,
+      reconnectConnectionId: connected.connectionId,
+      authMode: "auto",
+    });
+
+    const reconnectRequests = fixture.requests.slice(reconnectStart).filter((request) => new URL(request.url).pathname === "/mcp" && request.method === "POST");
+    expect(reconnectRequests.length).toBeGreaterThan(0);
+    expect(reconnectRequests.every((request) => request.headers["x-api-key"] === undefined)).toBe(true);
+    expect(reconnectRequests.every((request) => new URL(request.url).searchParams.get("token") === "new-url-token")).toBe(true);
+    expect(resumed.connection.credentialSecretRefs.map((ref) => ref.configPath)).toEqual(["remote.url"]);
+    expect(JSON.stringify(resumed)).not.toContain("new-url-token");
+  });
+
+  it("restores credential kind and bindings after a failed explicit unauthenticated reconnect", async () => {
+    const fixture = installMcpOAuthFixture({
+      auth: "header",
+      requiredHeader: { name: "X-Api-Key", value: "rollback-fixture-key" },
+    });
+    const company = await createCompany(db);
+    const service = toolAccessService(db);
+    const connected = await service.connectGalleryApp(company.id, {
+      link: MCP_URL,
+      name: "Fixture rollback credential",
+      authMode: "custom_headers",
+      credentialValues: { "headers.X-Api-Key": "rollback-fixture-key" },
+    });
+    fixture.fetchMock.mockRejectedValueOnce(new Error("network down"));
+
+    await expect(service.connectGalleryApp(company.id, {
+      link: MCP_URL,
+      reconnectConnectionId: connected.connectionId,
+      authMode: "none",
+    })).rejects.toMatchObject({ status: 502 });
+
+    const [restored] = await db.select().from(toolConnections).where(eq(toolConnections.id, connected.connectionId));
+    expect(restored!.authKind).toBe("api_key");
+    expect(restored!.credentialSecretRefs).toHaveLength(1);
+    const [binding] = await db.select().from(companySecretBindings).where(eq(companySecretBindings.targetId, connected.connectionId));
+    expect(binding).toMatchObject({ secretId: restored!.credentialSecretRefs[0]!.secretId, configPath: "headers.X-Api-Key" });
+
+    const resumed = await service.connectGalleryApp(company.id, {
+      link: MCP_URL,
+      reconnectConnectionId: connected.connectionId,
+      authMode: "auto",
+    });
+    expect(resumed.connection.authKind).toBe("api_key");
+    expect(fixture.requests.filter((request) => request.url === MCP_URL && request.method === "POST").at(-1)?.headers["x-api-key"]).toBe("rollback-fixture-key");
   });
 
   it("rejects header names Paperclip refuses to send", async () => {
@@ -1152,11 +1334,15 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
     let probes = 0;
     let release!: () => void;
     const bothProbed = new Promise<void>((resolve) => { release = resolve; });
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-      probes += 1;
-      if (probes === 2) release();
-      await bothProbed;
-      return jsonResponse({ jsonrpc: "2.0", id: "paperclip-catalog-refresh", result: { tools: FIXTURE_TOOLS } });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const method = bodyText ? (JSON.parse(bodyText) as Record<string, unknown>).method : null;
+      if (method === "tools/list") {
+        probes += 1;
+        if (probes === 2) release();
+        await bothProbed;
+      }
+      return mcpRpcResponse(init);
     });
 
     const results = await Promise.allSettled([0, 1].map(() => service.connectGalleryApp(company.id, {
@@ -1194,15 +1380,17 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
     const catalogPending = new Promise<void>((resolve) => { catalogStarted = resolve; });
     let failCatalog!: () => void;
     const releaseCatalog = new Promise<void>((resolve) => { failCatalog = resolve; });
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-      calls += 1;
-      if (calls === 2) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const method = bodyText ? (JSON.parse(bodyText) as Record<string, unknown>).method : null;
+      if (method === "tools/list") calls += 1;
+      if (method === "tools/list" && calls === 2) {
         // The first retry has created its grant but has not finished setup.
         catalogStarted();
         await releaseCatalog;
         throw new Error("first retry catalog unavailable");
       }
-      return jsonResponse({ jsonrpc: "2.0", id: "paperclip-catalog-refresh", result: { tools: FIXTURE_TOOLS } });
+      return mcpRpcResponse(init);
     });
     const failure = service.connectGalleryApp(company.id, {
       link: MCP_URL, name: "Personal retry rollback", grantKind: "user",
@@ -1235,10 +1423,16 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
     await db.update(toolConnections).set({ status: "archived" }).where(eq(toolConnections.id, first.connectionId));
     await db.update(toolApplications).set({ status: "archived", archivedAt: new Date() }).where(eq(toolApplications.id, first.application.id));
     fixture.fetchMock.mockRestore();
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonResponse({
-      jsonrpc: "2.0", id: "paperclip-catalog-refresh",
-      result: { tools: [...FIXTURE_TOOLS, { name: "new_tool", description: "Partial catalog addition" }] },
-    }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const rpc = bodyText ? JSON.parse(bodyText) as Record<string, unknown> : {};
+      if (rpc.method === "tools/list") {
+        return jsonResponse({ jsonrpc: "2.0", id: rpc.id, result: {
+          tools: [...FIXTURE_TOOLS, { name: "new_tool", description: "Partial catalog addition" }],
+        } });
+      }
+      return mcpRpcResponse(init);
+    });
     await db.execute(sql`
       CREATE FUNCTION test_personal_profile_failure() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN RAISE EXCEPTION 'personal profile fixture failure'; END $$

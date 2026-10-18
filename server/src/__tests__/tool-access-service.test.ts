@@ -336,13 +336,42 @@ function mcpSseResponse(payload: unknown): Response {
   });
 }
 
+function mcpCatalogResponseForRequest(
+  init: RequestInit | undefined,
+  tools: unknown[],
+  format: "json" | "sse" = "json",
+): Response {
+  const request = JSON.parse(String(init?.body ?? "{}")) as {
+    id?: string | number;
+    method?: string;
+  };
+  if (request.method === "notifications/initialized") {
+    return new Response(null, { status: 202 });
+  }
+  const payload = request.method === "initialize"
+    ? {
+        jsonrpc: "2.0",
+        id: request.id,
+        result: {
+          protocolVersion: "2025-06-18",
+          capabilities: { tools: {} },
+          serverInfo: { name: "fixture", version: "1" },
+        },
+      }
+    : { ...catalogResponse(tools), id: request.id };
+  return format === "sse" ? mcpSseResponse(payload) : mcpHttpResponse(payload);
+}
+
+function mcpCatalogResponder(
+  tools: unknown[],
+  format: "json" | "sse" = "json",
+) {
+  return async (_url: unknown, init?: RequestInit) =>
+    mcpCatalogResponseForRequest(init, tools, format);
+}
+
 function mockToolsList(tools: unknown[]) {
-  return vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
-    const body = JSON.parse(String(init?.body));
-    if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
-    return mcpHttpResponse({ jsonrpc: "2.0", id: body.id,
-      result: body.method === "initialize" ? { protocolVersion: "2025-06-18" } : { tools } });
-  });
+  return vi.spyOn(globalThis, "fetch").mockImplementation(mcpCatalogResponder(tools));
 }
 
 const PUBLIC_MCP_FIXTURE_URL = "https://8.8.8.8/api/mcp";
@@ -2445,8 +2474,7 @@ describeEmbeddedPostgres("tool access service", () => {
         quarantinedAt: null,
       })
       .where(eq(toolCatalogEntries.toolName, "send_email"));
-    fetchMock.mockResolvedValueOnce(
-      mcpHttpResponse(catalogResponse([
+    fetchMock.mockImplementation(mcpCatalogResponder([
             {
               name: "send_email",
               description: "Send an email with attachments.",
@@ -2459,8 +2487,7 @@ describeEmbeddedPostgres("tool access service", () => {
               },
               annotations: { readOnlyHint: false },
             },
-          ])),
-    );
+          ]));
 
     const secondRefresh = await service.refreshCatalog(connection.id);
 
@@ -2697,13 +2724,13 @@ describeEmbeddedPostgres("tool access service", () => {
               }),
           } as unknown as Response;
         }
-        return mcpSseResponse(catalogResponse([
+        return mcpCatalogResponseForRequest(init, [
               {
                 name: "kv_get",
                 description: "Read a value.",
                 annotations: { readOnlyHint: true },
               },
-            ]));
+            ], "sse");
       });
 
     const connection = await service.createConnection(company.id, {
@@ -5254,12 +5281,10 @@ describeEmbeddedPostgres("tool access service", () => {
       askFirstCatalogEntryIds: [],
       access: "all_agents",
     });
-    fetchMock.mockResolvedValueOnce(
-      mcpHttpResponse(catalogResponse([
+    fetchMock.mockImplementation(mcpCatalogResponder([
             { name: "get_organization_details", annotations: { readOnlyHint: true } },
             { name: "new_enterpret_tool", annotations: { readOnlyHint: true } },
-          ])),
-    );
+          ]));
     const refreshed = await service.refreshCatalog(result.connectionId, {
       actorType: "user",
       actorId: "board",
@@ -5307,13 +5332,11 @@ describeEmbeddedPostgres("tool access service", () => {
       access: "all_agents",
     });
 
-    reconnectFetchMock.mockResolvedValueOnce(
-      mcpHttpResponse(catalogResponse([
+    reconnectFetchMock.mockImplementation(mcpCatalogResponder([
             { name: "get_organization_details", annotations: { readOnlyHint: true } },
             { name: "new_enterpret_tool", annotations: { readOnlyHint: true } },
             { name: "another_enterpret_tool", annotations: { readOnlyHint: true } },
-          ])),
-    );
+          ]));
     const afterReplacement = await service.refreshCatalog(result.connectionId, {
       actorType: "user",
       actorId: "board",
@@ -5657,7 +5680,7 @@ describeEmbeddedPostgres("tool access service", () => {
       .mockImplementation(async (_url, init) => {
         const headers = init?.headers as Record<string, string>;
         expect(headers.Authorization).toBe("Bearer imported-token");
-        return mcpHttpResponse(catalogResponse([
+        return mcpCatalogResponseForRequest(init, [
               {
                 name: "kv_get",
                 description: "Read a value.",
@@ -5667,7 +5690,7 @@ describeEmbeddedPostgres("tool access service", () => {
                 },
                 annotations: { readOnlyHint: true },
               },
-            ]));
+            ], "json");
       });
 
     const result = await service.connectGalleryApp(
@@ -5706,6 +5729,7 @@ describeEmbeddedPostgres("tool access service", () => {
     const service = createTestToolAccessService(db);
     const requests: Array<{ method: string; sessionId: string | null }> = [];
     let sessionSequence = 0;
+    let concurrentConfigWritten = false;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
       const payload = JSON.parse(String(init?.body ?? "{}")) as {
         method?: string;
@@ -5717,6 +5741,21 @@ describeEmbeddedPostgres("tool access service", () => {
         sessionId: requestHeaders.get("mcp-session-id"),
       });
       if (payload.method === "initialize") {
+        if (!concurrentConfigWritten) {
+          const [connection] = await db
+            .select()
+            .from(toolConnections)
+            .where(eq(toolConnections.companyId, company.id));
+          expect(connection).toBeTruthy();
+          await db
+            .update(toolConnections)
+            .set({
+              config: { ...connection!.config, concurrentConfigMarker: "config-current" },
+              transportConfig: { ...connection!.transportConfig, concurrentTransportMarker: "transport-current" },
+            })
+            .where(eq(toolConnections.id, connection!.id));
+          concurrentConfigWritten = true;
+        }
         sessionSequence += 1;
         return new Response(
           JSON.stringify({
@@ -5774,10 +5813,26 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(result.connection.config).toMatchObject({
       mcpSessionRequired: true,
     });
+    const [storedConnection] = await db
+      .select()
+      .from(toolConnections)
+      .where(eq(toolConnections.id, result.connection.id));
+    expect(storedConnection?.config).toMatchObject({
+      concurrentConfigMarker: "config-current",
+      mcpSessionRequired: true,
+    });
+    expect(storedConnection?.transportConfig).toMatchObject({
+      concurrentTransportMarker: "transport-current",
+      mcpSessionRequired: true,
+    });
     expect(result.actions.readOnly).toEqual([
       expect.objectContaining({ toolName: "list_state", riskLevel: "read" }),
     ]);
-    expect(requests[0]).toEqual({ method: "tools/list", sessionId: null });
+    expect(requests.slice(0, 3)).toEqual([
+      { method: "initialize", sessionId: null },
+      { method: "notifications/initialized", sessionId: "session-1" },
+      { method: "tools/list", sessionId: "session-1" },
+    ]);
     expect(
       requests.filter(({ method }) => method === "initialize").length,
     ).toBeGreaterThanOrEqual(1);
@@ -5785,6 +5840,78 @@ describeEmbeddedPostgres("tool access service", () => {
       requests.filter(({ method }) => method === "notifications/initialized")
         .length,
     ).toBe(requests.filter(({ method }) => method === "initialize").length);
+  });
+
+  it("paginates a catalog with the initialized session and the returned cursor", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    const requests: Array<{
+      method: string;
+      sessionId: string | null;
+      cursor: string | undefined;
+    }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const payload = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: string | number;
+        method?: string;
+        params?: { cursor?: string };
+      };
+      const sessionId = new Headers(init?.headers).get("mcp-session-id");
+      requests.push({
+        method: payload.method ?? "",
+        sessionId,
+        cursor: payload.params?.cursor,
+      });
+      if (payload.method === "initialize") {
+        return new Response(JSON.stringify({
+          jsonrpc: "2.0",
+          id: payload.id,
+          result: {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "paginated", version: "1" },
+          },
+        }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "mcp-session-id": "pagination-session",
+          },
+        });
+      }
+      if (payload.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      const firstPage = !payload.params?.cursor;
+      return mcpHttpResponse({
+        jsonrpc: "2.0",
+        id: payload.id,
+        result: {
+          tools: [{ name: firstPage ? "first_page_read" : "second_page_read", annotations: { readOnlyHint: true } }],
+          ...(firstPage ? { nextCursor: "page-2" } : {}),
+        },
+      });
+    });
+
+    const connected = await service.connectGalleryApp(
+      company.id,
+      { link: "https://paginated.example/mcp", name: "Paginated MCP" },
+      { actorType: "user", actorId: "board" },
+    );
+
+    expect(connected.catalog.map((entry) => entry.toolName)).toEqual(
+      expect.arrayContaining(["first_page_read", "second_page_read"]),
+    );
+    const firstPageIndex = requests.findIndex(
+      (request) => request.method === "tools/list" && !request.cursor,
+    );
+    expect(firstPageIndex).toBeGreaterThan(0);
+    expect(requests[firstPageIndex - 2]?.method).toBe("initialize");
+    expect(requests[firstPageIndex - 1]?.method).toBe("notifications/initialized");
+    expect(requests.slice(firstPageIndex, firstPageIndex + 2)).toEqual([
+      { method: "tools/list", sessionId: "pagination-session", cursor: undefined },
+      { method: "tools/list", sessionId: "pagination-session", cursor: "page-2" },
+    ]);
   });
 
   it("serves persisted MCP actions until the cache expires and then refreshes them", async () => {
@@ -5799,8 +5926,8 @@ describeEmbeddedPostgres("tool access service", () => {
     ];
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async () =>
-        mcpHttpResponse(catalogResponse(tools)),
+      .mockImplementation(async (_url, init) =>
+        mcpCatalogResponseForRequest(init, tools, "json"),
       );
     const service = createTestToolAccessService(db, {
       now: () => currentTime,
@@ -5814,12 +5941,16 @@ describeEmbeddedPostgres("tool access service", () => {
       },
       { actorType: "user", actorId: "board" },
     );
+    const actor = { actorType: "user" as const, actorId: "board" };
     const discoveryCallsAfterConnect = fetchMock.mock.calls.length;
+    await service.refreshCatalog(connected.connectionId, actor);
+    expect(fetchMock).toHaveBeenCalledTimes(discoveryCallsAfterConnect + 1);
+    const discoveryCallsAfterSameScopeRefresh = fetchMock.mock.calls.length;
 
-    const cached = await service.listCatalog(connected.connectionId);
+    const cached = await service.listCatalog(connected.connectionId, company.id, actor);
 
     expect(cached.map((entry) => entry.toolName)).toContain("cached_read");
-    expect(fetchMock).toHaveBeenCalledTimes(discoveryCallsAfterConnect);
+    expect(fetchMock).toHaveBeenCalledTimes(discoveryCallsAfterSameScopeRefresh);
 
     tools = [
       ...tools,
@@ -5831,15 +5962,15 @@ describeEmbeddedPostgres("tool access service", () => {
     ];
     currentTime = new Date(currentTime.getTime() + 60_001);
 
-    const refreshed = await service.listCatalog(connected.connectionId);
+    const refreshed = await service.listCatalog(connected.connectionId, company.id, actor);
 
     expect(refreshed.map((entry) => entry.toolName)).toContain("fresh_read");
-    expect(fetchMock).toHaveBeenCalledTimes(discoveryCallsAfterConnect + 1);
+    expect(fetchMock).toHaveBeenCalledTimes(discoveryCallsAfterSameScopeRefresh + 3);
 
     currentTime = new Date(currentTime.getTime() + 60_001);
     fetchMock.mockRejectedValueOnce(new Error("temporary MCP outage"));
 
-    await expect(service.listCatalog(connected.connectionId)).resolves.toEqual(
+    await expect(service.listCatalog(connected.connectionId, company.id, actor)).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ toolName: "fresh_read" }),
       ]),
@@ -5979,9 +6110,9 @@ describeEmbeddedPostgres("tool access service", () => {
         observedAuthorization.push(
           new Headers(init.headers).get("authorization") ?? "",
         );
-        return mcpHttpResponse(catalogResponse([
+        return mcpCatalogResponseForRequest(init, [
               { name: "query_insight", annotations: { readOnlyHint: true } },
-            ]));
+            ], "json");
       },
     });
 
@@ -6157,10 +6288,10 @@ describeEmbeddedPostgres("tool access service", () => {
         revoke,
         evict: vi.fn(),
       },
-      remoteHttpRequest: async () =>
-        mcpHttpResponse(catalogResponse([
+      remoteHttpRequest: async (_url, init) =>
+        mcpCatalogResponseForRequest(init, [
               { name: "search_pages", annotations: { readOnlyHint: true } },
-            ])),
+            ], "json"),
     });
     const connected = await service.connectGalleryApp(
       company.id,
@@ -7597,7 +7728,7 @@ describeEmbeddedPostgres("tool access service", () => {
         platform_shared: true,
       };
       let beforeRepositoryResponse = async () => {};
-      vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
         const href = String(url);
         if (href === "https://api.github.com/user") {
           return mcpHttpResponse({
@@ -7634,12 +7765,12 @@ describeEmbeddedPostgres("tool access service", () => {
           });
         }
         if (href === GITHUB_CONNECTOR_PROFILES["github.code"].serverUrl) {
-          return mcpHttpResponse(catalogResponse([
+          return mcpCatalogResponseForRequest(init, [
                 {
                   name: "get_pull_request",
                   annotations: { readOnlyHint: true },
                 },
-              ]));
+              ], "json");
         }
         throw new Error(`unexpected fetch ${href}`);
       });
@@ -7861,7 +7992,7 @@ describeEmbeddedPostgres("tool access service", () => {
       ...previousOwnershipAvailability,
       platform_shared: true,
     };
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       const href = String(url);
       if (href === "https://api.github.com/user") {
         return mcpHttpResponse({ id: 42, login: "octocat" });
@@ -7889,9 +8020,9 @@ describeEmbeddedPostgres("tool access service", () => {
         });
       }
       if (href === GITHUB_CONNECTOR_PROFILES["github.code"].serverUrl) {
-        return mcpHttpResponse(catalogResponse([
+        return mcpCatalogResponseForRequest(init, [
               { name: "get_pull_request", annotations: { readOnlyHint: true } },
-            ]));
+            ], "json");
       }
       throw new Error(`unexpected fetch ${href}`);
     });
@@ -9402,7 +9533,7 @@ describeEmbeddedPostgres("tool access service", () => {
           ...(requestedScopes ? { scopes: requestedScopes } : {}),
         },
       );
-      vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
         const href = String(url);
         if (href === "https://slack.com/api/oauth.v2.access") {
           return {
@@ -9419,7 +9550,7 @@ describeEmbeddedPostgres("tool access service", () => {
           } as Response;
         }
         if (href === "https://mcp.slack.com/mcp") {
-          return mcpHttpResponse(catalogResponse([]));
+          return mcpCatalogResponseForRequest(init, [], "json");
         }
         throw new Error(`unexpected fetch ${href}`);
       });
@@ -9537,7 +9668,7 @@ describeEmbeddedPostgres("tool access service", () => {
         } as Response;
       }
       if (href === "https://mcp.slack.com/mcp") {
-        return mcpHttpResponse(catalogResponse([]));
+        return mcpCatalogResponseForRequest(init, [], "json");
       }
       throw new Error(`unexpected fetch ${href}`);
     });
@@ -9861,13 +9992,13 @@ describeEmbeddedPostgres("tool access service", () => {
               ),
             }),
           );
-          return mcpHttpResponse(catalogResponse([
+          return mcpCatalogResponseForRequest(init, [
                 {
                   name: "search_messages",
                   annotations: { readOnlyHint: true },
                 },
                 { name: "send_message", annotations: { readOnlyHint: false } },
-              ]));
+              ], "json");
         }
         throw new Error(`unexpected fetch ${href}`);
       });
@@ -10189,6 +10320,12 @@ describeEmbeddedPostgres("tool access service", () => {
         : service.completeOAuthCallback({ state, code: claim, redirectUri, actor });
       const initial = await start();
       await complete(new URL(initial.authorizationUrl).searchParams.get("state")!, "initial");
+      const [afterInitialCallback] = await db
+        .select()
+        .from(toolConnections)
+        .where(eq(toolConnections.id, connected.connectionId));
+      expect(afterInitialCallback?.config).toMatchObject({ mcpSessionRequired: true });
+      expect(afterInitialCallback?.transportConfig).toMatchObject({ mcpSessionRequired: true });
       const reconnect = await start();
       const state = new URL(reconnect.authorizationUrl).searchParams.get("state")!;
       const [stateRow] = await db.select().from(toolOauthStates).where(eq(toolOauthStates.state, state));
@@ -10268,15 +10405,15 @@ describeEmbeddedPostgres("tool access service", () => {
         subjectUserId: userId,
       },
     );
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       const href = String(url);
       if (href === "https://slack.com/api/oauth.v2.access") {
         return mcpHttpResponse(oauthToken("share-access-token", "share-refresh-token"));
       }
       if (href === "https://mcp.slack.com/mcp") {
-        return mcpHttpResponse(catalogResponse([
+        return mcpCatalogResponseForRequest(init, [
               { name: "search_messages", annotations: { readOnlyHint: true } },
-            ]));
+            ], "json");
       }
       throw new Error(`unexpected fetch ${href}`);
     });
@@ -10418,12 +10555,12 @@ describeEmbeddedPostgres("tool access service", () => {
           return mcpHttpResponse(oauthToken("personal-access-token", "personal-refresh-token"));
         }
         if (href === "https://mcp.slack.com/mcp") {
-          return mcpHttpResponse(catalogResponse([
+          return mcpCatalogResponseForRequest(init, [
                 {
                   name: "search_messages",
                   annotations: { readOnlyHint: true },
                 },
-              ]));
+              ], "json");
         }
         throw new Error(`unexpected fetch ${href}`);
       });
@@ -10466,7 +10603,7 @@ describeEmbeddedPostgres("tool access service", () => {
       .where(eq(connectionGrants.id, grant.id));
 
     expect(health.connection.healthStatus).toBe("ok");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(refreshed).toMatchObject({
       status: "active",
       kind: "user",
@@ -10546,7 +10683,7 @@ describeEmbeddedPostgres("tool access service", () => {
         return mcpHttpResponse(oauthToken("personal-access-token", "personal-refresh-token"));
       }
       if (href === "https://mcp.slack.com/mcp") {
-        return mcpHttpResponse(catalogResponse([]));
+        return mcpCatalogResponseForRequest(init, [], "json");
       }
       throw new Error(`unexpected fetch ${href}`);
     });
@@ -10636,7 +10773,7 @@ describeEmbeddedPostgres("tool access service", () => {
             json: async () => ({}),
           } as Response;
         }
-        return mcpHttpResponse(catalogResponse([]));
+        return mcpCatalogResponseForRequest(init, [], "json");
       }
       if (
         href ===
@@ -10747,7 +10884,7 @@ describeEmbeddedPostgres("tool access service", () => {
       { actorType: "user", actorId: wideUser },
     );
     let tokenScope: string | null = null;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       const href = String(url);
       if (href === "https://slack.com/api/oauth.v2.access") {
         return mcpHttpResponse({
@@ -10760,7 +10897,7 @@ describeEmbeddedPostgres("tool access service", () => {
         });
       }
       if (href === "https://mcp.slack.com/mcp") {
-        return mcpHttpResponse(catalogResponse([]));
+        return mcpCatalogResponseForRequest(init, [], "json");
       }
       throw new Error(`unexpected fetch ${href}`);
     });
@@ -10891,7 +11028,7 @@ describeEmbeddedPostgres("tool access service", () => {
             : slackToken(authorizationScope);
         }
         if (href === "https://mcp.slack.com/mcp") {
-          return mcpHttpResponse(catalogResponse([]));
+          return mcpCatalogResponseForRequest(init, [], "json");
         }
         throw new Error(`unexpected fetch ${href}`);
       });
@@ -11090,7 +11227,7 @@ describeEmbeddedPostgres("tool access service", () => {
     });
     const redirectUri = "https://paperclip.example/api/tools/oauth/callback";
     let registrations = 0;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       const href = String(url);
       if (href === "https://mcp.airtable.com/.well-known/oauth-protected-resource/mcp") {
         return mcpHttpResponse({
@@ -11359,9 +11496,9 @@ describeEmbeddedPostgres("tool access service", () => {
             Authorization: "Bearer notion-choice-access",
           }),
         );
-        return mcpHttpResponse(catalogResponse([
+        return mcpCatalogResponseForRequest(init, [
               { name: "notion-search", annotations: { readOnlyHint: true } },
-            ]));
+            ], "json");
       }
       throw new Error(`unexpected fetch ${href}`);
     });
@@ -11588,7 +11725,7 @@ describeEmbeddedPostgres("tool access service", () => {
             expect(init?.headers).toEqual(
               expect.objectContaining({ Authorization: "Bearer access-token" }),
             );
-            return mcpHttpResponse(catalogResponse([
+            return mcpCatalogResponseForRequest(init, [
                   {
                     name: "search_messages",
                     description: "Search messages.",
@@ -11599,7 +11736,7 @@ describeEmbeddedPostgres("tool access service", () => {
                     description: "Send a message.",
                     annotations: { readOnlyHint: false },
                   },
-                ]));
+                ], "json");
           }
           throw new Error(`unexpected fetch ${href}`);
         });
@@ -11610,7 +11747,7 @@ describeEmbeddedPostgres("tool access service", () => {
         .query({ state, code: "oauth-code" });
 
       expect(callbackRes.status).toBe(200);
-      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(fetchMock).toHaveBeenCalledTimes(5);
       expect(callbackRes.body.connection).toMatchObject({
         id: connectRes.body.connectionId,
         status: "active",
@@ -11659,7 +11796,7 @@ describeEmbeddedPostgres("tool access service", () => {
       expect(redirectCallbackRes.headers.location).toBe(
         `/${company.issuePrefix}/apps/${redirectConnectRes.body.connectionId}/permissions?success=1`,
       );
-      expect(fetchMock).toHaveBeenCalledTimes(6);
+      expect(fetchMock).toHaveBeenCalledTimes(10);
       await expect(db.select().from(toolOauthStates)).resolves.toHaveLength(0);
       await expect(
         db.select().from(companySecretBindings),
@@ -12079,9 +12216,9 @@ describeEmbeddedPostgres("tool access service", () => {
             Authorization: "Bearer bound-access-token",
           }),
         );
-        return mcpHttpResponse(catalogResponse([
+        return mcpCatalogResponseForRequest(init, [
               { name: "search_messages", annotations: { readOnlyHint: true } },
-            ]));
+            ], "json");
       }
       throw new Error(`unexpected fetch ${href}`);
     });
@@ -12358,10 +12495,10 @@ describeEmbeddedPostgres("tool access service", () => {
               Authorization: "Bearer supabase-access-token",
             }),
           );
-          return mcpHttpResponse(catalogResponse([
+          return mcpCatalogResponseForRequest(init, [
                 { name: "list_tables", annotations: { readOnlyHint: true } },
                 { name: "execute_sql", annotations: { readOnlyHint: false } },
-              ]));
+              ], "json");
         }
         throw new Error(`unexpected fetch ${href}`);
       });
@@ -12508,7 +12645,7 @@ describeEmbeddedPostgres("tool access service", () => {
           expect(new Headers(init?.headers).get("authorization")).toBe(
             "Bearer miro-access-token",
           );
-          return mcpHttpResponse(catalogResponse([{ name: "whoami", annotations: { readOnlyHint: true } }]));
+          return mcpCatalogResponseForRequest(init, [{ name: "whoami", annotations: { readOnlyHint: true } }], "json");
         }
         throw new Error(`unexpected fetch ${href}`);
       });
@@ -13490,9 +13627,9 @@ describeEmbeddedPostgres("tool access service", () => {
         } as Response;
       }
       if (href === "https://mcp.slack.com/mcp") {
-        return mcpHttpResponse(catalogResponse([
+        return mcpCatalogResponseForRequest(init, [
               { name: "search_messages", annotations: { readOnlyHint: true } },
-            ]));
+            ], "json");
       }
       throw new Error(`unexpected fetch ${href}`);
     });
@@ -13594,13 +13731,13 @@ describeEmbeddedPostgres("tool access service", () => {
     const state = new URL(start.authorizationUrl).searchParams.get("state")!;
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async (url) => {
+      .mockImplementation(async (url, init) => {
         const href = String(url);
         if (href === "https://slack.com/api/oauth.v2.access") {
           return mcpHttpResponse(oauthToken("expired-access-token", "single-use-refresh-token"));
         }
         if (href === "https://mcp.slack.com/mcp") {
-          return mcpHttpResponse(catalogResponse([]));
+          return mcpCatalogResponseForRequest(init, [], "json");
         }
         throw new Error(`unexpected fetch ${href}`);
       });
@@ -13702,13 +13839,13 @@ describeEmbeddedPostgres("tool access service", () => {
     const state = new URL(start.authorizationUrl).searchParams.get("state")!;
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async (url) => {
+      .mockImplementation(async (url, init) => {
         const href = String(url);
         if (href === "https://slack.com/api/oauth.v2.access") {
           return mcpHttpResponse(oauthToken("expired-access-token", "submitted-refresh-token"));
         }
         if (href === "https://mcp.slack.com/mcp") {
-          return mcpHttpResponse(catalogResponse([]));
+          return mcpCatalogResponseForRequest(init, [], "json");
         }
         throw new Error(`unexpected fetch ${href}`);
       });
@@ -13876,9 +14013,9 @@ describeEmbeddedPostgres("tool access service", () => {
               Authorization: "Bearer m2m-access-token",
             }),
           );
-          return mcpHttpResponse(catalogResponse([
+          return mcpCatalogResponseForRequest(init, [
                 { name: "machine_read", annotations: { readOnlyHint: true } },
-              ]));
+              ], "json");
         }
         throw new Error(`unexpected fetch ${href}`);
       });
@@ -13888,7 +14025,7 @@ describeEmbeddedPostgres("tool access service", () => {
       actorId: "health-check",
     });
     expect(health.connection.healthStatus).toBe("ok");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     const [updated] = await db
       .select()
       .from(toolConnections)
@@ -13929,7 +14066,7 @@ describeEmbeddedPostgres("tool access service", () => {
     const state = new URL(start.authorizationUrl).searchParams.get("state")!;
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async (url) => {
+      .mockImplementation(async (url, init) => {
         const href = String(url);
         if (href === "https://slack.com/api/oauth.v2.access") {
           return {
@@ -13943,12 +14080,12 @@ describeEmbeddedPostgres("tool access service", () => {
           } as Response;
         }
         if (href === "https://mcp.slack.com/mcp") {
-          return mcpHttpResponse(catalogResponse([
+          return mcpCatalogResponseForRequest(init, [
                 {
                   name: "search_messages",
                   annotations: { readOnlyHint: true },
                 },
-              ]));
+              ], "json");
         }
         throw new Error(`unexpected fetch ${href}`);
       });
@@ -15870,9 +16007,9 @@ describeEmbeddedPostgres("tool access service", () => {
             Authorization: "Bearer generic-access-token",
           }),
         );
-        return mcpHttpResponse(catalogResponse([
+        return mcpCatalogResponseForRequest(init, [
               { name: "read_generic", annotations: { readOnlyHint: true } },
-            ]));
+            ], "json");
       }
       throw new Error(`unexpected fetch ${href}`);
     });
@@ -16070,7 +16207,7 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(state).toBeTruthy();
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async (url) => {
+      .mockImplementation(async (url, init) => {
         if (String(url).endsWith("/smoke-lab/oauth/token")) {
           return {
             ok: true,
@@ -16083,9 +16220,9 @@ describeEmbeddedPostgres("tool access service", () => {
           } as Response;
         }
         if (String(url) === "http://smoke-fixture.test/mcp") {
-          return mcpHttpResponse(catalogResponse([
+          return mcpCatalogResponseForRequest(init, [
                 { name: "todo.list", annotations: { readOnlyHint: true } },
-              ]));
+              ], "json");
         }
         throw new Error(`unexpected fetch ${String(url)}`);
       });
@@ -16190,7 +16327,7 @@ describeEmbeddedPostgres("tool access service", () => {
       "mcp-key",
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(fetchMock).toHaveBeenCalledWith(
       PUBLIC_MCP_FIXTURE_URL,
       expect.objectContaining({
@@ -16349,8 +16486,7 @@ describeEmbeddedPostgres("tool access service", () => {
       })
       .where(eq(toolConnections.id, connect.connectionId));
 
-    fetchMock.mockResolvedValueOnce(
-      mcpHttpResponse(catalogResponse([
+    fetchMock.mockImplementation(mcpCatalogResponder([
             {
               name: "list_zaps",
               description: "List Zapier actions.",
@@ -16378,8 +16514,7 @@ describeEmbeddedPostgres("tool access service", () => {
               },
               annotations: { readOnlyHint: false },
             },
-          ])),
-    );
+          ]));
     const rereview = await service.refreshCatalog(connect.connectionId, {
       actorType: "user",
       actorId: "board",
@@ -16548,13 +16683,11 @@ describeEmbeddedPostgres("tool access service", () => {
       .from(toolProfiles)
       .where(eq(toolProfiles.profileKey, `app:${connect.connectionId}`));
     expect(defaultProfile).toBeTruthy();
-    fetchMock.mockResolvedValueOnce(
-      mcpHttpResponse(catalogResponse([
+    fetchMock.mockImplementation(mcpCatalogResponder([
             { name: "list_zaps", annotations: { readOnlyHint: true } },
             { name: "update_zap", annotations: { readOnlyHint: false } },
             { name: "create_zap", annotations: { readOnlyHint: false } },
-          ])),
-    );
+          ]));
 
     const refresh = await service.refreshCatalog(connect.connectionId, {
       actorType: "user",
@@ -17084,8 +17217,7 @@ describeEmbeddedPostgres("tool access service", () => {
         },
       })
       .where(eq(toolConnections.id, connect.connectionId));
-    fetchMock.mockResolvedValue(
-      mcpHttpResponse(catalogResponse([
+    fetchMock.mockImplementation(mcpCatalogResponder([
             {
               name: "list_zaps",
               description: "List",
@@ -17104,8 +17236,7 @@ describeEmbeddedPostgres("tool access service", () => {
               inputSchema: { type: "object", properties: {} },
               annotations: { destructiveHint: true },
             },
-          ])),
-    );
+          ]));
 
     await expect(
       service.reconnectGalleryApp(
