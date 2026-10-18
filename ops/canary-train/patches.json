@@ -75,6 +75,11 @@
         "path": "backport-installed-recovery.patch",
         "sha256": "965f2cc8b277f3b4687ccbba4ac808ba5fbfb674d87bcd1d297f0b07ee581160"
       }
+    },
+    {
+      "number": 11,
+      "repository": "copystring/paperclip",
+      "head": "6e7b9531e5e8d3ed9eef167f6b14c89675fdcd02"
     }
   ]
 }
