@@ -6708,6 +6708,71 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
     });
   });
 
+  it("durably revokes the current run on a board handoff without blocking a fresh run", async () => {
+    const seeded = await seedOwnershipIssue({ checkoutStatus: "running" });
+    const original = await svc.getById(seeded.issueId);
+    const reviewerAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: reviewerAgentId,
+      companyId: original!.companyId,
+      name: "Board handoff reviewer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.update(heartbeatRuns).set({
+      contextSnapshot: { issueId: seeded.issueId, preservedContext: "keep-me" },
+    }).where(eq(heartbeatRuns.id, seeded.staleRunId));
+
+    await svc.update(seeded.issueId, {
+      assigneeAgentId: reviewerAgentId,
+      assigneeUserId: null,
+      actorUserId: "local-board",
+    });
+    const [revokedRun] = await db.select().from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, seeded.staleRunId));
+    expect(revokedRun!.contextSnapshot).toMatchObject({
+      issueId: seeded.issueId,
+      preservedContext: "keep-me",
+      legacyIssueOwnershipRevocation: {
+        issueId: seeded.issueId,
+        ownerAgentId: seeded.assigneeAgentId,
+      },
+    });
+
+    // Returning the assignment to the original agent must not restore a run
+    // whose write authority was revoked by the earlier board handoff.
+    await svc.update(seeded.issueId, {
+      assigneeAgentId: seeded.assigneeAgentId,
+      assigneeUserId: null,
+      actorUserId: "local-board",
+    });
+    await expect(svc.update(seeded.issueId, {
+      title: "Stale run after reassignment back",
+      actorAgentId: seeded.assigneeAgentId,
+      actorRunId: seeded.staleRunId,
+    })).rejects.toMatchObject({ status: 403, details: { code: "issue_handed_off" } });
+
+    const freshRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: freshRunId,
+      companyId: original!.companyId,
+      agentId: seeded.assigneeAgentId,
+      status: "running",
+      invocationSource: "manual",
+      startedAt: new Date(),
+      contextSnapshot: { issueId: seeded.issueId },
+    });
+    await expect(svc.update(seeded.issueId, {
+      title: "Fresh run can write",
+      actorAgentId: seeded.assigneeAgentId,
+      actorRunId: freshRunId,
+    })).resolves.toMatchObject({ title: "Fresh run can write" });
+  });
+
   it("lets the current assignee adopt a stale terminal checkout owner", async () => {
     const seeded = await seedOwnershipIssue({ checkoutStatus: "failed" });
 

@@ -13,7 +13,10 @@ import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notificatio
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
-import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
+import {
+  assertLegacyRunTaskOwnership,
+  revokeLegacyRunIssueOwnership,
+} from "../legacy-run-task-ownership.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
 import { documentService } from "./documents.js";
@@ -217,6 +220,70 @@ import { buildIssueChanges } from "./issue-change-receipt.js";
 import { ensurePersonalPrivateProject } from "./projects.js";
 import { projectSafeChatPublication } from "./chat-publication-projection.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
+
+async function revokeLegacyRunsOnIssueHandoff(
+  tx: any,
+  input: {
+    issue: typeof issues.$inferSelect;
+    nextAssigneeAgentId: string | null;
+    nextAssigneeUserId: string | null;
+    actorAgentId: string | null | undefined;
+    actorRunId: string | null | undefined;
+  },
+) {
+  const { issue } = input;
+  const assignmentChanged =
+    issue.assigneeAgentId !== input.nextAssigneeAgentId ||
+    issue.assigneeUserId !== input.nextAssigneeUserId;
+  if (!assignmentChanged || !issue.assigneeAgentId) return;
+
+  const runIds = new Set(
+    [issue.executionRunId, issue.checkoutRunId].filter(
+      (runId): runId is string => Boolean(runId),
+    ),
+  );
+  if (input.actorAgentId === issue.assigneeAgentId && input.actorRunId) {
+    runIds.add(input.actorRunId);
+  }
+  if (runIds.size === 0) return;
+
+  const runs = await tx
+    .select({
+      id: heartbeatRuns.id,
+      companyId: heartbeatRuns.companyId,
+      agentId: heartbeatRuns.agentId,
+      runtimeMode: heartbeatRuns.runtimeMode,
+      contextSnapshot: heartbeatRuns.contextSnapshot,
+    })
+    .from(heartbeatRuns)
+    .where(and(
+      eq(heartbeatRuns.companyId, issue.companyId),
+      inArray(heartbeatRuns.id, [...runIds]),
+    ))
+    .for("update");
+
+  for (const run of runs) {
+    const context = run.contextSnapshot;
+    if (
+      run.runtimeMode !== "legacy" ||
+      run.agentId !== issue.assigneeAgentId ||
+      !context || typeof context !== "object" || Array.isArray(context) ||
+      (context as Record<string, unknown>).issueId !== issue.id
+    ) continue;
+    await tx
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: revokeLegacyRunIssueOwnership(
+          context as Record<string, unknown>,
+          { issueId: issue.id, ownerAgentId: run.agentId },
+        ),
+      })
+      .where(and(
+        eq(heartbeatRuns.id, run.id),
+        eq(heartbeatRuns.companyId, issue.companyId),
+      ));
+  }
+}
 
 const ALL_ISSUE_STATUSES = [
   "backlog",
@@ -11176,6 +11243,19 @@ export function issueService(db: Db) {
             });
           }
         }
+        await revokeLegacyRunsOnIssueHandoff(tx, {
+          issue: receiptExisting,
+          nextAssigneeAgentId:
+            issueData.assigneeAgentId !== undefined
+              ? issueData.assigneeAgentId
+              : receiptExisting.assigneeAgentId,
+          nextAssigneeUserId:
+            issueData.assigneeUserId !== undefined
+              ? issueData.assigneeUserId
+              : receiptExisting.assigneeUserId,
+          actorAgentId,
+          actorRunId,
+        });
         if (actorAgentId && patch.status === "done") {
           const [review] = await tx.select({ id: toolActionRequests.id }).from(toolActionRequests).where(and(eq(toolActionRequests.companyId, existing.companyId), eq(toolActionRequests.issueId, id), inArray(toolActionRequests.status, ["pending", "approved", "executing"]))).limit(1);
           if (review) throw conflict("This task is waiting for a connection review. Finish unrelated work, then yield in_review without retrying the governed call.", { code: "tool_review_pending", actionRequestId: review.id });
