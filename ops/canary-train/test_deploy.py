@@ -34,11 +34,13 @@ def manifest():
         "packageMap": {
             "paperclipai#dist": "node_modules/paperclipai/dist",
             "@paperclipai/server#dist": "node_modules/@paperclipai/server/dist",
+            "@paperclipai/server#ui-parser.cjs": "node_modules/@paperclipai/server/ui-parser.cjs",
             "@paperclipai/db#dist": "node_modules/@paperclipai/db/dist",
         },
         "files": {
             "node_modules/paperclipai/dist/index.js": digest(b"cli"),
             "node_modules/@paperclipai/server/dist/index.js": digest(b"server"),
+            "node_modules/@paperclipai/server/ui-parser.cjs": digest(b"parser"),
             migration: digest(b"create table"),
         },
         "migrations": [{"path": migration, "sha256": digest(b"create table")}],
@@ -146,6 +148,42 @@ class ReleaseTests(unittest.TestCase):
 
 
 class CandidateTests(unittest.TestCase):
+    def test_package_map_replaces_exact_single_file_runtime_asset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = root / "candidate"
+            extracted = root / "extracted"
+            relative = Path("node_modules/@paperclipai/server/ui-parser.cjs")
+            old = candidate / relative
+            source = extracted / relative
+            old.parent.mkdir(parents=True)
+            source.parent.mkdir(parents=True)
+            old.write_text("old asset")
+            source.write_text("verified parser")
+            item = {"packageMap": {"@paperclipai/server#ui-parser.cjs": relative.as_posix()},
+                    "files": {relative.as_posix(): digest(b"verified parser")}}
+            deployer(root)._replace_package_roots(candidate, extracted, item)
+            self.assertEqual(old.read_text(), "verified parser")
+
+    def test_package_map_rejects_symlinked_single_file_ancestor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = root / "candidate"
+            extracted = root / "extracted"
+            outside = root / "outside"
+            outside.mkdir()
+            rel = Path("node_modules/@paperclipai/server/ui-parser.cjs")
+            target_parent = candidate / "node_modules/@paperclipai/server"
+            target_parent.mkdir(parents=True)
+            (target_parent / "ui-parser.cjs").symlink_to(outside / "ui-parser.cjs")
+            source = extracted / rel
+            source.parent.mkdir(parents=True)
+            source.write_text("parser")
+            item = {"packageMap": {"@paperclipai/server#ui-parser.cjs": rel.as_posix()},
+                    "files": {rel.as_posix(): digest(b"parser")}}
+            with self.assertRaisesRegex(deploy.DeployError, "unsafe"):
+                deployer(root)._replace_package_roots(candidate, extracted, item)
+
     def test_tar_rejects_parent_traversal(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = io.BytesIO()
@@ -180,10 +218,10 @@ class CandidateTests(unittest.TestCase):
             (new / rel).parent.mkdir(parents=True)
             (old / rel).write_text("old migration")
             (new / rel).write_text("changed migration")
-            with self.assertRaisesRegex(deploy.DeployError, "changes or removes"):
+            with self.assertRaisesRegex(deploy.DeployError, "not identical"):
                 deployer(root)._migration_diff(old, new)
 
-    def test_migration_diff_allows_only_additive_new_migrations(self):
+    def test_migration_diff_rejects_additive_new_migrations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             old = root / "old"
@@ -194,8 +232,8 @@ class CandidateTests(unittest.TestCase):
                 (base / rel).parent.mkdir(parents=True, exist_ok=True)
                 (base / rel).write_text("same migration")
             (new / added).write_text("additive")
-            result = deployer(root)._migration_diff(old, new)
-            self.assertEqual(result["added"], [added.as_posix()])
+            with self.assertRaisesRegex(deploy.DeployError, "not identical"):
+                deployer(root)._migration_diff(old, new)
 
     def test_changed_local_hook_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -326,6 +364,142 @@ class DrainTests(unittest.TestCase):
             d.assert_idle_checkpoint_disabled = lambda: None
             with self.assertRaisesRegex(deploy.DeployError, "not definitively clear"):
                 d.verify_owned_drain("token", owner)
+
+
+class ActivationTests(unittest.TestCase):
+    def make_install(self, root: Path):
+        cli = root / ".paperclip/cli"
+        installs = cli / "installs/npm"
+        old = installs / "old"
+        candidate = installs / "2026.1018.0-canary.2-patched-42-1"
+        for payload in (old, candidate):
+            server = payload / "node_modules/@paperclipai/server/dist"
+            db_migrations = payload / "node_modules/@paperclipai/db/dist/migrations"
+            (server / "onboarding-assets/default").mkdir(parents=True)
+            (server / "onboarding-assets/ceo").mkdir(parents=True)
+            (server / "onboarding-assets/default/AGENTS.md").write_text("default policy")
+            (server / "onboarding-assets/ceo/AGENTS.md").write_text("ceo policy")
+            (payload / "node_modules/@paperclipai/server/dist/build-info.json").write_text(
+                json.dumps({"commit": "2" * 40 if payload == candidate else "1" * 40}))
+            db_migrations.mkdir(parents=True)
+            (db_migrations / "0001.sql").write_text("same")
+        cli.mkdir(parents=True, exist_ok=True)
+        current = cli / "current"
+        current.symlink_to(old)
+        old_install = {"version": "old-version", "payloadPath": str(old), "previous": []}
+        (cli / "install.json").write_text(json.dumps(old_install))
+        return cli, old, candidate, current, old_install
+
+    def manifest(self):
+        return {
+            "version": "2026.1018.0-canary.2", "tag": "patched-canary-test",
+            "sourceCommit": "3" * 40, "patchedCommit": "2" * 40, "controllerCommit": "4" * 40,
+            "patches": [], "packageMap": {"@paperclipai/server#dist": "node_modules/@paperclipai/server/dist"},
+        }
+
+    def configured(self, root, command):
+        d = deployer(root, command=command)
+        d.assert_no_work = lambda token: None
+        d.start_drain = lambda token: "owned"
+        d.verify_owned_drain = lambda token, owner: None
+        d.release_drain = lambda token, owner: None
+        return d
+
+    def test_partial_cutover_manifest_failure_restores_link_and_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli, old, candidate, current, previous = self.make_install(root)
+            calls = []
+            d = self.configured(root, lambda *a, **k: calls.append(a) or SimpleNamespace(returncode=0))
+            original_write = d._write_install_atomic
+            first = True
+
+            def fail_once(data):
+                nonlocal first
+                if first:
+                    first = False
+                    raise OSError("simulated manifest write failure")
+                original_write(data)
+
+            d._write_install_atomic = fail_once
+            with self.assertRaisesRegex(OSError, "simulated"):
+                d.activate(candidate, self.manifest(), d._migration_diff(old, candidate), "token")
+            self.assertEqual(current.resolve(), old.resolve())
+            self.assertEqual(json.loads((cli / "install.json").read_text()), previous)
+            self.assertEqual(calls, [])
+
+    def test_restart_rejection_restores_and_restarts_previous_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli, old, candidate, current, previous = self.make_install(root)
+            results = iter([1, 0])
+            calls = []
+
+            def command(args, **kwargs):
+                calls.append(args)
+                return SimpleNamespace(returncode=next(results))
+
+            d = self.configured(root, command)
+            d._wait_health = lambda version, commit=None, timeout=90: version == previous["version"]
+            with self.assertRaisesRegex(deploy.DeployError, "restart was rejected"):
+                d.activate(candidate, self.manifest(), d._migration_diff(old, candidate), "token")
+            self.assertEqual(current.resolve(), old.resolve())
+            self.assertEqual(json.loads((cli / "install.json").read_text()), previous)
+            self.assertEqual(len(calls), 2)
+
+    def test_staged_candidate_retry_reuses_verified_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, old, candidate, _, _ = self.make_install(root)
+            d = self.configured(root, lambda *a, **k: SimpleNamespace(returncode=1))
+            item = self.manifest()
+            item.update({"runId": "42", "runAttempt": 1, "archiveSha256": "a" * 64})
+            # A deterministic receipt covers post-hook file bytes and all
+            # protected package roots; no npm or archive rewrite is needed.
+            protected = d._protected_inventory(candidate, item["packageMap"].values())
+            candidate_files = {"node_modules/@paperclipai/server/dist/build-info.json": deploy.hash_file(
+                candidate / "node_modules/@paperclipai/server/dist/build-info.json")}
+            # stage verifies the candidate file receipt; the migration tree
+            # is separately pinned by the release manifest.
+            item["files"] = candidate_files
+            item["migrations"] = [{"path": "node_modules/@paperclipai/db/dist/migrations/0001.sql",
+                                  "sha256": deploy.hash_file(candidate / "node_modules/@paperclipai/db/dist/migrations/0001.sql")}]
+            marker = {"schemaVersion": 1, "repository": "copystring/paperclip", "tag": item["tag"],
+                      "version": item["version"], "runId": item["runId"], "runAttempt": item["runAttempt"],
+                      "patchedCommit": item["patchedCommit"], "archiveSha256": item["archiveSha256"],
+                      "candidateFiles": candidate_files, "protectedRoots": sorted(item["packageMap"].values()),
+                      "protectedFiles": protected}
+            (candidate / ".canary-train-owned.json").write_text(json.dumps(marker))
+            d._verify_registered_support_files = lambda: None
+            d._verify_local_hook_files = lambda path: None
+            version = item["version"]
+            d._npm_metadata = lambda requested: ["paperclipai", "@paperclipai/server"]
+            path, migration_diff = d.stage(item, {})
+            self.assertEqual(path, candidate)
+            self.assertEqual(migration_diff["baselinePath"], str(old.resolve()))
+            (candidate / "node_modules/@paperclipai/server/dist/build-info.json").write_text("tampered")
+            with self.assertRaisesRegex(deploy.DeployError, "npm install failed"):
+                d.stage(item, {})
+            self.assertFalse(candidate.exists())
+
+    def test_activate_rejects_changed_stage_migration_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli, old, candidate, current, _ = self.make_install(root)
+            other = cli / "installs/npm/other"
+            other.mkdir()
+            migration = other / "node_modules/@paperclipai/db/dist/migrations/0001.sql"
+            migration.parent.mkdir(parents=True)
+            migration.write_text("same")
+            d = self.configured(root, lambda *a, **k: SimpleNamespace(returncode=0))
+            diff = d._migration_diff(old, candidate)
+            link = cli / ".replacement"
+            link.symlink_to(other)
+            current.unlink()
+            link.replace(current)
+            with self.assertRaisesRegex(deploy.DeployError, "baseline changed"):
+                d.activate(candidate, self.manifest(), diff, "token")
+            self.assertEqual(current.resolve(), other.resolve())
 
 
 if __name__ == "__main__":

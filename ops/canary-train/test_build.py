@@ -183,6 +183,7 @@ class ArtifactTests(unittest.TestCase):
             {"name": "paperclipai", "dir": "cli", "publishFromCi": True},
             {"name": "@paperclipai/server", "dir": "server", "publishFromCi": True},
             {"name": "@paperclipai/db", "dir": "packages/db", "publishFromCi": True},
+            {"name": "@paperclipai/hermes-paperclip-adapter", "dir": "packages/adapters/hermes", "publishFromCi": True},
             {"name": "@paperclipai/ui", "dir": "ui", "publishFromCi": True},
         ]
         (workspace / "scripts").mkdir()
@@ -191,6 +192,10 @@ class ArtifactTests(unittest.TestCase):
             "cli/package.json": {"name": "paperclipai", "files": ["dist"]},
             "server/package.json": {"name": "@paperclipai/server", "files": ["dist", "ui-dist", "skills"]},
             "packages/db/package.json": {"name": "@paperclipai/db", "files": ["dist"]},
+            "packages/adapters/hermes/package.json": {
+                "name": "@paperclipai/hermes-paperclip-adapter",
+                "files": ["dist", "ui-parser.cjs", "gateway-ui-parser.cjs", "README.md", "LICENSE"],
+            },
         }
         for relative, package_json in package_manifests.items():
             path = workspace / relative
@@ -203,6 +208,9 @@ class ArtifactTests(unittest.TestCase):
             "packages/db/dist/index.js": b"db runtime",
             "packages/db/dist/migrations/0001_test.sql": b"select 1;",
             "packages/db/dist/migrations/meta/_journal.json": b'{"version":"1"}',
+            "packages/adapters/hermes/dist/index.js": b"hermes runtime",
+            "packages/adapters/hermes/ui-parser.cjs": b"module.exports = {};",
+            "packages/adapters/hermes/gateway-ui-parser.cjs": b"module.exports = {};",
             "server/skills/base.md": b"server skill",
             "packages/adapters/claude-local/package.json": json.dumps({"name": "@paperclipai/adapter-claude-local"}).encode(),
             "packages/adapters/claude-local/skills/base.md": b"claude skill",
@@ -255,6 +263,16 @@ class ArtifactTests(unittest.TestCase):
             self.assertIn("node_modules/@paperclipai/server/ui-dist/index.html", first["files"])
             self.assertIn("node_modules/@paperclipai/server/skills/base.md", first["files"])
             self.assertIn("node_modules/@paperclipai/db/dist/index.js", first["files"])
+            self.assertIn("node_modules/@paperclipai/hermes-paperclip-adapter/ui-parser.cjs", first["files"])
+            self.assertIn("node_modules/@paperclipai/hermes-paperclip-adapter/gateway-ui-parser.cjs", first["files"])
+            self.assertEqual(
+                first["packageMap"]["@paperclipai/hermes-paperclip-adapter#ui-parser.cjs"],
+                "node_modules/@paperclipai/hermes-paperclip-adapter/ui-parser.cjs",
+            )
+            self.assertEqual(
+                build.hash_tree(workspace / "packages/adapters/hermes/ui-parser.cjs"),
+                {"": hashlib.sha256(b"module.exports = {};").hexdigest()},
+            )
             self.assertNotIn("node_modules/@paperclipai/server/package.json", first["files"])
             migration_by_path = {item["path"]: item["sha256"] for item in first["migrations"]}
             self.assertEqual(migration_by_path["node_modules/@paperclipai/db/dist/migrations/0001_test.sql"], hashlib.sha256(b"select 1;").hexdigest())

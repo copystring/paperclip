@@ -550,6 +550,13 @@ def build(workspace: Path, output: Path) -> dict[str, Any]:
 
 
 def hash_tree(directory: Path) -> dict[str, str]:
+    directory = Path(directory)
+    if directory.is_symlink():
+        raise TrainError(f"runtime output contains a symlink: {directory}")
+    if directory.is_file():
+        return {"": sha256(directory.read_bytes())}
+    if not directory.is_dir():
+        raise TrainError(f"runtime output path is missing: {directory}")
     result = {}
     for path in sorted(directory.rglob("*")):
         if path.is_symlink():
@@ -579,6 +586,8 @@ def runtime_directories(workspace: Path, release_manifest: list[dict[str, Any]])
             # Its built browser assets are copied into @paperclipai/server/ui-dist.
             continue
         package = json.loads((source / "package.json").read_text(encoding="utf-8"))
+        if package.get("name") != name:
+            raise TrainError(f"release package identity does not match its directory: {name}")
         entries = package.get("files")
         if not isinstance(entries, list):
             raise TrainError(f"{name} has no explicit npm files allowlist")
@@ -592,10 +601,8 @@ def runtime_directories(workspace: Path, release_manifest: list[dict[str, Any]])
             if any(part == "package.json" for part in path.parts) or "*" in entry:
                 raise TrainError(f"{name} has an unsupported npm files entry: {raw_entry}")
             target = source / Path(*path.parts)
-            if target.is_dir():
+            if target.is_dir() or target.is_file():
                 result[f"{name}#{path.as_posix()}"] = target
-            elif target.is_file():
-                raise TrainError(f"runtime package map entries must be whole directories: {name}#{entry}")
             else:
                 raise TrainError(f"{name} declared npm runtime output that was not built: {entry}")
     for required in DEFAULT_PACKAGES:
@@ -640,13 +647,14 @@ def package(workspace: Path, output: Path) -> dict[str, Any]:
                 for key, directory in sorted(runtime_directories(workspace, release_manifest).items()):
                     root = archive_root(key)
                     package_map[key] = root.as_posix()
-                    for source in sorted(directory.rglob("*")):
+                    sources = [directory] if directory.is_file() else sorted(directory.rglob("*"))
+                    for source in sources:
                         if source.is_symlink():
                             raise TrainError(f"runtime output contains a symlink: {source}")
                         if not source.is_file():
                             continue
-                        rel = source.relative_to(directory).as_posix()
-                        dest = (root / safe_relative_path(rel)).as_posix()
+                        rel = "" if directory.is_file() else source.relative_to(directory).as_posix()
+                        dest = root.as_posix() if not rel else (root / safe_relative_path(rel)).as_posix()
                         safe_relative_path(dest)
                         data = source.read_bytes()
                         info = tarfile.TarInfo(dest)

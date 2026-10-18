@@ -120,6 +120,9 @@ def verify_manifest(manifest: dict, expected_repository: str, expected_workflow:
     if not isinstance(package_map, dict) or not package_map:
         raise DeployError("Manifest package root map is missing")
     roots = []
+    files = manifest.get("files")
+    if not isinstance(files, dict) or not files:
+        raise DeployError("Manifest file inventory is missing")
     for key, root in package_map.items():
         if not isinstance(key, str) or not key or not isinstance(root, str):
             raise DeployError("Manifest package root entry is invalid")
@@ -141,17 +144,16 @@ def verify_manifest(manifest: dict, expected_repository: str, expected_workflow:
     for root in roots:
         if any(other != root and other.startswith(root + "/") for other in roots):
             raise DeployError("Manifest package roots overlap")
-    files = manifest.get("files")
-    if not isinstance(files, dict) or not files:
-        raise DeployError("Manifest file inventory is missing")
     for name, digest in files.items():
         rel = _safe_relative(name).as_posix()
-        if not any(rel.startswith(root + "/") for root in roots):
+        if not any(rel == root or rel.startswith(root + "/") for root in roots):
             raise DeployError("Manifest file is outside its exact package roots")
         if not isinstance(digest, str) or not HEX_64.fullmatch(digest):
             raise DeployError("Manifest contains an invalid file digest")
-    if any(not any(name.startswith(root + "/") for name in files) for root in roots):
+    if any(not any(name == root or name.startswith(root + "/") for name in files) for root in roots):
         raise DeployError("Every replacement root must have a complete manifest file inventory")
+    if any(root in files and any(name.startswith(root + "/") for name in files) for root in roots):
+        raise DeployError("Package root cannot be both a single file and a directory")
     expected = manifest.get("expectedPatches")
     if expected is not None and sorted(map(_patch_identity, patches)) != sorted(map(_patch_identity, expected)):
         raise DeployError("Release patch set differs from the configured patch set")
@@ -328,11 +330,15 @@ class Deployer:
 
     def stage(self, manifest: dict, assets: dict):
         self.installs.mkdir(parents=True, exist_ok=True)
-        npm_package = self._npm_metadata(manifest["version"])
         stem = f"{manifest['version']}-patched-{manifest['runId']}-{manifest['runAttempt']}"
         target = self.installs / stem
         if target.exists():
-            raise DeployError("Candidate directory already exists; refusing to overwrite it")
+            try:
+                self._verify_owned_candidate(target, manifest)
+                return target, self._migration_diff(self.current_link.resolve(strict=True), target)
+            except DeployError:
+                self._remove_inactive_owned_candidate(target, manifest)
+        npm_package = self._npm_metadata(manifest["version"])
         staging = self.installs / f".staging-{stem}-{os.getpid()}"
         if staging.exists():
             raise DeployError("Staging directory already exists")
@@ -366,17 +372,98 @@ class Deployer:
             self._verify_migrations(staging, manifest)
             self._apply_local_hooks(staging)
             self._verify_local_hook_files(staging)
+            self._verify_registered_support_files()
+            candidate_files = {name: hash_file(staging.joinpath(*_safe_relative(name).parts))
+                               for name in manifest["files"]}
+            protected_files = self._protected_inventory(staging, manifest["packageMap"].values())
             marker = {"schemaVersion": 1, "repository": self.repository, "tag": manifest.get("tag"),
                       "version": manifest["version"], "runId": manifest["runId"],
-                      "runAttempt": manifest["runAttempt"], "patchedCommit": manifest["patchedCommit"]}
+                      "runAttempt": manifest["runAttempt"], "patchedCommit": manifest["patchedCommit"],
+                      "archiveSha256": manifest["archiveSha256"], "candidateFiles": candidate_files,
+                      "protectedRoots": sorted(manifest["packageMap"].values()),
+                      "protectedFiles": protected_files}
             (staging / ".canary-train-owned.json").write_text(
                 json.dumps(marker, sort_keys=True) + "\n", encoding="utf-8")
             os.replace(staging, target)
             self._prune_owned_candidates(target)
-            return target, self._migration_diff(self.current_link.resolve(), target)
+            return target, self._migration_diff(self.current_link.resolve(strict=True), target)
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
+
+    def _verify_registered_support_files(self):
+        hooks = self.c.get("hooks", [])
+        required = {"codex-auth", "communication-policy", "direct-path-policy", "review-tool-access", "tool-review-probe"}
+        if not isinstance(hooks, list) or {h.get("kind") for h in hooks if isinstance(h, dict)} != required:
+            raise DeployError("Local hook registry is incomplete")
+        for hook in hooks:
+            path, digest = Path(hook.get("path", "")), hook.get("sha256")
+            if not path.is_absolute() or not isinstance(digest, str) or not HEX_64.fullmatch(digest):
+                raise DeployError("Local hook registration is invalid")
+            if not path.is_file() or hash_file(path) != digest:
+                raise DeployError("A registered local hook changed")
+        support = self.c.get("supportFiles", {})
+        if not isinstance(support, dict) or not support:
+            raise DeployError("Support file registry is invalid")
+        for name, digest in support.items():
+            path = Path(name)
+            if not path.is_absolute() or not isinstance(digest, str) or not HEX_64.fullmatch(digest):
+                raise DeployError("Support file registry is invalid")
+            if not path.is_file() or hash_file(path) != digest:
+                raise DeployError("A registered service-owned support file changed")
+
+    def _verify_owned_candidate(self, candidate: Path, manifest: dict):
+        root = self.installs.resolve(strict=True)
+        if candidate.is_symlink() or not candidate.is_dir() or candidate.resolve().parent != root:
+            raise DeployError("Existing candidate path is unsafe")
+        marker_path = candidate / ".canary-train-owned.json"
+        if marker_path.is_symlink() or not marker_path.is_file():
+            raise DeployError("Existing candidate is not registered as train-owned")
+        marker = _json_bytes(marker_path.read_bytes(), "Candidate ownership receipt")
+        identity = (marker.get("schemaVersion") == 1 and marker.get("repository") == self.repository and
+                    marker.get("tag") == manifest.get("tag") and marker.get("version") == manifest["version"] and
+                    marker.get("runId") == manifest["runId"] and marker.get("runAttempt") == manifest["runAttempt"] and
+                    marker.get("patchedCommit") == manifest["patchedCommit"] and
+                    marker.get("archiveSha256") == manifest["archiveSha256"])
+        if not identity:
+            raise DeployError("Existing candidate receipt does not match the verified release")
+        expected = marker.get("candidateFiles")
+        if not isinstance(expected, dict) or set(expected) != set(manifest["files"]):
+            raise DeployError("Existing candidate file receipt is incomplete")
+        for name, digest in expected.items():
+            path = candidate.joinpath(*_safe_relative(name).parts)
+            if path.is_symlink() or not path.is_file() or not isinstance(digest, str) or hash_file(path) != digest:
+                raise DeployError("Existing candidate runtime files changed")
+        roots = marker.get("protectedRoots")
+        protected = marker.get("protectedFiles")
+        if roots != sorted(manifest["packageMap"].values()) or not isinstance(protected, dict):
+            raise DeployError("Existing candidate protected-file receipt is invalid")
+        if self._protected_inventory(candidate, roots) != protected:
+            raise DeployError("Existing candidate protected files changed")
+        if _file_inventory(candidate, MIGRATION_ROOT.rstrip("/")) != {
+                item["path"]: item["sha256"] for item in manifest["migrations"]}:
+            raise DeployError("Existing candidate migration inventory changed")
+        self._verify_registered_support_files()
+        self._verify_local_hook_files(candidate)
+
+    def _remove_inactive_owned_candidate(self, candidate: Path, manifest: dict):
+        root = self.installs.resolve(strict=True)
+        if candidate.is_symlink() or candidate.resolve().parent != root:
+            raise DeployError("Refusing to replace an unsafe existing candidate")
+        with contextlib.suppress(FileNotFoundError, OSError):
+            if self.current_link.resolve(strict=True) == candidate.resolve():
+                raise DeployError("Active candidate failed integrity verification; refusing to replace it")
+        marker_path = candidate / ".canary-train-owned.json"
+        if marker_path.is_symlink() or not marker_path.is_file():
+            raise DeployError("Existing candidate is unmarked; refusing to replace it")
+        marker = _json_bytes(marker_path.read_bytes(), "Candidate ownership receipt")
+        if not (marker.get("schemaVersion") == 1 and marker.get("repository") == self.repository and
+                marker.get("tag") == manifest.get("tag") and marker.get("version") == manifest["version"] and
+                marker.get("runId") == manifest["runId"] and marker.get("runAttempt") == manifest["runAttempt"] and
+                marker.get("patchedCommit") == manifest["patchedCommit"] and
+                marker.get("archiveSha256") == manifest["archiveSha256"]):
+            raise DeployError("Existing candidate receipt does not authorize replacement")
+        shutil.rmtree(candidate)
 
     def _prune_owned_candidates(self, newest: Path):
         """Retain active/history candidates plus three newest owned candidates."""
@@ -458,13 +545,24 @@ class Deployer:
             rel = _safe_relative(value)
             source = extracted.joinpath(*rel.parts)
             target = candidate.joinpath(*rel.parts)
-            if not source.is_dir() or source.is_symlink():
+            single_file = value in manifest["files"]
+            if source.is_symlink() or (single_file and not source.is_file()) or (not single_file and not source.is_dir()):
                 raise DeployError(f"Verified release root is missing: {value}")
             cursor = candidate
-            for part in rel.parts:
+            for part in rel.parts[:-1] if single_file else rel.parts:
                 cursor = cursor / part
                 if cursor.is_symlink():
                     raise DeployError("npm candidate contains a symlink inside a replacement path")
+            if single_file:
+                if target.is_symlink() or (target.exists() and not target.is_file()):
+                    raise DeployError("npm candidate file replacement path is unsafe")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temp = target.with_name(target.name + f".canary-{os.getpid()}.tmp")
+                if temp.exists() or temp.is_symlink():
+                    raise DeployError("Temporary package file path already exists")
+                shutil.copyfile(source, temp)
+                os.replace(temp, target)
+                continue
             if target.exists():
                 if not target.is_dir() or target.is_symlink():
                     raise DeployError("npm candidate replacement root is not a real directory")
@@ -473,6 +571,7 @@ class Deployer:
             shutil.copytree(source, target, symlinks=False)
 
     def _migration_diff(self, current: Path, candidate: Path):
+        current = current.resolve(strict=True)
         old = _file_inventory(current, MIGRATION_ROOT.rstrip("/"))
         new = _file_inventory(candidate, MIGRATION_ROOT.rstrip("/"))
         if not old or not new:
@@ -480,9 +579,10 @@ class Deployer:
         changed = sorted(name for name, digest in old.items() if new.get(name) != digest)
         removed = sorted(set(old) - set(new))
         added = sorted(set(new) - set(old))
-        if changed or removed:
-            raise DeployError("Candidate changes or removes an existing migration; deployment deferred")
-        return {"added": added, "changed": changed, "removed": removed, "inventory": new}
+        if changed or removed or added:
+            raise DeployError("Candidate database migration inventory is not identical; deployment deferred")
+        return {"added": added, "changed": changed, "removed": removed, "inventory": new,
+                "baselinePath": str(current), "baselineInventory": old}
 
     def _verify_migrations(self, candidate: Path, manifest: dict):
         actual = _file_inventory(candidate, MIGRATION_ROOT.rstrip("/"))
@@ -726,8 +826,16 @@ class Deployer:
         for root in roots:
             relative = _safe_relative(root).as_posix()
             base = payload.joinpath(*PurePosixPath(relative).parts)
-            if base.is_symlink() or not base.is_dir():
+            cursor = payload
+            for part in PurePosixPath(relative).parts:
+                cursor = cursor / part
+                if cursor.is_symlink():
+                    raise DeployError("Protected runtime root contains a symlink")
+            if not (base.is_dir() or base.is_file()):
                 raise DeployError("Protected runtime root is missing or unsafe")
+            if base.is_file():
+                inventory[relative] = hash_file(base)
+                continue
             for path in sorted(base.rglob("*")):
                 if path.is_symlink():
                     raise DeployError("Protected runtime inventory contains a symlink")
@@ -773,14 +881,28 @@ class Deployer:
         temp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         os.replace(temp, self.install_json)
 
+    @staticmethod
+    def _replace_link(temp_link: Path, link: Path):
+        try:
+            os.replace(temp_link, link)
+        except OSError:
+            # Windows may refuse replace-over-symlink even when both entries
+            # are links. Linux keeps the atomic replace path above.
+            if not link.is_symlink() or not temp_link.is_symlink():
+                raise
+            link.unlink()
+            os.replace(temp_link, link)
+
     def activate(self, candidate: Path, manifest: dict, migration_diff: dict, token: str):
         previous = self._read_install()
         old_target = self.current_link.resolve(strict=True)
         old_commit = self._build_commit(old_target)
         owner = None
         cutover_attempted = False
-        restart_invoked = False
+        restart_attempted = False
         try:
+            if migration_diff.get("added") or migration_diff.get("changed") or migration_diff.get("removed"):
+                raise DeployError("Candidate database migration inventory is not identical; activation refused")
             self.assert_no_work(token)
             owner = self.start_drain(token)
             self.verify_owned_drain(token, owner)
@@ -788,31 +910,37 @@ class Deployer:
             # before switching; a concurrent manual update must defer this run.
             if self.current_link.resolve(strict=True) != old_target:
                 raise DeployError("Active Paperclip payload changed during staging")
+            active_migrations = _file_inventory(old_target, MIGRATION_ROOT.rstrip("/"))
+            if (str(old_target) != migration_diff.get("baselinePath") or
+                    active_migrations != migration_diff.get("baselineInventory") or
+                    active_migrations != migration_diff.get("inventory")):
+                raise DeployError("Active migration baseline changed after candidate staging")
             self.verify_owned_drain(token, owner)
-            self._switch_current(candidate, manifest)
+            # The symlink and install receipt are two coordinated pieces of
+            # state; mark cutover before either is mutated so partial writes
+            # are always repaired on failure.
             cutover_attempted = True
-            restart_invoked = True
+            self._switch_current(candidate, manifest)
+            restart_attempted = True
             result = self.command(["sudo", "-n", "systemctl", "restart", self.c.get("serviceName", "paperclip")],
                                   capture_output=True, text=True, timeout=90)
             if result.returncode != 0:
                 raise DeployError("Paperclip service restart was rejected")
             if not self._wait_health(manifest["version"], manifest["patchedCommit"]):
-                if migration_diff["added"]:
-                    raise DeployError("Health check failed after new migrations; automatic rollback is unsafe")
-                self._restore_current(old_target, previous)
-                self.command(["sudo", "-n", "systemctl", "restart", self.c.get("serviceName", "paperclip")],
-                             check=True, capture_output=True, text=True, timeout=90)
-                if not self._wait_health(previous.get("version"), old_commit):
-                    raise DeployError("Previous Paperclip payload did not recover after rollback")
-                raise DeployError("Candidate health check failed; previous payload restored")
+                raise DeployError("Candidate health check failed")
             self._verify_active(manifest["version"])
             return {"version": manifest["version"], "payloadPath": str(candidate), "migrationDiff": migration_diff}
-        except Exception:
-            # Before a restart, switching back is safe and does not interrupt
-            # the still-running old process. After a restart, migration-aware
-            # handling above owns the rollback decision.
-            if cutover_attempted and not restart_invoked and self.current_link.resolve() == candidate:
-                self._restore_current(old_target, previous)
+        except Exception as original:
+            if cutover_attempted:
+                try:
+                    self._restore_current(old_target, previous)
+                    if restart_attempted:
+                        result = self.command(["sudo", "-n", "systemctl", "restart", self.c.get("serviceName", "paperclip")],
+                                              capture_output=True, text=True, timeout=90)
+                        if result.returncode != 0 or not self._wait_health(previous.get("version"), old_commit):
+                            raise DeployError("Previous Paperclip payload did not recover after rollback")
+                except Exception as rollback_error:
+                    raise DeployError("Cutover failed and rollback could not be verified; service state needs attention") from rollback_error
             raise
         finally:
             if owner:
@@ -825,7 +953,7 @@ class Deployer:
         if temp_link.exists() or temp_link.is_symlink():
             temp_link.unlink()
         temp_link.symlink_to(candidate.resolve())
-        os.replace(temp_link, self.current_link)
+        self._replace_link(temp_link, self.current_link)
         old = self._read_install()
         record = {"source": "npm", "version": old.get("version", "unknown"), "channel": old.get("channel", "canary"),
                   "payloadPath": old.get("payloadPath", str(self.current_link)), "installedAt": old.get("installedAt")}
@@ -844,7 +972,7 @@ class Deployer:
         if temp_link.exists() or temp_link.is_symlink():
             temp_link.unlink()
         temp_link.symlink_to(old_target)
-        os.replace(temp_link, self.current_link)
+        self._replace_link(temp_link, self.current_link)
         self._write_install_atomic(previous)
 
     @staticmethod
