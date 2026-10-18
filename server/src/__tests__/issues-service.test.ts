@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { sql } from "drizzle-orm";
 import {
@@ -13,6 +13,7 @@ import {
   environments,
   executionWorkspaces,
   goals,
+  heartbeatRunEvents,
   heartbeatRuns,
   instanceSettings,
   issueComments,
@@ -6505,6 +6506,7 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
@@ -6724,7 +6726,9 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
       permissions: {},
     });
     await db.update(heartbeatRuns).set({
-      contextSnapshot: { issueId: seeded.issueId, preservedContext: "keep-me" },
+      // The issue's execution/checkout pointers prove this run's association
+      // even when its lagging context snapshot has already lost issueId.
+      contextSnapshot: { preservedContext: "keep-me" },
     }).where(eq(heartbeatRuns.id, seeded.staleRunId));
 
     await svc.update(seeded.issueId, {
@@ -6734,14 +6738,23 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
     });
     const [revokedRun] = await db.select().from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, seeded.staleRunId));
-    expect(revokedRun!.contextSnapshot).toMatchObject({
+    expect(revokedRun!.contextSnapshot).toMatchObject({ preservedContext: "keep-me" });
+    const [revocationEvent] = await db.select().from(heartbeatRunEvents).where(and(
+      eq(heartbeatRunEvents.companyId, original!.companyId),
+      eq(heartbeatRunEvents.runId, seeded.staleRunId),
+      eq(heartbeatRunEvents.agentId, seeded.assigneeAgentId),
+      eq(heartbeatRunEvents.eventType, "issue.legacy_run_ownership_revoked"),
+    ));
+    expect(revocationEvent?.payload).toMatchObject({
       issueId: seeded.issueId,
-      preservedContext: "keep-me",
-      legacyIssueOwnershipRevocation: {
-        issueId: seeded.issueId,
-        ownerAgentId: seeded.assigneeAgentId,
-      },
+      ownerAgentId: seeded.assigneeAgentId,
     });
+
+    // A delayed writer can replace the entire context with its stale in-memory
+    // copy. The event is independent of that snapshot and remains authoritative.
+    await db.update(heartbeatRuns).set({
+      contextSnapshot: { issueId: seeded.issueId, preservedContext: "stale-snapshot" },
+    }).where(eq(heartbeatRuns.id, seeded.staleRunId));
 
     // Returning the assignment to the original agent must not restore a run
     // whose write authority was revoked by the earlier board handoff.

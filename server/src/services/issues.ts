@@ -15,8 +15,9 @@ import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
 import {
   assertLegacyRunTaskOwnership,
-  revokeLegacyRunIssueOwnership,
+  LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT,
 } from "../legacy-run-task-ownership.js";
+import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
 import { documentService } from "./documents.js";
@@ -237,11 +238,10 @@ async function revokeLegacyRunsOnIssueHandoff(
     issue.assigneeUserId !== input.nextAssigneeUserId;
   if (!assignmentChanged || !issue.assigneeAgentId) return;
 
-  const runIds = new Set(
-    [issue.executionRunId, issue.checkoutRunId].filter(
-      (runId): runId is string => Boolean(runId),
-    ),
+  const issueBoundRunIds = new Set(
+    [issue.executionRunId, issue.checkoutRunId].filter((runId): runId is string => Boolean(runId)),
   );
+  const runIds = new Set(issueBoundRunIds);
   if (input.actorAgentId === issue.assigneeAgentId && input.actorRunId) {
     runIds.add(input.actorRunId);
   }
@@ -267,21 +267,24 @@ async function revokeLegacyRunsOnIssueHandoff(
     if (
       run.runtimeMode !== "legacy" ||
       run.agentId !== issue.assigneeAgentId ||
-      !context || typeof context !== "object" || Array.isArray(context) ||
-      (context as Record<string, unknown>).issueId !== issue.id
+      (!issueBoundRunIds.has(run.id) && (
+        !context || typeof context !== "object" || Array.isArray(context) ||
+        (context as Record<string, unknown>).issueId !== issue.id
+      ))
     ) continue;
-    await tx
-      .update(heartbeatRuns)
-      .set({
-        contextSnapshot: revokeLegacyRunIssueOwnership(
-          context as Record<string, unknown>,
-          { issueId: issue.id, ownerAgentId: run.agentId },
-        ),
-      })
-      .where(and(
-        eq(heartbeatRuns.id, run.id),
-        eq(heartbeatRuns.companyId, issue.companyId),
-      ));
+    await appendHeartbeatRunEvent(tx as Db, {
+      companyId: issue.companyId,
+      runId: run.id,
+      agentId: run.agentId,
+      eventType: LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT,
+      stream: "system",
+      level: "info",
+      message: "Issue ownership was transferred; this run can no longer change the issue.",
+      payload: {
+        issueId: issue.id,
+        ownerAgentId: run.agentId,
+      },
+    });
   }
 }
 
@@ -11227,7 +11230,7 @@ export function issueService(db: Db) {
           const actorRun = await assertAgentRunWriteAllowed(tx, receiptExisting.companyId, {
             agentId: actorAgentId, runId: actorRunId, stopId: actorRunStopId,
           });
-          assertLegacyRunTaskOwnership(actorRun, receiptExisting);
+          await assertLegacyRunTaskOwnership(tx, actorRun, receiptExisting);
           if (actorRunHandoffId && (
             !actorRun || actorRunHandoffId !== actorRunId ||
             actorRun.runtimeMode !== "legacy" || actorRun.companyId !== receiptExisting.companyId ||

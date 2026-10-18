@@ -1,81 +1,45 @@
-import { describe, expect, it } from "vitest";
-import {
-  assertLegacyRunTaskOwnership,
-  revokeLegacyRunIssueOwnership,
-} from "./legacy-run-task-ownership.js";
+import { describe, expect, it, vi } from "vitest";
+import { assertLegacyRunTaskOwnership, LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT } from "./legacy-run-task-ownership.js";
 
 describe("legacy run task ownership", () => {
-  const run = {
-    companyId: "company-1",
-    runtimeMode: "legacy",
-    agentId: "implementer",
-    contextSnapshot: { issueId: "issue-1" },
-  };
+  const run = { id: "run-1", companyId: "company-1", runtimeMode: "legacy", agentId: "implementer" };
+  const issue = { id: "issue-1", companyId: "company-1", assigneeAgentId: "implementer", assigneeUserId: null };
 
-  it("allows the current owner to finish its own issue update", () => {
-    expect(() => assertLegacyRunTaskOwnership(run, {
-      id: "issue-1", companyId: "company-1", assigneeAgentId: "implementer", assigneeUserId: null,
-    })).not.toThrow();
+  function dbWithEvent(event: unknown = null) {
+    const limit = vi.fn().mockResolvedValue(event ? [event] : []);
+    const where = vi.fn().mockReturnValue({ limit });
+    const from = vi.fn().mockReturnValue({ where });
+    const select = vi.fn().mockReturnValue({ from });
+    return { db: { select } as never, select, from, where, limit };
+  }
+
+  it("allows a run with no revocation event", async () => {
+    const query = dbWithEvent();
+    await expect(assertLegacyRunTaskOwnership(query.db, run, issue)).resolves.toBeUndefined();
+    expect(query.select).toHaveBeenCalledOnce();
   });
 
-  it("does not infer handoff from assignment mismatch without durable revocation evidence", () => {
-    expect(() => assertLegacyRunTaskOwnership(run, {
-      id: "issue-1", companyId: "company-1", assigneeAgentId: "reviewer", assigneeUserId: null,
-    })).not.toThrow();
+  it("blocks when the run's revocation query finds handoff evidence", async () => {
+    const query = dbWithEvent({ id: 42 });
+    await expect(assertLegacyRunTaskOwnership(query.db, run, issue)).rejects.toMatchObject({
+      status: 403,
+      details: { code: "issue_handed_off", issueId: issue.id },
+    });
   });
 
-  it("keeps a specifically revoked run blocked even after the original owner is reassigned", () => {
-    const revokedRun = {
-      ...run,
-      contextSnapshot: revokeLegacyRunIssueOwnership(run.contextSnapshot, {
-        issueId: "issue-1",
-        ownerAgentId: "implementer",
-      }),
-    };
-    expect(revokedRun.contextSnapshot).toMatchObject({ issueId: "issue-1" });
-    expect(() => assertLegacyRunTaskOwnership(revokedRun, {
-      id: "issue-1", companyId: "company-1", assigneeAgentId: "implementer", assigneeUserId: null,
-    })).toThrowError("This task has been handed to another owner");
+  it("does not check native, foreign-company, or unbound runs", async () => {
+    for (const candidate of [
+      { ...run, runtimeMode: "native" },
+      { ...run, companyId: "company-2" },
+      { ...run, agentId: null },
+    ]) {
+      const query = dbWithEvent({ id: 42 });
+      await expect(assertLegacyRunTaskOwnership(query.db, candidate, issue)).resolves.toBeUndefined();
+      expect(query.select).not.toHaveBeenCalled();
+    }
   });
 
-  it("does not apply a revocation marker to a different issue or run owner", () => {
-    const revokedRun = {
-      ...run,
-      contextSnapshot: revokeLegacyRunIssueOwnership(run.contextSnapshot, {
-        issueId: "issue-1",
-        ownerAgentId: "implementer",
-      }),
-    };
-    expect(() => assertLegacyRunTaskOwnership(revokedRun, {
-      id: "issue-2", companyId: "company-1", assigneeAgentId: "reviewer", assigneeUserId: null,
-    })).not.toThrow();
-    expect(() => assertLegacyRunTaskOwnership({
-      ...revokedRun,
-      agentId: "reviewer",
-    }, {
-      id: "issue-1", companyId: "company-1", assigneeAgentId: "reviewer", assigneeUserId: null,
-    })).not.toThrow();
-  });
-
-  it("keeps human handoffs denied and unrelated issues outside this ownership check", () => {
-    const revokedRun = {
-      ...run,
-      contextSnapshot: revokeLegacyRunIssueOwnership(run.contextSnapshot, {
-        issueId: "issue-1",
-        ownerAgentId: "implementer",
-      }),
-    };
-    expect(() => assertLegacyRunTaskOwnership(revokedRun, {
-      id: "issue-1", companyId: "company-1", assigneeAgentId: null, assigneeUserId: "user-1",
-    })).toThrow();
-    expect(() => assertLegacyRunTaskOwnership(revokedRun, {
-      id: "issue-2", companyId: "company-1", assigneeAgentId: "reviewer", assigneeUserId: null,
-    })).not.toThrow();
-  });
-
-  it("does not infer legacy run ownership for native runs", () => {
-    expect(() => assertLegacyRunTaskOwnership({ ...run, runtimeMode: "native" }, {
-      id: "issue-1", companyId: "company-1", assigneeAgentId: "reviewer", assigneeUserId: null,
-    })).not.toThrow();
+  it("records a stable event contract for the append-only revocation evidence", () => {
+    expect(LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT).toBe("issue.legacy_run_ownership_revoked");
   });
 });
