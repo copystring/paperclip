@@ -52,7 +52,7 @@ The registered patch set includes the original recovery/UI fixes, the installed 
 
 The `review-tool-access` instance registration requires `sourceReplacement` with the exact `repository`, `number` and `head` of the reviewed source-series PR. Its historical script and bundle remain hash-checked but are never executed on the new runtime. The verified release must prove that source patch was applied or is already part of the published source. This proof is checked again on reuse and before cutover. Private Codex authentication and instruction-policy hooks, plus the independent tool-error probe, remain required.
 
-The controller workflow runs hourly; identical green builds are skipped. PR heads remain pinned until deliberately reviewed. A patch is retired automatically when the exact published Canary includes its merged commit or already contains the verified patch. A changed unreviewed PR head or unresolved source conflict blocks publication.
+The controller workflow runs once daily at 03:23 UTC; identical green builds are skipped. The instance timer template checks once daily at 08:30 in the server's local timezone, with up to 40 seconds of random delay. It catches up once after downtime. Manual checks remain available. Install the timer template only after the first accepted activation; retain the existing service and its configuration. PR heads remain pinned until deliberately reviewed. A patch is retired automatically when the exact published Canary includes its merged commit or already contains the verified patch. A changed unreviewed PR head or unresolved source conflict blocks publication.
 
 ## Local checks
 
