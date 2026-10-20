@@ -1,0 +1,39 @@
+name: Focused review recovery regression
+on:
+  push:
+    branches: [ci/review-recovery-attempt]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @paperclipai/plugin-sdk... build
+      - name: Prove the old implementation fails the regression
+        shell: bash
+        run: |
+          cp server/src/services/recovery/service.ts "$RUNNER_TEMP/fixed-service.ts"
+          git show e8f9be0d9^:server/src/services/recovery/service.ts > server/src/services/recovery/service.ts
+          set +e
+          pnpm exec vitest run --project @paperclipai/server server/src/__tests__/heartbeat-process-recovery.test.ts -t 'scopes cancelled reviewer recovery' > "$RUNNER_TEMP/red.log" 2>&1
+          result=$?
+          set -e
+          cp "$RUNNER_TEMP/fixed-service.ts" server/src/services/recovery/service.ts
+          cat "$RUNNER_TEMP/red.log"
+          test "$result" -ne 0
+          grep -q 'scopes cancelled reviewer recovery' "$RUNNER_TEMP/red.log"
+          grep -q 'AssertionError' "$RUNNER_TEMP/red.log"
+      - name: Verify current-round failure and safe recovery
+        run: pnpm exec vitest run --project @paperclipai/server server/src/__tests__/heartbeat-process-recovery.test.ts -t 'scopes cancelled reviewer recovery|pending execution-review participant|failed execution-review recovery'
