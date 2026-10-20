@@ -746,12 +746,15 @@ class ArtifactTests(unittest.TestCase):
                 build.package(workspace, output)
 
     def test_optional_skills_do_not_make_other_runtime_outputs_optional(self):
-        for relative in ("skills/base.md", "packages/adapters/cursor-local/dist/index.js"):
+        for relative in ("skills/base.md", "packages/adapters/cursor-local/dist/index.js",
+                         "packages/adapters/hermes/skills/bridge/SKILL.md"):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temp:
                 workspace, output = self.make_checkout(Path(temp))
                 target = workspace / relative
                 target.unlink()
                 target.parent.rmdir()
+                if relative.endswith("bridge/SKILL.md"):
+                    target.parent.parent.rmdir()
                 manifest = json.loads((workspace / "scripts/release-package-manifest.json").read_text())
                 with self.assertRaisesRegex(build.TrainError, "declared npm runtime output"):
                     build.runtime_directories(workspace, manifest)

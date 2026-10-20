@@ -39,6 +39,9 @@ NATIVE_RUNNER_TEST_MARKERS = (
     "existsSync(defaultCapabilityRunnerdBinary())", "existsSync(fakeCodexAppServer)",
 )
 RELEASE_SKILLS_PACKAGE_DIRS = {"server", "packages/adapters/claude-local", "packages/adapters/codex-local"}
+OPTIONAL_EMPTY_SKILLS_PACKAGE_DIRS = {
+    "packages/adapters/cursor-local", "packages/adapters/gemini-local", "packages/adapters/opencode-local",
+}
 DEPENDENCY_FILES = {
     "pnpm-lock.yaml", "pnpm-workspace.yaml", "package-lock.json",
     "npm-shrinkwrap.json", "yarn.lock", "bun.lock", "bun.lockb", ".npmrc",
@@ -1054,7 +1057,8 @@ def runtime_directories(workspace: Path, release_manifest: list[dict[str, Any]])
                 # packages. Read it directly at the archive boundary instead
                 # of creating untracked publish staging files in the source.
                 target = workspace / "skills"
-            elif entry == "skills" and not target.exists() and not target.is_symlink():
+            elif (entry == "skills" and relative in OPTIONAL_EMPTY_SKILLS_PACKAGE_DIRS
+                  and not target.exists() and not target.is_symlink()):
                 # npm's files list permits absent paths. Other adapters declare
                 # skills but release.sh does not stage the canonical tree for
                 # them. Preserve their published layout; do not synthesize skills
