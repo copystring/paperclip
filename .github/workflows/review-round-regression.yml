@@ -39,3 +39,6 @@ jobs:
         run: pnpm exec vitest run --project @paperclipai/server server/src/__tests__/heartbeat-process-recovery.test.ts -t 'scopes cancelled reviewer recovery|pending execution-review participant|failed execution-review recovery'
 
 
+
+      - name: Verify quota punctuation and recovery notices
+        run: pnpm exec vitest run --project @paperclipai/server server/src/services/recovery/provider-failure-classification.test.ts server/src/services/recovery/stranded-notice.test.ts
