@@ -569,7 +569,7 @@ class RunnerArtifactAssemblyTests(unittest.TestCase):
 
 
 class ArtifactTests(unittest.TestCase):
-    def make_checkout(self, root: Path) -> tuple[Path, Path]:
+    def make_checkout(self, root: Path, cursor_skill: bool = False) -> tuple[Path, Path]:
         workspace = root / "source"
         workspace.mkdir()
         subprocess.run(["git", "init", "-b", build.PATCH_BRANCH], cwd=workspace, check=True, capture_output=True)
@@ -637,6 +637,8 @@ class ArtifactTests(unittest.TestCase):
                 "name": f"@paperclipai/adapter-{adapter}-local", "files": ["dist", "skills"],
             }).encode()
             output_map[f"packages/adapters/{adapter}-local/dist/index.js"] = adapter.encode()
+        if cursor_skill:
+            output_map["packages/adapters/cursor-local/skills/agent/SKILL.md"] = b"upstream cursor skill"
         for relative, data in output_map.items():
             path = workspace / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -758,6 +760,17 @@ class ArtifactTests(unittest.TestCase):
                 manifest = json.loads((workspace / "scripts/release-package-manifest.json").read_text())
                 with self.assertRaisesRegex(build.TrainError, "declared npm runtime output"):
                     build.runtime_directories(workspace, manifest)
+
+    def test_optional_layout_refuses_patch_removing_future_canary_skills(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace, output = self.make_checkout(Path(temp), cursor_skill=True)
+            target = workspace / "packages/adapters/cursor-local/skills/agent/SKILL.md"
+            target.unlink()
+            target.parent.rmdir()
+            target.parent.parent.rmdir()
+            manifest = json.loads((workspace / "scripts/release-package-manifest.json").read_text())
+            with self.assertRaisesRegex(build.TrainError, "skills were removed from published source"):
+                build.runtime_directories(workspace, manifest)
 
 
 if __name__ == "__main__":
