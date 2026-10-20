@@ -1033,7 +1033,19 @@ class Deployer:
                 raise DeployError("Queued or running work appeared before activation")
 
     def release_drain(self, token: str, owner: str):
-        self.api_json("/instance/task-drain?ownerId=" + urllib.parse.quote(owner, safe=""), "DELETE", token=token)
+        try:
+            self.api_json("/instance/task-drain?ownerId=" + urllib.parse.quote(owner, safe=""), "DELETE", token=token)
+        except DeployError as exc:
+            # The lease is process-local. A successful restart can remove it
+            # before cleanup, so the old owner receives a conflict. Only an
+            # explicit unowned, inactive readback proves cleanup is complete.
+            cause = exc.__cause__
+            if not isinstance(cause, urllib.error.HTTPError) or cause.code != 409:
+                raise
+            status = self.api_json("/instance/task-drain", token=token)
+            if isinstance(status, dict) and status.get("draining") is False and status.get("ownerId") is None:
+                return
+            raise
 
     def _read_install(self):
         try:
