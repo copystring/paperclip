@@ -10,6 +10,15 @@ WORKFLOW = ROOT / ".github/workflows/canary-patched.yml"
 
 
 class DependencyCacheWorkflowTests(unittest.TestCase):
+    def test_daily_build_and_instance_timer_have_no_interval_trigger(self):
+        self.assertEqual(self.text.count("- cron:"), 1)
+        self.assertIn("- cron: '23 3 * * *'", self.text)
+        timer = (ROOT / "ops/canary-train/paperclip-canary-train.timer").read_text()
+        triggers = [line for line in timer.splitlines() if line.startswith("On")]
+        self.assertEqual(triggers, ["OnCalendar=*-*-* 08:30:00"])
+        self.assertIn("Persistent=true", timer)
+        self.assertIn("Unit=paperclip-canary-train.service", timer)
+
     @classmethod
     def setUpClass(cls):
         cls.text = WORKFLOW.read_text(encoding="utf-8")
