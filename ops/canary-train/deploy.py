@@ -961,9 +961,24 @@ class Deployer:
 
     def start_drain(self, token: str):
         drain = self.api_json("/instance/task-drain", "POST", {"purpose": "idle", "ttlMs": 300000}, token)
-        if not isinstance(drain, dict) or drain.get("draining") is not True or not isinstance(drain.get("ownerId"), str):
+        owner = drain.get("ownerId") if isinstance(drain, dict) else None
+        if not isinstance(owner, str) or not owner.strip():
             raise DeployError("Paperclip did not confirm ownership of the idle drain")
-        return drain["ownerId"]
+        try:
+            status = self.api_json("/instance/task-drain", token=token)
+            if (not isinstance(status, dict) or status.get("ownerId") != owner or
+                    status.get("draining") is not True):
+                raise DeployError("Paperclip did not confirm the acquired idle drain")
+            if status.get("activeRuns") != 0 or status.get("pendingWakes") != 0:
+                raise DeployError("Work appeared after the idle drain started")
+            return owner
+        except Exception:
+            # The POST may have acquired the lock even when its readback is
+            # malformed or belongs to a different owner. Release only the
+            # exact owner returned by our POST, and preserve the readback error.
+            with contextlib.suppress(Exception):
+                self.release_drain(token, owner)
+            raise
 
     def verify_owned_drain(self, token: str, owner: str):
         status = self.api_json("/instance/task-drain", token=token)
