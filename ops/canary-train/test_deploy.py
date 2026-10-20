@@ -494,6 +494,50 @@ class CandidateTests(unittest.TestCase):
                 with self.assertRaisesRegex(deploy.DeployError, "missing its merge commit"):
                     deployer(root)._apply_review_hook(root, hook, item)
 
+    def test_required_source_patch_rejects_release_without_exact_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hook, _ = self.review_replacement_hook(root)
+            required = {"repository": "copystring/paperclip", "number": 315, "head": "b" * 40}
+            d = deployer(root, requiredSourcePatches=[required])
+            item = manifest()
+            item["patches"].append({"repository": "copystring/paperclip", "number": 314,
+                                    "head": "a" * 40, "state": "applied"})
+            with self.assertRaisesRegex(deploy.DeployError, "does not contain"):
+                d._apply_review_hook(root, hook, item)
+
+    def test_required_source_patch_accepts_exact_applied_and_already_present_proofs(self):
+        required = {"repository": "copystring/paperclip", "number": 315, "head": "b" * 40}
+        for state in ("applied", "already_present"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                hook, _ = self.review_replacement_hook(root)
+                item = manifest()
+                item["patches"].append({"repository": "copystring/paperclip", "number": 314,
+                                        "head": "a" * 40, "state": "applied"})
+                item["patches"].append({**required, "state": state})
+                deployer(root, requiredSourcePatches=[required])._apply_review_hook(root, hook, item)
+
+    def test_required_source_patch_rejects_malformed_or_changed_requirement(self):
+        cases = (
+            ({"repository": "copystring/paperclip", "number": 315, "head": "not-a-commit"},
+             "registration is invalid"),
+            ({"repository": "copystring/paperclip", "number": 315, "head": "b" * 40, "extra": True},
+             "registration is invalid"),
+            ({"repository": "copystring/paperclip", "number": 315, "head": "b" * 40},
+             "does not contain"),
+        )
+        for requirement, message in cases:
+            with self.subTest(requirement=requirement), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                hook, _ = self.review_replacement_hook(root)
+                item = manifest()
+                item["patches"].append({"repository": "copystring/paperclip", "number": 314,
+                                        "head": "a" * 40, "state": "applied"})
+                d = deployer(root, requiredSourcePatches=[requirement])
+                with self.assertRaisesRegex(deploy.DeployError, message):
+                    d._apply_review_hook(root, hook, item)
+
     def test_stage_failure_leaves_active_install_and_link_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

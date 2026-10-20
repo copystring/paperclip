@@ -80,6 +80,11 @@
       "number": 11,
       "repository": "copystring/paperclip",
       "head": "1b88cd4a939d1cac00941029b2646c891aba4e65"
+    },
+    {
+      "number": 17018,
+      "repository": "paperclipai/paperclip",
+      "head": "e8f9be0d99078ee4f56fc8e34bc98090a247111e"
     }
   ]
 }
