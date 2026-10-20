@@ -15,7 +15,7 @@ class DependencyCacheWorkflowTests(unittest.TestCase):
         self.assertIn("- cron: '23 3 * * *'", self.text)
         timer = (ROOT / "ops/canary-train/paperclip-canary-train.timer").read_text()
         triggers = [line for line in timer.splitlines() if line.startswith("On")]
-        self.assertEqual(triggers, ["OnCalendar=*-*-* 08:30:00"])
+        self.assertEqual(triggers, ["OnCalendar=*-*-* 08:30:00 UTC"])
         self.assertIn("Persistent=true", timer)
         self.assertIn("Unit=paperclip-canary-train.service", timer)
 

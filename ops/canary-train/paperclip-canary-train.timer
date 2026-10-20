@@ -2,7 +2,7 @@
 Description=Check for a verified patched Paperclip Canary once daily
 
 [Timer]
-OnCalendar=*-*-* 08:30:00
+OnCalendar=*-*-* 08:30:00 UTC
 RandomizedDelaySec=40
 Persistent=true
 Unit=paperclip-canary-train.service
