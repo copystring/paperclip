@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 3
+          fetch-depth: 10
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.4
@@ -37,4 +37,5 @@ jobs:
           grep -q 'AssertionError' "$RUNNER_TEMP/red.log"
       - name: Verify current-round failure and safe recovery
         run: pnpm exec vitest run --project @paperclipai/server server/src/__tests__/heartbeat-process-recovery.test.ts -t 'scopes cancelled reviewer recovery|pending execution-review participant|failed execution-review recovery'
+
 
