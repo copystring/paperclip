@@ -673,6 +673,43 @@ class DrainTests(unittest.TestCase):
                 deployer(Path(tmp), http=http).start_drain("token")
             self.assertEqual(http.calls, [("POST", api + "/instance/task-drain")])
 
+    def test_release_accepts_conflict_only_after_restart_cleared_the_lease(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = deployer(Path(tmp))
+            conflict = deploy.DeployError("lease conflict")
+            conflict.__cause__ = deploy.urllib.error.HTTPError("http://localhost/api/instance/task-drain", 409, "Conflict", {}, None)
+            with patch.object(d, "api_json", side_effect=[conflict, {
+                "draining": False, "activeRuns": 4, "pendingWakes": 0,
+            }]) as api:
+                d.release_drain("token", "old-owner")
+                self.assertEqual(api.call_count, 2)
+                self.assertIn("ownerId=old-owner", api.call_args_list[0].args[0])
+                self.assertEqual(api.call_args_list[1].args[0], "/instance/task-drain")
+
+    def test_release_conflict_does_not_clear_another_or_unverifiable_hold(self):
+        for status in [{"draining": True, "ownerId": "different-owner"},
+                       {"draining": True}, {"draining": False, "ownerId": "different-owner"}, {}, None]:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                d = deployer(Path(tmp))
+                conflict = deploy.DeployError("lease conflict")
+                conflict.__cause__ = deploy.urllib.error.HTTPError("http://localhost/api/instance/task-drain", 409, "Conflict", {}, None)
+                with patch.object(d, "api_json", side_effect=[conflict, status]) as api:
+                    with self.assertRaises(deploy.DeployError) as caught:
+                        d.release_drain("token", "old-owner")
+                    self.assertIs(caught.exception, conflict)
+                    self.assertEqual(api.call_count, 2)
+
+    def test_release_does_not_suppress_other_http_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = deployer(Path(tmp))
+            failure = deploy.DeployError("service unavailable")
+            failure.__cause__ = deploy.urllib.error.HTTPError("http://localhost/api/instance/task-drain", 503, "Unavailable", {}, None)
+            with patch.object(d, "api_json", side_effect=failure) as api:
+                with self.assertRaises(deploy.DeployError) as caught:
+                    d.release_drain("token", "old-owner")
+                self.assertIs(caught.exception, failure)
+                self.assertEqual(api.call_count, 1)
+
     def test_pending_run_blocks_before_drain(self):
         with tempfile.TemporaryDirectory() as tmp:
             api = "http://localhost:3100/api"
