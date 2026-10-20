@@ -36,6 +36,10 @@ Each successful test lane emits a receipt bound to its exact source/patch commit
 
 The three packages that receive canonical repository skills in the upstream release script read that same tree directly during packaging. The controller does not create publish staging directories in the prepared source. Both tracked source changes and unexpected untracked files still block the build and package checks.
 
+Cursor, Gemini and OpenCode list an absent `skills` directory in their npm `files` allowlist. npm omits those optional paths, and the controller permits this only for these three known-empty layouts. Other adapter-specific skills remain required, so deleting the last skill cannot leave stale npm content in the candidate. The canonical skills required by the release script and all declared compiled runtime outputs remain required.
+
+The empty-layout check also reads the exact published source commit. If a future Canary has skills for one of those three adapters, a patch that removes them stops the train. Directory names alone cannot authorize omitting previously shipped skills.
+
 The manifest records the official npm version and tarball digests, exact upstream and patched commits/trees, pinned PR heads and outcomes, package-map inventory, archive digest, compiled migration digests, and quality-gate results. The workflow may add its run ID, attempt, controller commit, and workflow reference before publication. Production credentials and private settings do not belong in the artifact.
 
 ## Instance consumer

@@ -39,6 +39,9 @@ NATIVE_RUNNER_TEST_MARKERS = (
     "existsSync(defaultCapabilityRunnerdBinary())", "existsSync(fakeCodexAppServer)",
 )
 RELEASE_SKILLS_PACKAGE_DIRS = {"server", "packages/adapters/claude-local", "packages/adapters/codex-local"}
+OPTIONAL_EMPTY_SKILLS_PACKAGE_DIRS = {
+    "packages/adapters/cursor-local", "packages/adapters/gemini-local", "packages/adapters/opencode-local",
+}
 DEPENDENCY_FILES = {
     "pnpm-lock.yaml", "pnpm-workspace.yaml", "package-lock.json",
     "npm-shrinkwrap.json", "yarn.lock", "bun.lock", "bun.lockb", ".npmrc",
@@ -1054,6 +1057,21 @@ def runtime_directories(workspace: Path, release_manifest: list[dict[str, Any]])
                 # packages. Read it directly at the archive boundary instead
                 # of creating untracked publish staging files in the source.
                 target = workspace / "skills"
+            elif (entry == "skills" and relative in OPTIONAL_EMPTY_SKILLS_PACKAGE_DIRS
+                  and not target.exists() and not target.is_symlink()):
+                # The layout exception must not hide a patched deletion from
+                # a future Canary which actually ships adapter-specific skills.
+                marker = json.loads((workspace / ".canary-train.json").read_text(encoding="utf-8"))
+                original_commit = marker.get("sourceCommit")
+                if not isinstance(original_commit, str) or not HEX40.fullmatch(original_commit):
+                    raise TrainError("optional skills require a pinned published source commit")
+                if git(workspace, "ls-tree", original_commit, "--", f"{relative}/skills").stdout:
+                    raise TrainError(f"{name} declared skills were removed from published source")
+                # npm's files list permits absent paths. Other adapters declare
+                # skills but release.sh does not stage the canonical tree for
+                # them. Preserve their published layout; do not synthesize skills
+                # or relax the required compiled runtime output checks.
+                continue
             if target.is_dir() or target.is_file():
                 result[f"{name}#{path.as_posix()}"] = target
             else:
