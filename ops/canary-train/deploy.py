@@ -881,6 +881,23 @@ class Deployer:
         # but its source patch in the verified release is the sole replacement.
         self._verify_review_bundle_registration(hook)
         self._verify_source_replacement(hook, manifest)
+        self._verify_required_source_patches(manifest)
+
+    def _verify_required_source_patches(self, manifest: dict):
+        if "requiredSourcePatches" not in self.c:
+            return
+        requirements = self.c["requiredSourcePatches"]
+        if not isinstance(requirements, list):
+            raise DeployError("Required source patch registration must be a list")
+        seen = set()
+        for requirement in requirements:
+            if not isinstance(requirement, dict):
+                raise DeployError("Required source patch registration is invalid")
+            self._verify_source_replacement({"sourceReplacement": requirement}, manifest)
+            identity = (requirement.get("repository"), requirement.get("number"), requirement.get("head"))
+            if identity in seen:
+                raise DeployError("Required source patch registration contains a duplicate pin")
+            seen.add(identity)
 
     def _verify_local_hook_files(self, candidate: Path, manifest: dict):
         hooks = self.c.get("hooks", [])
@@ -889,6 +906,7 @@ class Deployer:
             raise DeployError("Review-tool source replacement hook is missing or duplicated")
         self._verify_review_bundle_registration(review_hooks[0])
         self._verify_source_replacement(review_hooks[0], manifest)
+        self._verify_required_source_patches(manifest)
         # Hook applications may only modify their explicitly reviewed targets.
         for role in ("default", "ceo"):
             path = candidate / "node_modules/@paperclipai/server/dist/onboarding-assets" / role / "AGENTS.md"
