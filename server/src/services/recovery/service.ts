@@ -923,6 +923,26 @@ function isRepeatedProductiveContinuationRecovery(
   );
 }
 
+/**
+ * SQL boundary for deciding whether a heartbeat run belongs to the pending
+ * execution-review attempt referenced by an issue's lastDecisionId. Keeping
+ * the comparison in SQL preserves PostgreSQL timestamp precision; a missing
+ * or cross-scope decision produces NULL and therefore fails the predicate.
+ */
+export function executionReviewAttemptBoundaryCondition(
+  companyId: string,
+  issueId: string,
+  decisionId: string,
+) {
+  return sql`${heartbeatRuns.createdAt} > (
+    select created_at
+    from issue_execution_decisions
+    where company_id = ${companyId}
+      and issue_id = ${issueId}
+      and id = ${decisionId}
+  )`;
+}
+
 export function recoveryService(
   db: Db,
   deps: {
@@ -1022,16 +1042,7 @@ export function recoveryService(
           sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
           ...(reviewAttempt
             ? [
-                gt(
-                  heartbeatRuns.createdAt,
-                  sql<Date>`(
-                    select created_at
-                    from issue_execution_decisions
-                    where company_id = ${companyId}
-                      and issue_id = ${issueId}
-                      and id = ${reviewAttempt.decisionId}
-                  )`,
-                ),
+                executionReviewAttemptBoundaryCondition(companyId, issueId, reviewAttempt.decisionId),
               ]
             : []),
         ),

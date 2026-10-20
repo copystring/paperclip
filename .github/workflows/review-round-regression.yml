@@ -35,6 +35,21 @@ jobs:
           test "$result" -ne 0
           grep -q 'scopes cancelled reviewer recovery' "$RUNNER_TEMP/red.log"
           grep -q 'AssertionError' "$RUNNER_TEMP/red.log"
+      - name: Prove delayed old release fails before the fix
+        shell: bash
+        run: |
+          files=(server/src/modules/wake-queue/application/ports.ts server/src/modules/wake-queue/application/use-cases.ts server/src/modules/wake-queue/adapters/postgres.ts server/src/services/recovery/service.ts)
+          for file in "${files[@]}"; do git show bbb160a48:"$file" > "$file"; done
+          set +e
+          pnpm exec vitest run --project @paperclipai/server server/src/modules/wake-queue/adapters/postgres.test.ts -t 'classifies review recovery against the referenced decision boundary' > "$RUNNER_TEMP/release-red.log" 2>&1
+          result=$?
+          set -e
+          git checkout HEAD -- "${files[@]}"
+          cat "$RUNNER_TEMP/release-red.log"
+          test "$result" -ne 0
+          grep -q 'AssertionError' "$RUNNER_TEMP/release-red.log"
+      - name: Verify locked release and application controls
+        run: pnpm exec vitest run --project @paperclipai/server server/src/modules/wake-queue/adapters/postgres.test.ts server/src/modules/wake-queue/application/use-cases.test.ts
       - name: Verify current-round failure and safe recovery
         run: pnpm exec vitest run --project @paperclipai/server server/src/__tests__/heartbeat-process-recovery.test.ts -t 'scopes cancelled reviewer recovery|pending execution-review participant|failed execution-review recovery'
 
