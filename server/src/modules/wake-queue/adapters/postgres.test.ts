@@ -594,12 +594,20 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
         companyId,
         agentId,
         status: "cancelled",
+        errorCode: "issue_reassigned",
         contextSnapshot: {
           issueId,
           wakeReason: "execution_review_requested",
           retryReason: "execution_review_participant_recovery",
         },
       });
+      // The lock release runs only after legacy execution reconciliation has
+      // ruled out unresolved provider work. This fixture models a cancelled
+      // before-dispatch review recovery run and keeps ownership attached until
+      // the adapter performs its normal release transaction.
+      await db.update(heartbeatRuns).set({ resultJson: {
+        executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      } }).where(eq(heartbeatRuns.id, runId));
       let decisionCompanyId = companyId;
       let decisionIssueId = issueId;
       let decisionAgentId = agentId;
@@ -647,7 +655,7 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
         completedStageIds: [],
         lastDecisionId: decisionId,
         lastDecisionOutcome: "changes_requested",
-      } }).where(eq(issues.id, issueId));
+      }, executionRunId: runId }).where(eq(issues.id, issueId));
 
       const release = createReleaseIssueExecution({
         issueLock: createPostgresWakeQueueAdapter(db, stubDeps),

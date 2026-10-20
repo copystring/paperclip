@@ -41,7 +41,7 @@ jobs:
           files=(server/src/modules/wake-queue/application/ports.ts server/src/modules/wake-queue/application/use-cases.ts server/src/modules/wake-queue/adapters/postgres.ts server/src/services/recovery/service.ts)
           for file in "${files[@]}"; do git show bbb160a48:"$file" > "$file"; done
           set +e
-          pnpm exec vitest run --project @paperclipai/server server/src/modules/wake-queue/adapters/postgres.test.ts -t 'classifies review recovery against the referenced decision boundary' > "$RUNNER_TEMP/release-red.log" 2>&1
+          pnpm exec vitest run --project @paperclipai/server server/src/modules/wake-queue/adapters/postgres.test.ts -t 'referenced decision boundary \(previous_round\)' > "$RUNNER_TEMP/release-red.log" 2>&1
           result=$?
           set -e
           git checkout HEAD -- "${files[@]}"
