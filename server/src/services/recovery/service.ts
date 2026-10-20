@@ -303,7 +303,7 @@ function compactRecoveryPresentation(title: string): IssueCommentPresentation {
     tone: "warning",
     title:
       normalizedTitle.length > 160
-        ? `${normalizedTitle.slice(0, 159)}â€¦`
+        ? `${normalizedTitle.slice(0, 159)}…`
         : normalizedTitle,
     detailsDefaultOpen: false,
     density: "compact",
@@ -398,7 +398,7 @@ function isProviderQuotaRecovery(latestRun: LatestIssueRun) {
   if (latestRun?.errorCode === "provider_quota") return true;
   if (readRecoveryRunErrorFamily(latestRun) === "provider_quota") return true;
   if (latestRun?.errorCode !== "adapter_failed") return false;
-  return /(?:usage|rate|quota) limit|you(?:'|â€™)ve hit your (?:\w+ )?limit|quota (?:exceeded|reset)|try again after/i.test(
+  return /(?:usage|rate|quota) limit|you(?:'|’)ve hit your (?:\w+ )?limit|quota (?:exceeded|reset)|try again after/i.test(
     latestRun.error ?? "",
   );
 }
@@ -548,7 +548,7 @@ const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
 export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 
 const PROVIDER_QUOTA_ERROR_RE =
-  /(?:you(?:'|â€™)ve hit your (?:\w+ )?limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
+  /(?:you(?:'|’)ve hit your (?:\w+ )?limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
 const CONFIGURATION_INCOMPLETE_ERROR_RE =
   /(?:model_not_found|model [^\n]{0,120} not found|missing (?:api )?(?:key|credentials?)|credentials? (?:are |is )?missing|no (?:api )?(?:key|credentials?) (?:was |were )?(?:found|configured|provided)|api key (?:is )?(?:not set|unavailable))/i;
 
@@ -861,7 +861,7 @@ function isStrandedIssueRecoveryIssue(
  * board cancel route stamps the attribution; interrupt-by-comment uses the
  * operator_interrupted error code). While such a run is the latest activity
  * on an issue, recovery stands down entirely: the operator deliberately
- * stopped the agent, and re-waking it â€” or escalating "stranding" â€” would
+ * stopped the agent, and re-waking it — or escalating "stranding" — would
  * fight the human. Any newer run or wake supersedes the exemption.
  */
 function isOperatorCancelledRun(
@@ -2642,7 +2642,7 @@ export function recoveryService(
                       : "Board operator: repair the source task workspace link, project workspace cwd, or git checkout, then explicitly retry or reassign."
                   : recoveryCause === "configuration_incomplete"
                     ? readConfigurationIncompletePayload(input.latestRun)?.reason === "workspace_base_ref_unresolved"
-                      ? "Check the starting branch and repository access, then repair the taskâ€™s branch and retry the original assignee."
+                      ? "Check the starting branch and repository access, then repair the task’s branch and retry the original assignee."
                       : readConfigurationIncompletePayload(input.latestRun)?.reason === "ai_connection_unavailable"
                       ? "Reconnect the selected AI account or choose an available connection, then continue the task."
                       : readConfigurationIncompletePayload(input.latestRun)?.reason === RESTRICTED_WORKSPACE_SOURCE_REASON
@@ -2864,7 +2864,7 @@ export function recoveryService(
       {
         authorType: "system",
         presentation: compactRecoveryPresentation(
-          "Recovery: recovery attempt failed â€” remains blocked",
+          "Recovery: recovery attempt failed — remains blocked",
         ),
         metadata: {
           version: 1,
@@ -3046,14 +3046,14 @@ export function recoveryService(
     await issuesSvc.addComment(
       issue.id,
       `This task is waiting on ${waitingOn} to finish. ` +
-        "It will continue automatically when that work is done â€” there's nothing you need to do. " +
+        "It will continue automatically when that work is done — there's nothing you need to do. " +
         "(It was paused because the latest run reported it was waiting for review/approval; " +
         "Paperclip turned that into a normal dependency wait instead of flagging it as stuck.)",
       {},
       {
         authorType: "system",
         presentation: compactRecoveryPresentation(
-          "Recovery: waiting on dependencies â€” moved to blocked",
+          "Recovery: waiting on dependencies — moved to blocked",
         ),
         metadata: {
           version: 1,
@@ -5318,7 +5318,7 @@ export function recoveryService(
           // retries are spent, so escalate as the review-recovery failure it
           // is instead of skipping on every sweep with no live path. The
           // live-path re-read guards the write against a run or wake that
-          // started after the loop's check â€” for ANY agent, not only the
+          // started after the loop's check — for ANY agent, not only the
           // participant: `blocked` is issue-wide, so another agent still
           // working the issue must never be blocked under.
           const updated = await escalateStrandedAssignedIssue({
@@ -5493,8 +5493,8 @@ export function recoveryService(
         // restart, a lost process) ended the attempt before the agent
         // finished. The attempt cap counts attempts the agent got to finish,
         // so give the interrupted run the same bounded transient retry any
-        // interrupted run gets â€” the retry keeps the handoff context, so it
-        // is still the corrective run â€” and escalate only once that retry
+        // interrupted run gets — the retry keeps the handoff context, so it
+        // is still the corrective run — and escalate only once that retry
         // budget is spent or a finished attempt still leaves no disposition.
         // Native-runtime corrective runs have no process-loss retry lane
         // (a graceful shutdown suspends their controller for reattach
@@ -5668,7 +5668,7 @@ export function recoveryService(
             );
           if (consecutive >= classification.maxAttempts) {
             const attemptCopy =
-              consecutive <= 1 ? "" : ` (${consecutive}Ã— attempts)`;
+              consecutive <= 1 ? "" : ` (${consecutive}× attempts)`;
             const updated = await escalateStrandedAssignedIssue({
               issue,
               previousStatus: "in_progress",
@@ -6413,7 +6413,7 @@ export function recoveryService(
     const isCleanable = (runId: string | null) => {
       if (!runId) return true;
       const status = runStatusById.get(runId);
-      if (!status) return true; // missing run row â†’ no real claim
+      if (!status) return true; // missing run row → no real claim
       return TERMINAL_HEARTBEAT_RUN_STATUSES.has(status);
     };
 
