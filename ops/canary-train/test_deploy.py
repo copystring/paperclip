@@ -602,6 +602,77 @@ class CandidateTests(unittest.TestCase):
 
 
 class DrainTests(unittest.TestCase):
+    def test_start_drain_accepts_real_post_response_and_confirms_get_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            api = "http://localhost:3100/api"
+            owner = "owner-id"
+            http = FakeHttp(json_data={
+                ("POST", api + "/instance/task-drain"): {
+                    "ownerId": owner,
+                    "startedAt": "2026-10-21T08:00:00.000Z",
+                    "expiresAt": "2026-10-21T08:05:00.000Z",
+                    "purpose": "idle",
+                },
+                ("GET", api + "/instance/task-drain"): {
+                    "ownerId": owner, "draining": True, "activeRuns": 0, "pendingWakes": 0,
+                    "startedAt": "2026-10-21T08:00:00.000Z", "expiresAt": "2026-10-21T08:05:00.000Z",
+                    "purpose": "idle", "quiescent": True,
+                },
+            })
+            self.assertEqual(deployer(Path(tmp), http=http).start_drain("token"), owner)
+
+    def test_start_drain_readback_failure_releases_only_post_owner_and_preserves_error(self):
+        class TrackingHttp(FakeHttp):
+            def __init__(self, data):
+                super().__init__(json_data=data)
+                self.calls = []
+
+            def request_json(self, url, method="GET", body=None, token=None):
+                self.calls.append((method, url))
+                return super().request_json(url, method, body, token)
+
+        api = "http://localhost:3100/api"
+        owner = "owner-id"
+        delete_path = api + "/instance/task-drain?ownerId=owner-id"
+        cases = (
+            ({"draining": True, "ownerId": "different-owner", "activeRuns": 0, "pendingWakes": 0},
+             "acquired idle drain", deploy.DeployError("cleanup failed")),
+            ({"draining": True, "activeRuns": 0, "pendingWakes": 0}, "acquired idle drain", {}),
+            ({"draining": True, "ownerId": owner, "activeRuns": 1, "pendingWakes": 0},
+             "Work appeared", {}),
+        )
+        for readback, message, cleanup_result in cases:
+            with self.subTest(readback=readback), tempfile.TemporaryDirectory() as tmp:
+                http = TrackingHttp({
+                    ("POST", api + "/instance/task-drain"): {
+                        "ownerId": owner, "startedAt": "now", "expiresAt": "later", "purpose": "idle",
+                    },
+                    ("GET", api + "/instance/task-drain"): readback,
+                    ("DELETE", delete_path): cleanup_result,
+                })
+                with self.assertRaisesRegex(deploy.DeployError, message):
+                    deployer(Path(tmp), http=http).start_drain("token")
+                self.assertEqual(http.calls[-1], ("DELETE", delete_path))
+
+    def test_start_drain_does_not_release_an_unidentified_post_owner(self):
+        class TrackingHttp(FakeHttp):
+            def __init__(self, data):
+                super().__init__(json_data=data)
+                self.calls = []
+
+            def request_json(self, url, method="GET", body=None, token=None):
+                self.calls.append((method, url))
+                return super().request_json(url, method, body, token)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            api = "http://localhost:3100/api"
+            http = TrackingHttp({("POST", api + "/instance/task-drain"): {
+                "startedAt": "now", "expiresAt": "later", "purpose": "idle",
+            }})
+            with self.assertRaisesRegex(deploy.DeployError, "did not confirm ownership"):
+                deployer(Path(tmp), http=http).start_drain("token")
+            self.assertEqual(http.calls, [("POST", api + "/instance/task-drain")])
+
     def test_pending_run_blocks_before_drain(self):
         with tempfile.TemporaryDirectory() as tmp:
             api = "http://localhost:3100/api"
