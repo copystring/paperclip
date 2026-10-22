@@ -1995,6 +1995,7 @@ export function routineService(
           reason: "issue_assigned",
           mutation: "create",
           contextSource: "routine.dispatch",
+          responsibleUserId,
           requestedByActorType: input.source === "schedule" ? "system" : undefined,
           rethrowOnError: true,
         });
