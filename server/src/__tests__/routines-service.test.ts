@@ -1327,7 +1327,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
           payload: { issueId: run.linkedIssueId, mutation: "create" },
           requestedByActorType: undefined,
           requestedByActorId: null,
-          contextSnapshot: { issueId: run.linkedIssueId, source: "routine.dispatch" },
+          contextSnapshot: { issueId: run.linkedIssueId, source: "routine.dispatch", responsibleUserId: run.responsibleUserId },
         },
       },
     ]);
@@ -1363,6 +1363,30 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       includeRoutineExecutions: true,
     });
     expect(inboxIssues.map((issue) => issue.id)).toContain(run.linkedIssueId);
+  });
+
+  it("pins the resolved execution owner before the routine transaction is visible to the wakeup", async () => {
+    const userId = randomUUID();
+    let wakeOwner: unknown;
+    let routineRunVisible: boolean | undefined;
+    const { routine, svc } = await seedFixture({
+      wakeup: async (_agentId, opts) => {
+        const [issue] = await db.select().from(issues).where(eq(issues.id, String(opts.payload?.issueId)));
+        expect(issue.responsibleUserId).toBe(userId);
+        const [visibleRun] = await db.select().from(routineRuns).where(eq(routineRuns.id, issue.originRunId!));
+        routineRunVisible = Boolean(visibleRun);
+        wakeOwner = opts.contextSnapshot?.responsibleUserId;
+        return null;
+      },
+    });
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" }, { userId });
+
+    expect(run.status).toBe("issue_created");
+    expect(routineRunVisible).toBe(false);
+    expect(wakeOwner).toBe(userId);
+    const [committedRun] = await db.select().from(routineRuns).where(eq(routineRuns.id, run.id));
+    expect(committedRun.responsibleUserId).toBe(userId);
   });
 
   it("uses the routine revision responsible-user snapshot for automatic runs", async () => {

@@ -11,7 +11,14 @@ import {
   documentRevisions,
   documents,
   environmentLeases,
+  heartbeatRunEvents,
+  issueRecoveryActions,
+  issueRelations,
+  issueTreeHolds,
   nativeRunFinalizations,
+  decisionInvocations,
+  toolInvocations,
+  workspaceOperations,
   heartbeatRuns,
   issueComments,
   issueDocuments,
@@ -32,6 +39,11 @@ import {
 } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
 import { recoveryService } from "../services/recovery/service.ts";
+import * as nonDispatchReceipts from "../services/non-dispatch-receipt.js";
+import { revalidateNonDispatchHolds } from "../services/non-dispatch-revalidation.js";
+import { getExecutionBlocker } from "../services/execution-blocker.js";
+import { legacyExecutionNeedsReconciliationWithEvidence } from "../services/legacy-execution-recovery.js";
+import { normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.js";
 import { withQueuedCommentIdsInWakePayload } from "../services/issue-queued-comment-queue.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
@@ -216,6 +228,44 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     return { companyId, agentId };
   }
 
+  it("runs an explicit owner handback only after its current recovery run ends", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent({ maxConcurrentRuns: 5 });
+    const issueId = randomUUID(), predecessorId = randomUUID(), commentId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: predecessorId, companyId, agentId, status: "running",
+      invocationSource: "automation", triggerDetail: "system", startedAt: new Date(),
+      contextSnapshot: { issueId, wakeReason: "issue_disposition_repair" } });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Explicit work handback", status: "todo", assigneeAgentId: agentId,
+      executionRunId: predecessorId, checkoutRunId: predecessorId });
+    await db.insert(issueComments).values({ id: commentId, companyId, issueId, authorAgentId: agentId,
+      createdByRunId: predecessorId, body: "Continue the next implementation step." });
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    await heartbeat.wakeup(agentId, { source: "automation", triggerDetail: "system", reason: "issue_commented",
+      requestedByActorType: "agent", requestedByActorId: agentId, allowRunCoalescing: false,
+      issueStateGuard: { statuses: ["todo"], assigneeAgentId: agentId, statusVersion: issue!.statusVersion },
+      payload: { issueId, commentId, mutation: "comment", resumeIntent: true, followUpRequested: true },
+      contextSnapshot: { issueId, taskId: issueId, commentId, wakeCommentId: commentId,
+        source: "issue.comment", wakeReason: "issue_commented", forceFreshSession: true, resumeIntent: true, followUpRequested: true } });
+    const [request] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
+    expect(request).toMatchObject({ status: "queued" });
+    expect(request!.runId).toBeTruthy();
+    expect((await heartbeat.getRun(request!.runId!))!.status).toBe("queued");
+    expect(countExecuteCallsForRun(request!.runId!)).toBe(0);
+    expect(countExecuteCallsForRun(predecessorId)).toBe(0);
+    const [unchanged] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, predecessorId));
+    expect(unchanged!.contextSnapshot).toEqual({ issueId, wakeReason: "issue_disposition_repair" });
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, predecessorId));
+    await db.update(issues).set({ executionRunId: null, checkoutRunId: null }).where(eq(issues.id, issueId));
+    await heartbeat.resumeQueuedRuns();
+    await waitForCondition(async () => Boolean((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, request!.id)))[0]?.runId));
+    const [delivered] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, request!.id));
+    expect(delivered!.runId).toBeTruthy();
+    const next = await heartbeat.getRun(delivered!.runId!);
+    expect(next!.contextSnapshot).toMatchObject({ issueId, forceFreshSession: true, resumeIntent: true });
+    expect(next!.retryOfRunId).toBeNull();
+    await heartbeat.waitForRunExecutionDrain(next!.id);
+    expect(countExecuteCallsForRun(next!.id)).toBe(1);
+  });
+
   it.each(["preparing", "verifying", "resuming"] as const)("keeps assigned work queued through %s, including recovery with timers disabled", async lifecycleState => {
     const { companyId, agentId } = await seedCompanyAndAgent({ heartbeatConfig: { enabled: false } });
     await db.update(agents).set({ status: "paused", lifecycleState }).where(eq(agents.id, agentId));
@@ -235,6 +285,187 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     await recovered.waitForRunExecutionDrain(run!.id);
     expect(countExecuteCallsForRun(run!.id)).toBe(1);
   });
+
+  it.each(["initial", "scheduled"] as const)("records and verifies a complete receipt for a %s dependency-gated run", async kind => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const [blocker] = await db.insert(issues).values({ companyId, title: "Dependency", status: "in_progress", assigneeAgentId: agentId }).returning();
+    const [task] = await db.insert(issues).values({ companyId, title: "Blocked dispatch", status: "in_progress", assigneeAgentId: agentId }).returning();
+    await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: task.id, type: "blocks" });
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId: task.id, wakeReason: "issue_assigned" });
+
+    if (kind === "scheduled") {
+      await db.update(heartbeatRuns).set({ status: "scheduled_retry", scheduledRetryAt: new Date(0), scheduledRetryAttempt: 1, scheduledRetryReason: "transient_failure" }).where(eq(heartbeatRuns.id, runId));
+      await heartbeat.promoteDueScheduledRetries();
+    } else {
+      await heartbeat.resumeQueuedRuns();
+    }
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(run.status).toBe("cancelled");
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+    expect(run.resultJson?.nonDispatchReceipt).toMatchObject({
+      version: 1, runId, companyId, issueId: task.id, agentId,
+      providerWorkStarted: false, reason: "issue_dependencies_blocked",
+    });
+    expect(await legacyExecutionNeedsReconciliationWithEvidence(db, run)).toBe(false);
+
+    await db.update(heartbeatRuns).set({ processPid: 12345 }).where(eq(heartbeatRuns.id, runId));
+    const [contradictory] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(await legacyExecutionNeedsReconciliationWithEvidence(db, contradictory)).toBe(true);
+  });
+
+  it.each(["queued", "scheduled_retry"] as const)("rejects an unknown-stop receipt for %s work", async status => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const [task] = await db.insert(issues).values({ companyId, title: "Unknown stop", status: "in_progress", assigneeAgentId: agentId }).returning();
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId: task.id, wakeReason: "issue_assigned" });
+    if (status === "scheduled_retry") {
+      await db.update(heartbeatRuns).set({ status, scheduledRetryAt: new Date(Date.now() + 60_000), scheduledRetryAttempt: 1, scheduledRetryReason: "transient_failure" }).where(eq(heartbeatRuns.id, runId));
+    }
+    const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const forgedReceipt = nonDispatchReceipts.makeNonDispatchReceipt(source, "issue_dependencies_blocked", "dependency_gate", task.statusVersion);
+    const unknownStop = { source: "unknown", expected: false, reason: "Execution stopped without a recorded request", recordedAt: new Date().toISOString() };
+    await db.update(heartbeatRuns).set({ resultJson: { ...source.resultJson, cancellation: unknownStop } }).where(eq(heartbeatRuns.id, runId));
+    const [withUnknownStop] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+
+    expect(nonDispatchReceipts.isUnclaimedRun(withUnknownStop)).toBe(false);
+    expect(nonDispatchReceipts.makeNonDispatchReceipt(withUnknownStop, "issue_dependencies_blocked", "dependency_gate", task.statusVersion)).toBeNull();
+
+    await db.update(heartbeatRuns).set({
+      status: "cancelled",
+      finishedAt: new Date(),
+      errorCode: "issue_dependencies_blocked",
+      resultJson: { ...withUnknownStop.resultJson, nonDispatchReceipt: forgedReceipt },
+    }).where(eq(heartbeatRuns.id, runId));
+    const [cancelled] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(await nonDispatchReceipts.isNonDispatchVerified(db, cancelled)).toBe(false);
+  });
+
+  it.each(["before-read", "after-read", "same-status-stop", "same-status-context"] as const)(
+    "does not terminalize a dependency run when a concurrent %s changes its source projection", async interleaving => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const [blocker] = await db.insert(issues).values({ companyId, title: "Dependency", status: "in_progress", assigneeAgentId: agentId }).returning();
+      const [task] = await db.insert(issues).values({ companyId, title: "Claim race", status: "in_progress", assigneeAgentId: agentId }).returning();
+      await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: task.id, type: "blocks" });
+      const { runId, wakeupRequestId } = await seedQueuedRun({ companyId, agentId, issueId: task.id, wakeReason: "issue_assigned" });
+      let receiptCreated = false;
+      let injected = false;
+      let baseline: unknown;
+      async function snapshot() {
+        return {
+          run: (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0],
+          task: (await db.select().from(issues).where(eq(issues.id, task.id)))[0],
+          wake: (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId)))[0],
+          events: await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId)),
+          actions: await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, task.id)),
+        };
+      }
+      async function claim() {
+        injected = true;
+        await db.transaction(async tx => {
+          await tx.select().from(issues).where(eq(issues.id, task.id)).for("update");
+          await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).for("update");
+          const [current] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+          await tx.update(heartbeatRuns).set(interleaving === "same-status-stop"
+            ? { resultJson: { cancellation: { source: "operator", expected: true } } }
+            : interleaving === "same-status-context"
+              ? { contextSnapshot: { ...current.contextSnapshot, revision: 2 } }
+              : { status: "running", startedAt: new Date(), processPid: 12345,
+                  controllerBootId: randomUUID(), executionStage: "provider_execution",
+                  resultJson: { retainedMarker: "claimed", executionRecovery: { providerWorkStarted: true } } },
+          ).where(eq(heartbeatRuns.id, runId));
+          await tx.update(issues).set({ executionRunId: runId, checkoutRunId: runId, executionLockedAt: new Date() }).where(eq(issues.id, task.id));
+          await tx.update(agentWakeupRequests).set({ status: "claimed", claimedAt: new Date() }).where(eq(agentWakeupRequests.id, wakeupRequestId));
+        });
+        baseline = await snapshot();
+      }
+      const originalReceipt = nonDispatchReceipts.makeNonDispatchReceipt;
+      const receiptSpy = vi.spyOn(nonDispatchReceipts, "makeNonDispatchReceipt").mockImplementation((...args) => {
+        const receipt = originalReceipt(...args);
+        if (args[0].id === runId && args[2] === "dependency_gate") receiptCreated = true;
+        return receipt;
+      });
+      const originalSelect = db.select.bind(db);
+      const selectSpy = vi.spyOn(db, "select").mockImplementation(((...args: unknown[]) => {
+        const builder = originalSelect(...args as []);
+        const originalFrom = builder.from.bind(builder);
+        builder.from = ((table: unknown) => {
+          const query = originalFrom(table as typeof heartbeatRuns);
+          if (table === heartbeatRuns && args.length === 0) {
+            const originalThen = query.then.bind(query);
+            query.then = ((resolve: (rows: unknown) => unknown, reject: (error: unknown) => unknown) => {
+              if (receiptCreated && !injected && !query.toSQL().sql.includes("for update")) {
+                if (interleaving === "before-read") return claim().then(() => originalThen(resolve, reject));
+                return originalThen(async rows => { await claim(); return resolve(rows); }, reject);
+              }
+              return originalThen(resolve, reject);
+            }) as typeof query.then;
+          }
+          return query;
+        }) as typeof builder.from;
+        return builder;
+      }) as typeof db.select);
+      try {
+        await heartbeat.resumeQueuedRuns();
+        expect(injected).toBe(true);
+        expect(await snapshot()).toEqual(baseline);
+        expect(countExecuteCallsForRun(runId)).toBe(0);
+      } finally {
+        selectSpy.mockRestore();
+        receiptSpy.mockRestore();
+        await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, runId));
+      }
+    },
+  );
+
+  it.each(["clean", "started", "operator", "foreign", "pause", "revision", "successor", "source-tool-failed"] as const)(
+    "revalidates a retained dependency HOLD only with complete unchanged evidence (%s)", async mutation => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const [blocker] = await db.insert(issues).values({ companyId, title: "Dependency", status: "in_progress", assigneeAgentId: agentId }).returning();
+      const [task] = await db.insert(issues).values({ companyId, title: "Recovery", status: "in_progress", assigneeAgentId: agentId }).returning();
+      await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: task.id, type: "blocks" });
+      const { runId } = await seedQueuedRun({ companyId, agentId, issueId: task.id, wakeReason: "issue_assigned" });
+      await heartbeat.resumeQueuedRuns();
+      const [original] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      const oldResult = { ...original.resultJson } as Record<string, any>;
+      delete oldResult.nonDispatchReceipt;
+      delete oldResult.cancellation;
+      await db.update(heartbeatRuns).set({ resultJson: oldResult }).where(eq(heartbeatRuns.id, runId));
+      const [hold] = await db.insert(issueRecoveryActions).values({
+        companyId, sourceIssueId: task.id, kind: "active_run_watchdog", cause: "legacy_execution_requires_reconciliation",
+        fingerprint: `legacy-execution:${runId}`, nextAction: "Synthetic retained HOLD", ownerType: "board", status: "resolved", outcome: "blocked",
+        evidence: { runId, automaticRecovery: { policy: "preserve_without_replay_v1", replay: "blocked", actionOutcome: "unknown" } },
+      }).returning();
+
+      if (mutation === "started") await db.update(heartbeatRuns).set({ startedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
+      if (mutation === "operator") await db.update(heartbeatRuns).set({ resultJson: { ...oldResult, cancellation: { source: "operator", expected: true } } }).where(eq(heartbeatRuns.id, runId));
+      if (mutation === "pause") await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      if (mutation === "revision") await db.update(issues).set({ statusVersion: task.statusVersion + 1 }).where(eq(issues.id, task.id));
+      if (mutation === "successor") await seedQueuedRun({ companyId, agentId, issueId: task.id, wakeReason: "issue_assigned" });
+      if (mutation === "source-tool-failed") {
+        const [source] = await db.insert(heartbeatRuns).values({
+          companyId, agentId, status: "cancelled", invocationSource: "assignment", startedAt: new Date(),
+          contextSnapshot: { issueId: task.id },
+          resultJson: { executionCancellation: { state: "acknowledged" }, reassignmentStopConfirmed: true },
+        }).returning();
+        await db.update(heartbeatRuns).set({ contextSnapshot: { ...original.contextSnapshot, interruptedRunId: source.id } }).where(eq(heartbeatRuns.id, runId));
+        await db.insert(toolInvocations).values({ companyId, runId: source.id, toolName: "synthetic.failed", status: "failed" });
+      }
+
+      const response = await revalidateNonDispatchHolds(db, {
+        companyId: mutation === "foreign" ? randomUUID() : companyId,
+        issueId: task.id,
+        expectedStatusVersion: task.statusVersion,
+        actorId: "synthetic-board",
+      });
+      expect(response.resolved).toEqual(mutation === "clean" ? [hold.id] : []);
+      const [stored] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, hold.id));
+      expect((stored.evidence.automaticRecovery as Record<string, unknown>).replay).toBe(mutation === "clean" ? "allowed" : "blocked");
+      if (mutation === "clean") {
+        expect(await getExecutionBlocker(db, companyId, task.id)).toBe(null);
+        expect((await revalidateNonDispatchHolds(db, { companyId, issueId: task.id, expectedStatusVersion: task.statusVersion, actorId: "synthetic-board" })).resolved).toEqual([]);
+      }
+      expect(countExecuteCallsForRun(runId)).toBe(0);
+    },
+  );
 
   async function seedQueuedRun(input: {
     companyId: string;
@@ -500,6 +731,92 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       { status: "skipped", reason: "issue_state_guard_mismatch" },
       { status: "skipped", reason: "issue_state_guard_mismatch" },
     ]);
+  });
+
+  it.each(["decision", "policy"] as const)("skips review recovery when its %s changes before the enqueue lock reads the issue", async (change) => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    const expectedDecisionId = randomUUID();
+    const actualDecisionId = randomUUID();
+    const stageId = randomUUID();
+    const policy = { stages: [{ id: stageId, type: "review", approvalsNeeded: 1,
+      participants: [{ id: randomUUID(), type: "agent", agentId, userId: null }] }] };
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Review decision changed during recovery admission",
+      executionPolicy: policy,
+      status: "in_review",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentParticipant: { type: "agent", agentId },
+        lastDecisionId: expectedDecisionId,
+      },
+    });
+    const [issueSnapshot] = await db.select().from(issues).where(eq(issues.id, issueId));
+
+    let pendingWake!: ReturnType<typeof heartbeat.wakeup>;
+    await db.transaction(async (tx) => {
+      if (change === "decision") await tx.update(issues).set({ executionState: {
+        status: "pending",
+        currentStageId: randomUUID(),
+        currentParticipant: { type: "agent", agentId },
+        lastDecisionId: actualDecisionId,
+      } }).where(eq(issues.id, issueId));
+      if (change === "policy") await tx.update(issues).set({ executionPolicy: {
+        ...policy, stages: policy.stages.map(stage => ({ ...stage,
+          participants: [{ ...stage.participants[0], agentId: randomUUID() }] })),
+      } }).where(eq(issues.id, issueId));
+      const [{ pid }] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      pendingWake = heartbeat.wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "execution_review_participant_recovery",
+        payload: { issueId },
+        contextSnapshot: {
+          issueId,
+          retryReason: "execution_review_participant_recovery",
+          currentReviewDecisionId: expectedDecisionId,
+        },
+        requestedByActorType: "system",
+        requestedByActorId: null,
+        issueStateGuard: {
+          statuses: ["in_review"],
+          assigneeAgentId: agentId,
+          statusVersion: issueSnapshot!.statusVersion,
+          reviewAttempt: {
+            decisionId: expectedDecisionId,
+            participantAgentId: agentId,
+            currentStageId: stageId,
+            executionPolicy: normalizeIssueExecutionPolicy(policy),
+          },
+        },
+      });
+      expect(await waitForCondition(async () => {
+        const [{ waiting }] = await db.execute<{ waiting: boolean }>(sql`
+          select exists (
+            select 1 from pg_stat_activity
+            where ${pid} = any(pg_blocking_pids(pid))
+          ) as waiting
+        `);
+        return waiting;
+      })).toBe(true);
+    });
+
+    expect(await pendingWake).toBeNull();
+    expect(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)).toHaveLength(0);
+    const [wakeup] = await db.select({ status: agentWakeupRequests.status, reason: agentWakeupRequests.reason,
+      payload: agentWakeupRequests.payload }).from(agentWakeupRequests);
+    expect(wakeup).toMatchObject({ status: "skipped", reason: "issue_state_guard_mismatch" });
+    expect(wakeup?.payload).toMatchObject({ heartbeatSkip: {
+      expectedReviewDecisionId: expectedDecisionId,
+      actualReviewDecisionId: change === "decision" ? actualDecisionId : expectedDecisionId,
+      expectedReviewParticipantAgentId: agentId,
+      actualReviewParticipantAgentId: agentId,
+    } });
   });
 
   it.each([

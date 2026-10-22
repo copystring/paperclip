@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { OWNER_DISPOSITION_REPAIR_NEXT_ACTION } from "../services/recovery/legacy-continuation.js";
 
 vi.mock("../services/fast-responses.js", () => ({
   enqueueFastResponse: vi.fn(async () => undefined),
@@ -602,6 +603,24 @@ describe("issue update comment wakeups", () => {
     });
     expect(res.status).toBe(400);
     expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("queues an explicit current-run work handback without coalescing it into recovery", async () => {
+    const existing = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, status: "in_progress", executionRunId: SOURCE_RUN_ID, checkoutRunId: SOURCE_RUN_ID });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockResolvedValue({ ...existing, status: "todo", statusVersion: 4 });
+    mockIssueService.addComment.mockResolvedValue({ id: "handback-comment", issueId: existing.id, companyId: existing.companyId,
+      authorAgentId: ASSIGNEE_AGENT_ID, createdByRunId: SOURCE_RUN_ID, body: "Continue the next implementation step." });
+    mockHeartbeatService.getRun.mockResolvedValue({ id: SOURCE_RUN_ID, companyId: existing.companyId,
+      agentId: ASSIGNEE_AGENT_ID, status: "running", contextSnapshot: { issueId: existing.id } });
+    const res = await request(await createApp()).patch(`/api/issues/${existing.id}`).set("X-Paperclip-Run-Id", SOURCE_RUN_ID)
+      .send(JSON.parse(OWNER_DISPOSITION_REPAIR_NEXT_ACTION.match(/\{"status":"todo","comment":"[^"\n]+","resume":true\}/)![0]));
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1));
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(ASSIGNEE_AGENT_ID, expect.objectContaining({
+      allowRunCoalescing: false, issueStateGuard: { statuses: ["todo"], assigneeAgentId: ASSIGNEE_AGENT_ID, statusVersion: 4 },
+      contextSnapshot: expect.objectContaining({ forceFreshSession: true, resumeIntent: true, followUpRequested: true }),
+    }));
   });
 
   it("wakes the assignee on comment-only issue updates", async () => {

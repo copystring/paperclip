@@ -1,3 +1,7 @@
+import { makeNonDispatchReceipt } from "../non-dispatch-receipt.js";
+import { isDeepStrictEqual } from "node:util";
+import { captureReconciledReviewContinuation, reconciledReviewExecutionStage } from "../execution-recovery-resolution.js";
+import { normalizeIssueExecutionPolicy } from "../issue-execution-policy.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
@@ -1699,6 +1703,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     const now = new Date();
     const reason =
       "Cancelled because issue dependencies are still blocked; Paperclip will wake the assignee when blockers resolve";
+    const [receiptIssue] = await db
+      .select({ statusVersion: issues.statusVersion })
+      .from(issues)
+      .where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId)))
+      .limit(1);
+    const receipt = makeNonDispatchReceipt(
+      run,
+      "issue_dependencies_blocked",
+      "dependency_gate",
+      receiptIssue?.statusVersion ?? null,
+    );
     const cancelled = await setRunStatus(run.id, "cancelled", {
       finishedAt: now,
       error: reason,
@@ -1706,6 +1721,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       resultJson: {
         ...parseObject(run.resultJson),
         stopReason: "issue_dependencies_blocked",
+        ...(receipt ? { nonDispatchReceipt: receipt } : {}),
+        ...(receipt ? {
+          cancellation: {
+            source: "control_plane",
+            expected: true,
+            initiator: { type: "system" },
+            reason,
+            recordedAt: now.toISOString(),
+          },
+        } : {}),
         effectiveTimeoutSec: 0,
         timeoutConfigured: false,
         timeoutSource: "dependency_gate",
@@ -2888,6 +2913,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               executionWorkspaceSettings: issues.executionWorkspaceSettings,
               assigneeAgentId: issues.assigneeAgentId,
               assigneeUserId: issues.assigneeUserId,
+              executionState: issues.executionState,
+              executionPolicy: issues.executionPolicy,
               monitorNextCheckAt: issues.monitorNextCheckAt,
               monitorWakeRequestedAt: issues.monitorWakeRequestedAt,
               executionRunId: issues.executionRunId,
@@ -2922,6 +2949,22 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           }
 
           const issueStateGuard = opts.issueStateGuard;
+          const actualReviewState = issueStateGuard?.reviewAttempt
+            ? parseObject(issue.executionState)
+            : null;
+          const actualReviewParticipant = actualReviewState
+            ? parseObject(actualReviewState.currentParticipant)
+            : null;
+          const reviewAttemptMismatch = issueStateGuard?.reviewAttempt && (
+            actualReviewState?.status !== "pending" ||
+            readNonEmptyString(actualReviewState.lastDecisionId) !== issueStateGuard.reviewAttempt.decisionId ||
+            actualReviewParticipant?.type !== "agent" ||
+            actualReviewParticipant.agentId !== issueStateGuard.reviewAttempt.participantAgentId ||
+            (issueStateGuard.reviewAttempt.currentStageId !== undefined &&
+              (readNonEmptyString(actualReviewState.currentStageId) ?? null) !== issueStateGuard.reviewAttempt.currentStageId) ||
+            (issueStateGuard.reviewAttempt.executionPolicy !== undefined &&
+              !isDeepStrictEqual(normalizeIssueExecutionPolicy(issue.executionPolicy), issueStateGuard.reviewAttempt.executionPolicy))
+          );
           const activeMonitorRun = issueStateGuard?.monitorNextCheckAt === undefined ? null
             : await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
               eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.nativeIssueId, issue.id),
@@ -2932,6 +2975,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             (!issueStateGuard.statuses.includes(issue.status) ||
               issue.assigneeAgentId !== issueStateGuard.assigneeAgentId ||
               (issueStateGuard.statusVersion !== undefined && issue.statusVersion !== issueStateGuard.statusVersion) ||
+              Boolean(reviewAttemptMismatch) ||
               (issueStateGuard.monitorNextCheckAt !== undefined && (
                 activeMonitorRun !== null || issue.assigneeUserId !== null ||
                 issue.monitorNextCheckAt?.toISOString() !== issueStateGuard.monitorNextCheckAt ||
@@ -2951,13 +2995,22 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               payload: {
                 ...(payload ?? {}),
                 heartbeatSkip: {
-                  reason:
-                    "Issue status or assignee changed before the wake could be queued.",
+                  reason: reviewAttemptMismatch
+                    ? "Execution-review decision, participant, or stage changed before the wake could be queued."
+                    : "Issue status or assignee changed before the wake could be queued.",
                   issueId: issue.id,
                   expectedStatuses: issueStateGuard.statuses,
                   actualStatus: issue.status,
                   expectedAssigneeAgentId: issueStateGuard.assigneeAgentId,
                   actualAssigneeAgentId: issue.assigneeAgentId,
+                  ...(issueStateGuard.reviewAttempt ? {
+                    expectedReviewDecisionId: issueStateGuard.reviewAttempt.decisionId,
+                    actualReviewDecisionId: readNonEmptyString(actualReviewState?.lastDecisionId),
+                    expectedReviewParticipantAgentId: issueStateGuard.reviewAttempt.participantAgentId,
+                    actualReviewParticipantAgentId: actualReviewParticipant?.type === "agent"
+                      ? readNonEmptyString(actualReviewParticipant.agentId)
+                      : null,
+                  } : {}),
                 },
               },
               status: "skipped",
@@ -2991,15 +3044,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               !isUuidLike(actionId) ||
               source !== "automation" ||
               triggerDetail !== "system" ||
-              reason !== "issue_recovery_action_restored" ||
               opts.requestedByActorType !== "system" ||
               opts.requestedByActorId !== "execution-recovery" ||
               opts.idempotencyKey !== `execution-reconciliation:${actionId}` ||
-              enrichedContextSnapshot.source !== "execution.reconciled" ||
               enrichedContextSnapshot.forceFreshSession !== true ||
               payload?.issueId !== issue.id ||
               payload?.recoveryActionId !== actionId ||
-              issue.assigneeAgentId !== agentId ||
               ["done", "cancelled"].includes(issue.status)
             )
               return { kind: "skipped" as const };
@@ -3022,11 +3072,31 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               action?.evidence.executionReconciliation,
             );
             const sourceRunId = readNonEmptyString(decision.runId);
+            const isReviewReconciliation = Boolean(action?.evidence.reviewContinuation);
+            const currentReviewBinding = isReviewReconciliation ? captureReconciledReviewContinuation(issue) : null;
+            const expectedStage = currentReviewBinding ? reconciledReviewExecutionStage(currentReviewBinding) : null;
+            const continuationMatches = isReviewReconciliation
+              ? currentReviewBinding !== null &&
+                isDeepStrictEqual(currentReviewBinding, action!.evidence.reviewContinuation) &&
+                currentReviewBinding.participantAgentId === agentId &&
+                reason === (currentReviewBinding.state.currentStageType === "approval" ? "execution_approval_requested" : "execution_review_requested") &&
+                enrichedContextSnapshot.source === "execution.review.reconciled" &&
+                isDeepStrictEqual(enrichedContextSnapshot.executionStage, expectedStage) &&
+                isDeepStrictEqual(payload?.executionStage, expectedStage) &&
+                !opts.failedRunId &&
+                !readNonEmptyString(enrichedContextSnapshot.previousRunId) &&
+                !readNonEmptyString(enrichedContextSnapshot.retryOfRunId)
+              : reason === "issue_recovery_action_restored" &&
+                enrichedContextSnapshot.source === "execution.reconciled" &&
+                issue.assigneeAgentId === agentId &&
+                action?.returnOwnerAgentId === agentId &&
+                enrichedContextSnapshot.previousRunId === sourceRunId &&
+                enrichedContextSnapshot.retryOfRunId === sourceRunId;
             if (
               !action ||
               action.status !== "resolved" ||
               action.kind !== "active_run_watchdog" ||
-              action.returnOwnerAgentId !== agentId ||
+              !continuationMatches ||
               !sourceRunId ||
               !isUuidLike(sourceRunId) ||
               decision.providerStopped !== true ||
@@ -3034,8 +3104,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 String(decision.actionOutcome),
               ) ||
               !readNonEmptyString(decision.outcomeEvidence) ||
-              enrichedContextSnapshot.previousRunId !== sourceRunId ||
-              enrichedContextSnapshot.retryOfRunId !== sourceRunId ||
               !["pending", "delivered"].includes(
                 String(action.evidence.continuationDelivery),
               )
@@ -3078,7 +3146,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 !existingRun ||
                 existingRun.contextSnapshot?.issueId !== issue.id ||
                 existingRun.contextSnapshot?.recoveryActionId !== action.id ||
-                existingRun.contextSnapshot?.previousRunId !== sourceRunId
+                (isReviewReconciliation
+                  ? !isDeepStrictEqual(existingRun.contextSnapshot?.executionStage, expectedStage) ||
+                    Boolean(existingRun.retryOfRunId) ||
+                    Boolean(readNonEmptyString(existingRun.contextSnapshot?.previousRunId))
+                  : existingRun.contextSnapshot?.previousRunId !== sourceRunId)
               )
                 return { kind: "deferred" as const };
               return { kind: "replayed" as const, run: existingRun };
@@ -3092,9 +3164,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               if ((readNonEmptyString(decision.workspaceRepairEvidence)?.length ?? 0) < 20)
                 return { kind: "skipped" as const };
               // Repair does not reset the remaining automatic retry budget.
-              reconciledRestoreRetryCount = executionFailureRetryCount(reconciledRun!);
+              if (!isReviewReconciliation) reconciledRestoreRetryCount = executionFailureRetryCount(reconciledRun!);
             }
-            reconciledSourceRunId = sourceRunId;
+            if (!isReviewReconciliation) reconciledSourceRunId = sourceRunId;
           }
 
           let continuationWait = { reason: "execution_recovery", message: "Waiting for execution recovery. Your message is saved." };
@@ -3654,7 +3726,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             // The resolved action is already a durable retry outbox. Do not merge
             // its fresh-session contract into unrelated work or create a second
             // deferred wake that could later replay the same reconciliation.
-            if (reconciledSourceRunId) return { kind: "deferred" as const };
+            if (executionReconciliationWake) return { kind: "deferred" as const };
 
             // Offer the input to the active Dot, but keep a durable queued wake
             // until it reads the comment. A finish racing the event tick must
