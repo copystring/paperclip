@@ -1,6 +1,6 @@
 import { instanceSettingsService } from "../../../services/instance-settings.js";
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Db } from "@paperclipai/db";
 import {
@@ -12,6 +12,7 @@ import {
   environmentLeases,
   heartbeatRunEvents,
   heartbeatRuns,
+  issueExecutionDecisions,
   issueComments,
   issueRecoveryActions,
   issues,
@@ -581,6 +582,99 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
       expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
     });
   }
+
+  it.each(["previous_round", "current_round", "missing_decision", "foreign_issue", "foreign_company"] as const)(
+    "classifies review recovery against the referenced decision boundary (%s)",
+    async (scenario) => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent({ companyId });
+      const issueId = await seedIssue({ companyId, assigneeAgentId: agentId, status: "in_review" });
+      const decisionId = randomUUID();
+      const runId = await seedRun({
+        companyId,
+        agentId,
+        status: "cancelled",
+        errorCode: "issue_reassigned",
+        contextSnapshot: {
+          issueId,
+          wakeReason: "execution_review_requested",
+          retryReason: "execution_review_participant_recovery",
+        },
+      });
+      // The lock release runs only after legacy execution reconciliation has
+      // ruled out unresolved provider work. This fixture models a cancelled
+      // before-dispatch review recovery run and keeps ownership attached until
+      // the adapter performs its normal release transaction.
+      await db.update(heartbeatRuns).set({ resultJson: {
+        executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      } }).where(eq(heartbeatRuns.id, runId));
+      let decisionCompanyId = companyId;
+      let decisionIssueId = issueId;
+      let decisionAgentId = agentId;
+      if (scenario === "foreign_company") {
+        decisionCompanyId = await seedCompany();
+        decisionAgentId = await seedAgent({ companyId: decisionCompanyId });
+      }
+      if (scenario === "foreign_issue" || scenario === "foreign_company") {
+        decisionIssueId = await seedIssue({ companyId: decisionCompanyId, assigneeAgentId: decisionAgentId });
+      }
+      if (scenario !== "missing_decision") {
+        await db.insert(issueExecutionDecisions).values({
+          id: decisionId,
+          companyId: decisionCompanyId,
+          issueId: decisionIssueId,
+          stageId: randomUUID(),
+          stageType: "review",
+          actorAgentId: decisionAgentId,
+          actorUserId: null,
+          outcome: "changes_requested",
+          body: "Please address the requested changes.",
+        });
+      }
+      // Keep the fixtures within the same JavaScript millisecond. A Date
+      // round-trip would erase these PostgreSQL microseconds and could make
+      // the stale/current comparison depend on lossy application precision.
+      if (scenario !== "missing_decision") {
+        await db.execute(sql`update issue_execution_decisions
+          set created_at = '2026-01-01T00:00:00.000200Z'::timestamptz
+          where id = ${decisionId}`);
+      }
+      await db.execute(sql`update heartbeat_runs
+        set created_at = ${scenario === "current_round"
+          ? "2026-01-01T00:00:00.000300Z"
+          : "2026-01-01T00:00:00.000100Z"}::timestamptz
+        where id = ${runId}`);
+      await db.update(issues).set({ executionState: {
+        status: "pending",
+        currentStageId: randomUUID(),
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId },
+        returnAssignee: { type: "agent", agentId },
+        reviewRequest: { instructions: "Review the completed work." },
+        completedStageIds: [],
+        lastDecisionId: decisionId,
+        lastDecisionOutcome: "changes_requested",
+      }, executionRunId: runId }).where(eq(issues.id, issueId));
+
+      const release = createReleaseIssueExecution({
+        issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+        recovery: { escalateStrandedAssignedIssue: async () => {}, escalateStrandedRecoveryIssueInPlace: async () => {} },
+      });
+      const result = await release({ companyId, runId, now: new Date() });
+
+      if (scenario === "current_round") {
+        // Same-round cancelled recovery still blocks instead of silently
+        // retrying an automatic recovery run forever.
+        expect(result.outcome.kind).toBe("blocked");
+      } else {
+        // An earlier-round run, or an unverifiable referenced decision, has
+        // no authority to classify the current pending review attempt.
+        expect(result.outcome.kind).toBe("released");
+      }
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+    },
+  );
 
   it("releases an acknowledged native handoff without blocking or restarting the old owner", async () => {
     const companyId = await seedCompany();

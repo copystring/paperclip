@@ -861,12 +861,18 @@ export interface WakeupOptions {
   contextSnapshot?: Record<string, unknown>;
   issueStateGuard?: {
     statuses: string[];
-    assigneeAgentId: string;
+    assigneeAgentId: string | null;
     statusVersion?: number;
     monitorNextCheckAt?: string;
     monitorWakeRequestedAt?: string;
     /** Internal diagnostic only; the callback cannot grant admission. */
     onExecutionDeferred?: (blockerCause: string) => void;
+    reviewAttempt?: {
+      decisionId: string | null;
+      participantAgentId: string;
+      currentStageId?: string | null;
+      executionPolicy?: unknown;
+    };
   };
   /** Keep causally distinct external chat continuations out of an existing run. */
   allowRunCoalescing?: boolean;

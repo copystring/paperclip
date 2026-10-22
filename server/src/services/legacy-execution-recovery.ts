@@ -1,4 +1,5 @@
 import { notifyExecutionRunWork } from "./execution-control-notifications.js";
+import { hasNonDispatchContradiction, isNonDispatchVerified, matchesNonDispatchSource } from "./non-dispatch-receipt.js";
 import { hasRequiredWorkspaceRecovery, preserveWorkspaceRestoreRecoveryMetadata, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "./workspace-restore-recovery-state.js";
 import { hasUnrestoredRemoteWorkspace, preserveLegacyWorkspaceRestoreSources, type LegacyWorkspaceRestoreSource } from "./legacy-workspace-restore-recovery.js";
 import { isPreDispatchReviewWaitVerified } from "./pre-dispatch-review-wait.js";
@@ -62,6 +63,7 @@ export function legacyExecutionNeedsReconciliation(
 /** Admission-wait receipts are only exempt after retained execution evidence agrees.
  * The synchronous classifier stays conservative for callers without a DB proof. */
 export async function legacyExecutionNeedsReconciliationWithEvidence(db: Db, run: Run): Promise<boolean> {
+  if (run.resultJson?.nonDispatchReceipt) return !(await isNonDispatchVerified(db, run));
   return await hasUnrestoredRemoteWorkspace(db, run) ||
     (legacyExecutionNeedsReconciliation(run) && !(await isPreDispatchReviewWaitVerified(db, run))
       && !(await isPreDispatchExecutionWaitVerified(db, run)));
@@ -105,6 +107,13 @@ export async function terminalizeLegacyExecution(input: {
     )).for("update");
     if (!current || (current.runtimeMode !== "legacy" && !(input.recordRestoreFailureOnly && current.runtimeMode === "native")) ||
         (!input.recordRestoreFailureOnly && !(input.fromStatuses ?? [run.status]).includes(current.status))) return null;
+    // Validate the receipt under the same issue → run locks used by claimers,
+    // before mutating run, issue, wake, or recovery state.
+    const receipt = patch?.resultJson?.nonDispatchReceipt;
+    if (receipt && (status !== "cancelled" || input.recordRestoreFailureOnly ||
+        !matchesNonDispatchSource(current, receipt) ||
+        !task || (receipt as Record<string, unknown>).issueStatusVersion !== task.statusVersion ||
+        await hasNonDispatchContradiction(tx as unknown as Db, current))) return null;
     if (patch?.resultJson !== undefined) patch = { ...patch,
       resultJson: preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,
         input.recordRestoreFailureOnly ? { ...current.resultJson, ...patch.resultJson } : patch.resultJson),

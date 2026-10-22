@@ -2938,6 +2938,21 @@ function renderPaperclipWakePromptBody(
         `You are waking as the active ${executionStage.wakeRole} for this issue.`,
         "Do not execute the task itself or continue executor work.",
         "Review the issue and choose one of the allowed actions above.",
+        "Only the current execution participant may decide.",
+        ...(executionStage.allowedActions.length === 0
+          ? ["No decision action is allowed for this wake; do not PATCH a decision."]
+          : []),
+        ...(executionStage.allowedActions.includes("approve")
+          ? [
+              "For approve, send the authenticated PATCH /api/issues/{issueId} with X-Paperclip-Run-Id, status=done, and a decision comment.",
+            ]
+          : []),
+        ...(executionStage.allowedActions.includes("request_changes")
+          ? [
+              "For request_changes, send the authenticated PATCH /api/issues/{issueId} with X-Paperclip-Run-Id, status=in_progress, and a comment describing the requested changes.",
+            ]
+          : []),
+        "A comment, report, or statement of approval alone does not make a decision. After PATCH, GET the issue and confirm the native executionState transition (including the next participant or completed stage) before reporting the decision as complete.",
         "If you request changes, the workflow routes back to the stored return assignee.",
         "",
       );

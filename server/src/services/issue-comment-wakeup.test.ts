@@ -1,7 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { shouldWakeAssigneeForIssueComment } from "./issue-comment-wakeup.js";
+import { isCurrentRunWorkHandback, shouldWakeAssigneeForIssueComment } from "./issue-comment-wakeup.js";
 
 describe("shouldWakeAssigneeForIssueComment", () => {
+  it("preserves an explicit current-owner work handback to todo", () => {
+    const input = { selfComment: true, resumeRequested: true, commentCreatedByRunId: "current",
+      issueAtCommentStart: { status: "in_progress", executionRunId: "current" }, reopened: false, currentStatus: "todo" };
+    expect(isCurrentRunWorkHandback(input)).toBe(true);
+    expect(shouldWakeAssigneeForIssueComment(input)).toBe(true);
+  });
+  it.each(["no_resume", "already_todo", "still_running", "closed", "foreign_run"])("does not treat %s as an owned work handback", change => {
+    const input = { selfComment: true, resumeRequested: change !== "no_resume", commentCreatedByRunId: change === "foreign_run" ? "other" : "current",
+      issueAtCommentStart: { status: change === "already_todo" ? "todo" : "in_progress", executionRunId: "current" },
+      reopened: false, currentStatus: change === "closed" ? "done" : change === "still_running" ? "in_progress" : "todo" };
+    expect(isCurrentRunWorkHandback(input)).toBe(false);
+  });
   it("suppresses explicit resume from the run that currently owns the issue", () => {
     expect(
       shouldWakeAssigneeForIssueComment({

@@ -517,13 +517,25 @@ async function runReleaseRecoveryTail(
   });
 
   const currentParticipant = currentAgentParticipant(issue);
-  const reviewParticipantApplies =
+  const reviewParticipantCandidate =
     issue.status === "in_review" &&
     !issue.assigneeUserId &&
     currentParticipant !== null &&
     currentParticipant.agentId === run.agentId &&
     isExecutionReviewParticipantRecoveryEligibleRun(run) &&
     HEARTBEAT_RUN_TERMINAL_STATUSES.has(run.status);
+  const currentReviewDecisionId = readNonEmptyString(issue.executionState?.lastDecisionId);
+  // `lastDecisionId` is the durable review-attempt boundary. When it exists,
+  // a participant's older terminal run must not influence classification of
+  // the newly pending round. Missing/stale decision references fail closed in
+  // the adapter's company/issue-scoped comparison.
+  const reviewParticipantApplies = reviewParticipantCandidate &&
+    (!currentReviewDecisionId || await transaction.isRunInCurrentExecutionReviewAttempt({
+      companyId: issue.companyId,
+      issueId: issue.id,
+      runId: run.id,
+      decisionId: currentReviewDecisionId,
+    }));
 
   const immediateApplies =
     (issue.status === "todo" || issue.status === "in_progress") &&

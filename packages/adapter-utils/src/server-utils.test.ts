@@ -2887,6 +2887,69 @@ describe("renderPaperclipWakePrompt", () => {
     );
   });
 
+  it.each([
+    ["reviewer", ["approve"], "status=done", "status=in_progress"],
+    ["approver", ["request_changes"], "status=in_progress", "status=done"],
+  ] as const)(
+    "renders only allowed native decision steps for the active %s",
+    (wakeRole, allowedActions, expectedAction, forbiddenAction) => {
+      const prompt = renderPaperclipWakePrompt({
+        reason: "execution_review_requested",
+        issue: { id: "issue-1", identifier: "PAP-2011", title: "Review", status: "in_review" },
+        executionStage: {
+          wakeRole,
+          stageId: "stage-1",
+          stageType: wakeRole === "approver" ? "approval" : "review",
+          currentParticipant: { type: "agent", agentId: "agent-1" },
+          returnAssignee: { type: "agent", agentId: "agent-2" },
+          allowedActions: [...allowedActions],
+        },
+        fallbackFetchNeeded: false,
+      });
+
+      expect(prompt).toContain("PATCH /api/issues/{issueId}");
+      expect(prompt).toContain("X-Paperclip-Run-Id");
+      expect(prompt).toContain(expectedAction);
+      expect(prompt).not.toContain(forbiddenAction);
+      expect(prompt).toContain("A comment, report, or statement of approval alone does not make a decision.");
+      expect(prompt).toContain("GET the issue and confirm the native executionState transition");
+    },
+  );
+
+  it("does not give executors or wakes without allowed actions a decision path", () => {
+    const executorPrompt = renderPaperclipWakePrompt({
+      reason: "execution_review_requested",
+      issue: { id: "issue-1", identifier: "PAP-2011", title: "Review", status: "in_progress" },
+      executionStage: {
+        wakeRole: "executor",
+        stageId: "stage-1",
+        stageType: "review",
+        currentParticipant: { type: "agent", agentId: "agent-1" },
+        returnAssignee: { type: "agent", agentId: "agent-2" },
+        allowedActions: ["approve", "request_changes"],
+      },
+      fallbackFetchNeeded: false,
+    });
+    const noActionsPrompt = renderPaperclipWakePrompt({
+      reason: "execution_review_requested",
+      issue: { id: "issue-1", identifier: "PAP-2011", title: "Review", status: "in_review" },
+      executionStage: {
+        wakeRole: "reviewer",
+        stageId: "stage-1",
+        stageType: "review",
+        currentParticipant: { type: "agent", agentId: "agent-1" },
+        returnAssignee: { type: "agent", agentId: "agent-2" },
+        allowedActions: [],
+      },
+      fallbackFetchNeeded: false,
+    });
+
+    expect(executorPrompt).not.toContain("PATCH /api/issues/{issueId}");
+    expect(noActionsPrompt).toContain("No decision action is allowed for this wake; do not PATCH a decision.");
+    expect(noActionsPrompt).not.toContain("status=done");
+    expect(noActionsPrompt).not.toContain("status=in_progress");
+  });
+
   it("delivers typed disposition repair instructions without liveness classification", () => {
     const payload = { reason: "issue_disposition_repair", issue: { id: "issue-1", status: "in_progress" },
       dispositionRepair: { attempt: 1, maxAttempts: 2, sourceRunId: "source-1", instruction: "Record completion or a durable waiting path through the API." } };
