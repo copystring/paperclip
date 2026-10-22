@@ -28,6 +28,9 @@ export function queueIssueAssignmentWakeup(input: {
   reason: string;
   mutation: string;
   contextSource: string;
+  /** Server-resolved execution identity, which may not be visible to a
+   * separate queue connection until the caller's transaction commits. */
+  responsibleUserId?: string | null;
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   taskKey?: string | null;
@@ -61,6 +64,7 @@ export function queueIssueAssignmentWakeup(input: {
       contextSnapshot: {
         issueId: input.issue.id,
         source: input.contextSource,
+        ...(input.responsibleUserId ? { responsibleUserId: input.responsibleUserId } : {}),
         ...(input.taskKey ? { taskKey: input.taskKey } : {}),
         ...(input.wakeCommentId ? { wakeCommentId: input.wakeCommentId } : {}),
         ...(input.wakeCommentId && input.attachmentOmissionReasons
