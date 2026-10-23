@@ -174,6 +174,7 @@ export function errorHandler(
       !Array.isArray(responseDetailsValue)
         ? (responseDetailsValue as Record<string, unknown>)
         : null;
+    const reasonCode = (err as { reasonCode?: unknown }).reasonCode;
     recordResponsibleUserDenialFromHttpError(req, details);
     if (err.status >= 500) {
       const reportableError = sanitizeSecretSensitiveError(req, err);
@@ -200,6 +201,9 @@ export function errorHandler(
         ? { error: "Internal server error" }
         : {
             error: sanitizeSecretSensitiveResponse(req, err.message),
+            ...(typeof reasonCode === "string"
+              ? { reasonCode: sanitizeSecretSensitiveResponse(req, reasonCode) }
+              : {}),
             ...(typeof responseDetails?.code === "string"
               ? { code: responseDetails.code }
               : {}),
