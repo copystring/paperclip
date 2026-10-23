@@ -792,6 +792,167 @@ class CandidateTests(unittest.TestCase):
             self.assertTrue((user_dir / "important.json").exists())
 
 
+class CandidateRetentionTests(unittest.TestCase):
+    def make_candidates(self, root: Path):
+        cli = root / ".paperclip/cli"
+        installs = cli / "installs/npm"
+        installs.mkdir(parents=True)
+        candidates = []
+        for index in range(5):
+            path = installs / f"owned-{index}"
+            path.mkdir()
+            (path / ".canary-train-owned.json").write_text(json.dumps({
+                "schemaVersion": 1, "repository": "copystring/paperclip",
+                "tag": f"patched-canary-{index}", "patchedCommit": "1" * 40,
+            }))
+            (path / "runtime.js").write_text(str(index))
+            os.utime(path, (index + 1, index + 1))
+            candidates.append(path)
+        (cli / "current").symlink_to(candidates[0])
+        (cli / "install.json").write_text(json.dumps({
+            "version": "active-version", "payloadPath": str(candidates[0]),
+            "previous": [{"payloadPath": str(candidates[1])}],
+        }))
+        return cli, candidates
+
+    def test_run_with_no_release_keeps_existing_stage_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, candidates = self.make_candidates(root)
+            d = deployer(root, retainedInactiveCandidates=0)
+            d._verify_active_fingerprint = lambda current, install: None
+            d._verify_active = lambda version: None
+            d.find_release = lambda: (_ for _ in ()).throw(
+                deploy.DeployError("No patched Canary release is published"))
+            d._write_status = lambda data: None
+
+            result = d.run("check")
+
+            self.assertEqual(result["state"], "waiting")
+            self.assertTrue(all(path.exists() for path in candidates))
+
+    def test_run_up_to_date_prunes_history_but_preserves_exact_reuse_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli, candidates = self.make_candidates(root)
+            install_path = cli / "install.json"
+            install = json.loads(install_path.read_text())
+            install["patchedRelease"] = {"tag": "current-tag", "patchedCommit": "1" * 40}
+            install_path.write_text(json.dumps(install))
+            target = candidates[4]
+            target.rename(root / ".paperclip/cli/installs/npm/candidate-v-patched-77-1")
+            target = root / ".paperclip/cli/installs/npm/candidate-v-patched-77-1"
+            d = deployer(root, retainedInactiveCandidates=0)
+            d._verify_active_fingerprint = lambda current, install: None
+            d._verify_active = lambda version: None
+            d.find_release = lambda: ({"tag_name": "current-tag"}, {
+                "version": "candidate-v", "runId": "77", "runAttempt": 1,
+            }, {})
+            d._write_status = lambda data: None
+
+            result = d.run("run")
+
+            self.assertTrue(result["current"])
+            self.assertTrue(candidates[0].exists())
+            self.assertTrue(target.exists(), "up-to-date prune must preserve the exact reusable target")
+            self.assertFalse(candidates[1].exists())
+            self.assertFalse(candidates[2].exists())
+            self.assertFalse(candidates[3].exists())
+
+    def test_check_mode_never_prunes_inactive_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli, candidates = self.make_candidates(root)
+            install_path = cli / "install.json"
+            install = json.loads(install_path.read_text())
+            install["patchedRelease"] = {"tag": "current-tag", "patchedCommit": "1" * 40}
+            install_path.write_text(json.dumps(install))
+            d = deployer(root, retainedInactiveCandidates=0)
+            d._verify_active_fingerprint = lambda current, install: None
+            d._verify_active = lambda version: None
+            d.find_release = lambda: ({"tag_name": "current-tag"}, {
+                "version": "active-version", "runId": "77", "runAttempt": 1,
+            }, {})
+            d._write_status = lambda data: None
+
+            self.assertTrue(d.run("check")["current"])
+            self.assertTrue(all(path.exists() for path in candidates))
+
+    def test_run_keeps_history_if_pointer_or_manifest_changes_after_health(self):
+        for mutation in ("pointer", "manifest"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                cli, candidates = self.make_candidates(root)
+                install_path = cli / "install.json"
+                install = json.loads(install_path.read_text())
+                install["patchedRelease"] = {"tag": "current-tag", "patchedCommit": "1" * 40}
+                install_path.write_text(json.dumps(install))
+                d = deployer(root, retainedInactiveCandidates=0)
+                d._verify_active_fingerprint = lambda current, install: None
+
+                def change_after_health(version):
+                    if mutation == "pointer":
+                        current = cli / "current"
+                        current.unlink()
+                        current.symlink_to(candidates[2])
+                    else:
+                        changed = json.loads(install_path.read_text())
+                        changed["patchedRelease"]["patchedCommit"] = "2" * 40
+                        install_path.write_text(json.dumps(changed))
+
+                d._verify_active = change_after_health
+                d.find_release = lambda: ({"tag_name": "current-tag"}, {
+                    "version": "candidate-v", "runId": "77", "runAttempt": 1,
+                }, {})
+                d._write_status = lambda data: None
+
+                d.run("run")
+
+                self.assertTrue(all(path.exists() for path in candidates),
+                                "changed health identity must prevent zero-retention cleanup")
+
+    def test_zero_retention_preserves_history_after_failed_health_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli, candidates = self.make_candidates(root)
+            install_path = cli / "install.json"
+            install = json.loads(install_path.read_text())
+            install["patchedRelease"] = {"tag": "current-tag", "patchedCommit": "1" * 40}
+            install_path.write_text(json.dumps(install))
+            d = deployer(root, retainedInactiveCandidates=0)
+            d._verify_active_fingerprint = lambda current, install: None
+            health_calls = []
+
+            def fail_health(version):
+                health_calls.append(version)
+                raise deploy.DeployError("active health unavailable")
+
+            d._verify_active = fail_health
+            d.find_release = lambda: ({"tag_name": "current-tag"}, {
+                "version": "active-version", "runId": "77", "runAttempt": 1,
+            }, {})
+            d._write_status = lambda data: None
+
+            d.run("run")
+
+            self.assertEqual(health_calls, ["active-version"])
+            self.assertTrue(all(path.exists() for path in candidates))
+
+    def test_invalid_retention_values_fail_closed(self):
+        for value in (True, False, -1, 1.5, "0", None):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                _, candidates = self.make_candidates(root)
+                with self.assertRaisesRegex(deploy.DeployError, "non-negative integer"):
+                    deployer(root, retainedInactiveCandidates=value)
+                self.assertTrue(all(path.exists() for path in candidates))
+
+    def test_omitted_retention_keeps_legacy_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = deployer(Path(tmp))
+            self.assertEqual(d.retained_inactive_candidates, 3)
+
+
 class ManifestAwareProbeTests(unittest.TestCase):
     def test_legacy_probe_keeps_existing_arguments(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1163,11 +1324,13 @@ class ActivationTests(unittest.TestCase):
                 return SimpleNamespace(returncode=next(results))
 
             d = self.configured(root, command)
+            d.retained_inactive_candidates = 0
             d._wait_health = lambda version, commit=None, timeout=90: version == previous["version"]
             with self.assertRaisesRegex(deploy.DeployError, "restart was rejected"):
                 d.activate(candidate, self.manifest(), d._migration_diff(old, candidate), "token")
             self.assertEqual(current.resolve(), old.resolve())
             self.assertEqual(json.loads((cli / "install.json").read_text()), previous)
+            self.assertTrue(old.exists(), "failed activation must retain the rollback payload")
             self.assertEqual(len(calls), 2)
 
     def test_staged_candidate_retry_reuses_verified_candidate(self):
@@ -1175,6 +1338,7 @@ class ActivationTests(unittest.TestCase):
             root = Path(tmp)
             _, old, candidate, _, _ = self.make_install(root)
             d = self.configured(root, lambda *a, **k: SimpleNamespace(returncode=1))
+            d.retained_inactive_candidates = 0
             item = self.manifest()
             item.update({"runId": "42", "runAttempt": 1, "archiveSha256": "a" * 64})
             # A deterministic receipt covers post-hook file bytes and all
@@ -1199,6 +1363,7 @@ class ActivationTests(unittest.TestCase):
             d._npm_metadata = lambda requested: ["paperclipai", "@paperclipai/server"]
             path, migration_diff = d.stage(item, {"payload.tar.gz": {"size": 1024}})
             self.assertEqual(path, candidate)
+            self.assertTrue(candidate.exists(), "prune must retain the exact staged target for reuse")
             self.assertEqual(migration_diff["baselinePath"], str(old.resolve()))
             (candidate / "node_modules/@paperclipai/server/dist/build-info.json").write_text("tampered")
             with self.assertRaisesRegex(deploy.DeployError, "npm install failed"):

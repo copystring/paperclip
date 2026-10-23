@@ -230,6 +230,11 @@ class Http:
 class Deployer:
     def __init__(self, config: dict, http=None, command=subprocess.run, clock=time.time):
         self.c = config
+        retained_inactive = config.get("retainedInactiveCandidates", 3)
+        if type(retained_inactive) is not int or retained_inactive < 0:
+            raise DeployError("Inactive candidate retention must be a non-negative integer")
+        self.retained_inactive_candidates = retained_inactive
+        self._active_health_verified_identity = None
         self.http = http or Http()
         self.command = command
         self.clock = clock
@@ -352,9 +357,12 @@ class Deployer:
         return packages
 
     def stage(self, manifest: dict, assets: dict):
-        self._prune_owned_candidates()
         stem = f"{manifest['version']}-patched-{manifest['runId']}-{manifest['runAttempt']}"
         target = self.installs / stem
+        # Keep a previously verified target available for reuse while pruning.
+        # Ownership is verified below; unowned entries are never pruned.
+        reusable_target = target if target.is_dir() and not target.is_symlink() else None
+        self._prune_owned_candidates(reusable_target)
         if target.exists():
             try:
                 self._verify_owned_candidate(target, manifest)
@@ -607,16 +615,37 @@ class Deployer:
         shutil.rmtree(candidate)
 
     def _prune_owned_candidates(self, newest: Path | None = None):
-        """Retain active/history candidates plus three newest owned candidates."""
+        """Prune only owned candidates, retaining the active/history set by policy."""
         try:
             root = self.installs.resolve(strict=True)
             current = self.current_link.resolve(strict=True)
             install = self._read_install()
             preserved = {current}
             preserved.add(Path(install.get("payloadPath", "")).resolve())
-            for entry in install.get("previous", []):
-                if isinstance(entry, dict) and isinstance(entry.get("payloadPath"), str):
-                    preserved.add(Path(entry["payloadPath"]).resolve())
+            # A zero retention count may remove old history payloads only after
+            # the exact active install has passed its version/commit health
+            # readback. Until then, an interrupted prior cutover may still need
+            # one of those payloads for rollback.
+            active_identity = None
+            install_payload = install.get("payloadPath")
+            if isinstance(install_payload, str):
+                try:
+                    if Path(install_payload).resolve(strict=True) == current:
+                        active_identity = (
+                            str(current), install.get("version"),
+                            (install.get("patchedRelease") or {}).get("patchedCommit"),
+                        )
+                except OSError:
+                    pass
+            preserve_history = (self.retained_inactive_candidates != 0 or
+                                active_identity is None or
+                                active_identity != self._active_health_verified_identity)
+            if self.retained_inactive_candidates == 0 and preserve_history:
+                return
+            if preserve_history:
+                for entry in install.get("previous", []):
+                    if isinstance(entry, dict) and isinstance(entry.get("payloadPath"), str):
+                        preserved.add(Path(entry["payloadPath"]).resolve())
             owned = []
             for candidate in root.iterdir():
                 if candidate.is_symlink() or not candidate.is_dir() or candidate.resolve().parent != root:
@@ -632,7 +661,10 @@ class Deployer:
                         not receipt.get("tag") or not receipt.get("patchedCommit")):
                     continue
                 owned.append(candidate.resolve())
-            keep = preserved | {p for p in sorted(owned, key=lambda p: p.stat().st_mtime, reverse=True)[:3]}
+            keep = preserved | {
+                p for p in sorted(owned, key=lambda p: p.stat().st_mtime, reverse=True)
+                [:self.retained_inactive_candidates]
+            }
             if newest is not None:
                 keep.add(newest.resolve())
             for candidate in owned:
@@ -1505,10 +1537,43 @@ class Deployer:
         if not self._wait_health(expected_version, receipt.get("patchedCommit"), timeout=5):
             raise DeployError("Paperclip health readback failed")
 
+    def _active_install_identity(self):
+        install = self._read_install()
+        current = self.current_link.resolve(strict=True)
+        payload = install.get("payloadPath")
+        if not isinstance(payload, str) or Path(payload).resolve(strict=True) != current:
+            raise DeployError("Active symlink and install manifest disagree")
+        receipt = install.get("patchedRelease") or {}
+        version = install.get("version")
+        commit = receipt.get("patchedCommit")
+        if (not isinstance(version, str) or not version or not isinstance(commit, str) or
+                not re.fullmatch(r"[0-9a-f]{40}", commit)):
+            raise DeployError("Active install has no exact version and patched-commit identity")
+        return (str(current), version, commit)
+
+    def _verify_active_for_prune(self, expected_version: str):
+        self._active_health_verified_identity = None
+        before = self._active_install_identity()
+        self._verify_active(expected_version)
+        after = self._active_install_identity()
+        if before != after:
+            raise DeployError("Active install changed during health verification")
+        self._active_health_verified_identity = after
+
     def run(self, mode="check"):
         install = self._read_install()
         current = self.current_link.resolve(strict=True)
         self._verify_active_fingerprint(current, install)
+        self._active_health_verified_identity = None
+        if self.retained_inactive_candidates == 0:
+            # Health must attest the install manifest's version and patched
+            # commit before recorded rollback payloads become eligible for
+            # retention cleanup. A failed/unavailable health read is fail-safe:
+            # keep history and continue through the existing update path.
+            try:
+                self._verify_active_for_prune(install.get("version"))
+            except Exception:
+                self._active_health_verified_identity = None
         try:
             release, manifest, assets = self.find_release()
         except DeployError as exc:
@@ -1520,6 +1585,11 @@ class Deployer:
         manifest["tag"] = release["tag_name"]
         current_tag = (install.get("patchedRelease") or {}).get("tag")
         if current_tag == release["tag_name"]:
+            if self.retained_inactive_candidates == 0 and mode != "check":
+                stem = f"{manifest['version']}-patched-{manifest['runId']}-{manifest['runAttempt']}"
+                target = self.installs / stem
+                reusable_target = target if target.is_dir() and not target.is_symlink() else None
+                self._prune_owned_candidates(reusable_target)
             self._write_status({"state": "current", "tag": release["tag_name"], "version": manifest["version"]})
             return {"available": True, "current": True, "tag": release["tag_name"], "version": manifest["version"]}
         if mode == "check":
@@ -1532,6 +1602,15 @@ class Deployer:
         token = self.load_token()
         result = {"activated": True, **self.activate(candidate, manifest, migration_diff, token)}
         self._write_status({"state": "active", "tag": release["tag_name"], "version": manifest["version"]})
+        if self.retained_inactive_candidates == 0:
+            # activate() returned only after candidate health verification and
+            # its rollback window closed. Preserve the active target; release
+            # older history payloads while retaining their install metadata.
+            try:
+                self._verify_active_for_prune(manifest["version"])
+            except Exception:
+                self._active_health_verified_identity = None
+            self._prune_owned_candidates(candidate)
         return result
 
     def _write_status(self, data):
