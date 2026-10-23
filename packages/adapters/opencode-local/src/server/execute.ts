@@ -332,7 +332,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     env.PAPERCLIP_API_KEY = authToken;
   }
   const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({
-    env, config, targetIsRemote: executionTargetIsRemote,
+    env,
+    config,
+    targetIsRemote: executionTargetIsRemote,
+    runtimeMcpServers: ctx.runtimeMcp?.getServers() ?? [],
   });
   const localRuntimeConfigHome = preparedRuntimeConfig.runtimeConfigHome ?? "";
   try {

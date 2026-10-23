@@ -286,6 +286,77 @@ describe("OpenCode local skill injection", () => {
   });
 });
 
+describe("OpenCode runtime MCP handoff", () => {
+  let configHome: string;
+
+  beforeEach(async () => {
+    configHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-mcp-handoff-"));
+    vi.stubEnv("XDG_CONFIG_HOME", configHome);
+    vi.stubEnv("OPENCODE_ALLOW_ALL_MODELS", "1");
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(configHome, { recursive: true, force: true });
+  });
+
+  it("passes the run MCP server into OpenCode and removes its local secret config after execution", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-mcp");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", "utf8");
+    await fs.chmod(commandPath, 0o755);
+    const secret = "runtime-mcp-run-secret";
+    let configPath = "";
+    let configAtExecution: Record<string, unknown> | undefined;
+    const logOutput: string[] = [];
+
+    runProcessMock.mockReset();
+    runProcessMock.mockImplementation(async (...args) => {
+      const options = args[4] as { env: Record<string, string> };
+      if (args[3].includes("run")) {
+        configPath = path.join(options.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
+        configAtExecution = JSON.parse(await fs.readFile(configPath, "utf8")) as Record<string, unknown>;
+      }
+      return probeResult({ stdout: JSON.stringify({ type: "text", sessionID: "mcp-session", part: { text: "done" } }) });
+    });
+
+    const result = await execute({
+      runId: "run-mcp-handoff",
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        command: commandPath,
+        cwd: configHome,
+        model: "openai/gpt-5",
+        dangerouslySkipPermissions: false,
+        env: { OPENCODE_ALLOW_ALL_MODELS: "1" },
+      },
+      context: {},
+      runtimeMcp: {
+        getServers: () => [{
+          name: "PowerShell on Felix PC",
+          connectionId: "felix-pc-powershell",
+          url: "https://paperclip.example/api/mcp/run-1",
+          token: secret,
+        }],
+      },
+      onLog: async (_stream, chunk) => { logOutput.push(chunk); },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(configAtExecution?.permission).toBeUndefined();
+    expect(configAtExecution?.mcp).toMatchObject({
+      PowerShell_on_Felix_PC: {
+        type: "remote",
+        url: "https://paperclip.example/api/mcp/run-1",
+        headers: { Authorization: `Bearer ${secret}` },
+        oauth: false,
+      },
+    });
+    expect(JSON.stringify({ result, logs: logOutput })).not.toContain(secret);
+    await expect(fs.access(configPath)).rejects.toThrow();
+  });
+});
+
 describe("ensureRemoteOpenCodeModelConfiguredAndAvailable", () => {
   afterEach(() => {
     delete process.env.OPENCODE_ALLOW_ALL_MODELS;
