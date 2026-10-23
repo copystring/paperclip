@@ -792,6 +792,82 @@ class CandidateTests(unittest.TestCase):
             self.assertTrue((user_dir / "important.json").exists())
 
 
+class CandidateRetentionTests(unittest.TestCase):
+    def make_candidates(self, root: Path):
+        cli = root / ".paperclip/cli"
+        installs = cli / "installs/npm"
+        installs.mkdir(parents=True)
+        candidates = []
+        for index in range(5):
+            path = installs / f"owned-{index}"
+            path.mkdir()
+            (path / ".canary-train-owned.json").write_text(json.dumps({
+                "schemaVersion": 1, "repository": "copystring/paperclip",
+                "tag": f"patched-canary-{index}", "patchedCommit": "1" * 40,
+            }))
+            (path / "runtime.js").write_text(str(index))
+            os.utime(path, (index + 1, index + 1))
+            candidates.append(path)
+        (cli / "current").symlink_to(candidates[0])
+        (cli / "install.json").write_text(json.dumps({
+            "version": "active-version", "payloadPath": str(candidates[0]),
+            "previous": [{"payloadPath": str(candidates[1])}],
+        }))
+        return cli, candidates
+
+    def test_zero_retention_prunes_history_only_after_active_health_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, candidates = self.make_candidates(root)
+            d = deployer(root, retainedInactiveCandidates=0)
+            d._verify_active_fingerprint = lambda current, install: None
+            d._verify_active = lambda version: None
+            d.find_release = lambda: (_ for _ in ()).throw(
+                deploy.DeployError("No patched Canary release is published"))
+            d._write_status = lambda data: None
+
+            result = d.run("check")
+
+            self.assertEqual(result["state"], "waiting")
+            self.assertTrue(candidates[0].exists())
+            self.assertTrue(all(not path.exists() for path in candidates[1:]))
+            install = json.loads((root / ".paperclip/cli/install.json").read_text())
+            self.assertEqual(install["previous"], [{"payloadPath": str(candidates[1])}])
+
+    def test_zero_retention_preserves_history_after_failed_health_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, candidates = self.make_candidates(root)
+            d = deployer(root, retainedInactiveCandidates=0)
+            d._verify_active_fingerprint = lambda current, install: None
+
+            def fail_health(version):
+                raise deploy.DeployError("active health unavailable")
+
+            d._verify_active = fail_health
+            d.find_release = lambda: (_ for _ in ()).throw(
+                deploy.DeployError("No patched Canary release is published"))
+            d._write_status = lambda data: None
+
+            d.run("check")
+
+            self.assertTrue(all(path.exists() for path in candidates))
+
+    def test_invalid_retention_values_fail_closed(self):
+        for value in (True, False, -1, 1.5, "0", None):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                _, candidates = self.make_candidates(root)
+                with self.assertRaisesRegex(deploy.DeployError, "non-negative integer"):
+                    deployer(root, retainedInactiveCandidates=value)
+                self.assertTrue(all(path.exists() for path in candidates))
+
+    def test_omitted_retention_keeps_legacy_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = deployer(Path(tmp))
+            self.assertEqual(d.retained_inactive_candidates, 3)
+
+
 class ManifestAwareProbeTests(unittest.TestCase):
     def test_legacy_probe_keeps_existing_arguments(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1163,11 +1239,13 @@ class ActivationTests(unittest.TestCase):
                 return SimpleNamespace(returncode=next(results))
 
             d = self.configured(root, command)
+            d.retained_inactive_candidates = 0
             d._wait_health = lambda version, commit=None, timeout=90: version == previous["version"]
             with self.assertRaisesRegex(deploy.DeployError, "restart was rejected"):
                 d.activate(candidate, self.manifest(), d._migration_diff(old, candidate), "token")
             self.assertEqual(current.resolve(), old.resolve())
             self.assertEqual(json.loads((cli / "install.json").read_text()), previous)
+            self.assertTrue(old.exists(), "failed activation must retain the rollback payload")
             self.assertEqual(len(calls), 2)
 
     def test_staged_candidate_retry_reuses_verified_candidate(self):
@@ -1175,6 +1253,8 @@ class ActivationTests(unittest.TestCase):
             root = Path(tmp)
             _, old, candidate, _, _ = self.make_install(root)
             d = self.configured(root, lambda *a, **k: SimpleNamespace(returncode=1))
+            d.retained_inactive_candidates = 0
+            d._active_health_verified_for_prune = True
             item = self.manifest()
             item.update({"runId": "42", "runAttempt": 1, "archiveSha256": "a" * 64})
             # A deterministic receipt covers post-hook file bytes and all
@@ -1199,6 +1279,7 @@ class ActivationTests(unittest.TestCase):
             d._npm_metadata = lambda requested: ["paperclipai", "@paperclipai/server"]
             path, migration_diff = d.stage(item, {"payload.tar.gz": {"size": 1024}})
             self.assertEqual(path, candidate)
+            self.assertTrue(candidate.exists(), "prune must retain the exact staged target for reuse")
             self.assertEqual(migration_diff["baselinePath"], str(old.resolve()))
             (candidate / "node_modules/@paperclipai/server/dist/build-info.json").write_text("tampered")
             with self.assertRaisesRegex(deploy.DeployError, "npm install failed"):

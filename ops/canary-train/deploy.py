@@ -230,6 +230,11 @@ class Http:
 class Deployer:
     def __init__(self, config: dict, http=None, command=subprocess.run, clock=time.time):
         self.c = config
+        retained_inactive = config.get("retainedInactiveCandidates", 3)
+        if type(retained_inactive) is not int or retained_inactive < 0:
+            raise DeployError("Inactive candidate retention must be a non-negative integer")
+        self.retained_inactive_candidates = retained_inactive
+        self._active_health_verified_for_prune = False
         self.http = http or Http()
         self.command = command
         self.clock = clock
@@ -352,9 +357,12 @@ class Deployer:
         return packages
 
     def stage(self, manifest: dict, assets: dict):
-        self._prune_owned_candidates()
         stem = f"{manifest['version']}-patched-{manifest['runId']}-{manifest['runAttempt']}"
         target = self.installs / stem
+        # Keep a previously verified target available for reuse while pruning.
+        # Unowned or symlink targets are never admitted into the retention set.
+        reusable_target = target if target.is_dir() and not target.is_symlink() else None
+        self._prune_owned_candidates(reusable_target)
         if target.exists():
             try:
                 self._verify_owned_candidate(target, manifest)
@@ -607,16 +615,23 @@ class Deployer:
         shutil.rmtree(candidate)
 
     def _prune_owned_candidates(self, newest: Path | None = None):
-        """Retain active/history candidates plus three newest owned candidates."""
+        """Prune only owned candidates, retaining the active/history set by policy."""
         try:
             root = self.installs.resolve(strict=True)
             current = self.current_link.resolve(strict=True)
             install = self._read_install()
             preserved = {current}
             preserved.add(Path(install.get("payloadPath", "")).resolve())
-            for entry in install.get("previous", []):
-                if isinstance(entry, dict) and isinstance(entry.get("payloadPath"), str):
-                    preserved.add(Path(entry["payloadPath"]).resolve())
+            # A zero retention count may remove old history payloads only after
+            # the exact active install has passed its version/commit health
+            # readback. Until then, an interrupted prior cutover may still need
+            # one of those payloads for rollback.
+            preserve_history = (self.retained_inactive_candidates != 0 or
+                                not self._active_health_verified_for_prune)
+            if preserve_history:
+                for entry in install.get("previous", []):
+                    if isinstance(entry, dict) and isinstance(entry.get("payloadPath"), str):
+                        preserved.add(Path(entry["payloadPath"]).resolve())
             owned = []
             for candidate in root.iterdir():
                 if candidate.is_symlink() or not candidate.is_dir() or candidate.resolve().parent != root:
@@ -632,7 +647,10 @@ class Deployer:
                         not receipt.get("tag") or not receipt.get("patchedCommit")):
                     continue
                 owned.append(candidate.resolve())
-            keep = preserved | {p for p in sorted(owned, key=lambda p: p.stat().st_mtime, reverse=True)[:3]}
+            keep = preserved | {
+                p for p in sorted(owned, key=lambda p: p.stat().st_mtime, reverse=True)
+                [:self.retained_inactive_candidates]
+            }
             if newest is not None:
                 keep.add(newest.resolve())
             for candidate in owned:
@@ -1509,6 +1527,19 @@ class Deployer:
         install = self._read_install()
         current = self.current_link.resolve(strict=True)
         self._verify_active_fingerprint(current, install)
+        self._active_health_verified_for_prune = False
+        if self.retained_inactive_candidates == 0:
+            # Health must attest the install manifest's version and patched
+            # commit before recorded rollback payloads become eligible for
+            # retention cleanup. A failed/unavailable health read is fail-safe:
+            # keep history and continue through the existing update path.
+            try:
+                self._verify_active(install.get("version"))
+            except Exception:
+                pass
+            else:
+                self._active_health_verified_for_prune = True
+                self._prune_owned_candidates()
         try:
             release, manifest, assets = self.find_release()
         except DeployError as exc:
@@ -1532,6 +1563,12 @@ class Deployer:
         token = self.load_token()
         result = {"activated": True, **self.activate(candidate, manifest, migration_diff, token)}
         self._write_status({"state": "active", "tag": release["tag_name"], "version": manifest["version"]})
+        if self.retained_inactive_candidates == 0:
+            # activate() returned only after candidate health verification and
+            # its rollback window closed. Preserve the active target; release
+            # older history payloads while retaining their install metadata.
+            self._active_health_verified_for_prune = True
+            self._prune_owned_candidates(candidate)
         return result
 
     def _write_status(self, data):
