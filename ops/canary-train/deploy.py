@@ -44,6 +44,9 @@ VERSION = re.compile(r"^\d{4}\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
 ASSET_NAMES = {"manifest.json", "payload.tar.gz"}
 MIGRATION_ROOT = "node_modules/@paperclipai/db/dist/migrations/"
 RUNNER_TARGETS = {"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"}
+MIGRATION_RECEIPT_SCHEMA = 1
+MIGRATION_PROBE_SCHEMA = 1
+MIGRATION_PROBE_KIND = "migration-precondition-probe"
 
 
 def sha256(data: bytes) -> str:
@@ -244,6 +247,9 @@ class Deployer:
         self.current_link = self.cli_root / "current"
         self.install_json = self.cli_root / "install.json"
         self.api = str(config.get("apiBase", "")).rstrip("/")
+        # Only manifests whose producing workflow run was checked through the
+        # GitHub API may carry a migration-compatibility receipt into staging.
+        self._verified_workflow_contexts = {}
         if not self.api.startswith("http://127.0.0.1:") and not self.api.startswith("http://localhost:"):
             raise DeployError("Paperclip API must use loopback HTTP")
 
@@ -308,7 +314,11 @@ class Deployer:
                     raise DeployError("Release tag is not bound to its version and workflow run")
                 if release.get("target_commitish") != manifest["controllerCommit"]:
                     raise DeployError("Release target commit does not match the manifest")
-                self.verify_workflow_run(manifest)
+                run = self.verify_workflow_run(manifest)
+                self._verified_workflow_contexts[self._manifest_identity(manifest)] = {
+                    "runId": manifest["runId"], "runAttempt": manifest["runAttempt"],
+                    "controllerCommit": run["head_sha"], "sourceCommit": manifest["sourceCommit"],
+                }
                 return release, manifest, assets
             except ReleaseNotReady as exc:
                 not_ready = exc
@@ -348,7 +358,7 @@ class Deployer:
         if target.exists():
             try:
                 self._verify_owned_candidate(target, manifest)
-                return target, self._migration_diff(self.current_link.resolve(strict=True), target)
+                return target, self._migration_diff(self.current_link.resolve(strict=True), target, manifest)
             except DeployError:
                 self._remove_inactive_owned_candidate(target, manifest)
         archive_size = (assets.get("payload.tar.gz") or {}).get("size")
@@ -413,7 +423,7 @@ class Deployer:
                 json.dumps(marker, sort_keys=True) + "\n", encoding="utf-8")
             os.replace(staging, target)
             self._prune_owned_candidates(target)
-            return target, self._migration_diff(self.current_link.resolve(strict=True), target)
+            return target, self._migration_diff(self.current_link.resolve(strict=True), target, manifest)
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -421,7 +431,11 @@ class Deployer:
     def _verify_registered_support_files(self):
         hooks = self.c.get("hooks", [])
         required = {"codex-auth", "communication-policy", "direct-path-policy", "review-tool-access", "tool-review-probe"}
-        if not isinstance(hooks, list) or {h.get("kind") for h in hooks if isinstance(h, dict)} != required:
+        if not isinstance(hooks, list) or any(not isinstance(h, dict) for h in hooks):
+            raise DeployError("Local hook registry is incomplete")
+        kinds = [h.get("kind") for h in hooks]
+        if (any(not isinstance(kind, str) for kind in kinds) or not required.issubset(kinds) or
+                set(kinds) - required - {MIGRATION_PROBE_KIND} or len(kinds) != len(set(kinds))):
             raise DeployError("Local hook registry is incomplete")
         for hook in hooks:
             path, digest = Path(hook.get("path", "")), hook.get("sha256")
@@ -429,6 +443,8 @@ class Deployer:
                 raise DeployError("Local hook registration is invalid")
             if not path.is_file() or hash_file(path) != digest:
                 raise DeployError("A registered local hook changed")
+            if hook.get("kind") == MIGRATION_PROBE_KIND and hook.get("readOnlyProduction") is not True:
+                raise DeployError("Migration probe must declare read-only production access")
         support = self.c.get("supportFiles", {})
         if not isinstance(support, dict) or not support:
             raise DeployError("Support file registry is invalid")
@@ -482,6 +498,14 @@ class Deployer:
             return "{" + ",".join(json.dumps(key, ensure_ascii=False) + ":" + Deployer._canonical_json(value[key])
                                      for key in sorted(value)) + "}"
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _manifest_identity(manifest: dict) -> str:
+        return sha256(Deployer._canonical_json(manifest).encode("utf-8"))
+
+    @staticmethod
+    def _inventory_identity(inventory: dict[str, str]) -> str:
+        return sha256(Deployer._canonical_json(inventory).encode("utf-8"))
 
     @staticmethod
     def _runner_binary_target(data: bytes):
@@ -713,7 +737,7 @@ class Deployer:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(source, target, symlinks=False)
 
-    def _migration_diff(self, current: Path, candidate: Path):
+    def _migration_diff(self, current: Path, candidate: Path, manifest: dict | None = None):
         current = current.resolve(strict=True)
         old = _file_inventory(current, MIGRATION_ROOT.rstrip("/"))
         new = _file_inventory(candidate, MIGRATION_ROOT.rstrip("/"))
@@ -722,10 +746,95 @@ class Deployer:
         changed = sorted(name for name, digest in old.items() if new.get(name) != digest)
         removed = sorted(set(old) - set(new))
         added = sorted(set(new) - set(old))
+        diff = {"added": added, "changed": changed, "removed": removed, "inventory": new,
+                "baselinePath": str(current), "baselineInventory": old,
+                "baselineInventorySha256": self._inventory_identity(old),
+                "candidateInventorySha256": self._inventory_identity(new)}
         if changed or removed or added:
+            if manifest is None:
+                raise DeployError("Candidate database migration inventory is not identical; deployment deferred")
+            diff["compatibility"] = self._validate_migration_compatibility(current, candidate, manifest, old, new)
+        return diff
+
+    def _database_package_identity(self, payload: Path):
+        package_path = payload / "node_modules/@paperclipai/db/package.json"
+        lock_path = payload / "node_modules/.package-lock.json"
+        try:
+            if package_path.is_symlink() or lock_path.is_symlink():
+                raise DeployError("Database package identity contains a symlink")
+            package = _json_bytes(package_path.read_bytes(), "Installed database package metadata")
+            lock = _json_bytes(lock_path.read_bytes(), "Installed npm lock metadata")
+        except OSError as exc:
+            raise DeployError("Installed database package identity is unavailable") from exc
+        entry = lock.get("packages", {}).get("node_modules/@paperclipai/db") if isinstance(lock, dict) else None
+        version = package.get("version") if isinstance(package, dict) else None
+        integrity = entry.get("integrity") if isinstance(entry, dict) else None
+        if (not isinstance(version, str) or not VERSION.fullmatch(version) or
+                not isinstance(integrity, str) or
+                not re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==", integrity)):
+            raise DeployError("Installed database package identity is incomplete")
+        return {"version": version, "integrity": integrity}
+
+    def _approved_migration_transition(self, baseline_hash: str, candidate_hash: str):
+        transitions = self.c.get("approvedMigrationTransitions", [])
+        if not isinstance(transitions, list):
+            raise DeployError("Approved migration transition registry is invalid")
+        matches = []
+        for item in transitions:
+            if not isinstance(item, dict):
+                raise DeployError("Approved migration transition entry is invalid")
+            if (item.get("baselineInventorySha256") == baseline_hash and
+                    item.get("candidateInventorySha256") == candidate_hash):
+                matches.append(item)
+        if len(matches) != 1:
             raise DeployError("Candidate database migration inventory is not identical; deployment deferred")
-        return {"added": added, "changed": changed, "removed": removed, "inventory": new,
-                "baselinePath": str(current), "baselineInventory": old}
+        return matches[0]
+
+    def _validate_migration_compatibility(self, current: Path, candidate: Path, manifest: dict,
+                                          baseline: dict, candidate_inventory: dict):
+        baseline_hash = self._inventory_identity(baseline)
+        candidate_hash = self._inventory_identity(candidate_inventory)
+        transition = self._approved_migration_transition(baseline_hash, candidate_hash)
+        context = self._verified_workflow_contexts.get(self._manifest_identity(manifest))
+        if context is None:
+            raise DeployError("Migration compatibility requires a verified successful workflow run")
+        receipt = manifest.get("migrationCompatibilityReceipt")
+        if (not isinstance(receipt, dict) or type(receipt.get("schemaVersion")) is not int or
+                receipt.get("schemaVersion") != MIGRATION_RECEIPT_SCHEMA):
+            raise DeployError("Migration compatibility receipt is missing or unsupported")
+        expected_package = self._database_package_identity(current)
+        if (receipt.get("baselineInventorySha256") != baseline_hash or
+                receipt.get("candidateInventorySha256") != candidate_hash or
+                type(receipt.get("baselineFileCount")) is not int or
+                type(receipt.get("candidateFileCount")) is not int or
+                receipt.get("baselineFileCount") != len(baseline) or
+                receipt.get("candidateFileCount") != len(candidate_inventory) or
+                receipt.get("baselinePackage") != expected_package):
+            raise DeployError("Migration compatibility receipt does not match the installed transition")
+        proof = receipt.get("upgradeProof")
+        if (not isinstance(proof, dict) or proof.get("passed") is not True or
+                type(proof.get("runAttempt")) is not int):
+            raise DeployError("Migration compatibility upgrade proof is missing or failed")
+        for field, expected in {**context, "patchCommit": manifest.get("patchedCommit")}.items():
+            if proof.get(field) != expected:
+                raise DeployError("Migration upgrade proof is not bound to the verified release workflow")
+        assertions = proof.get("assertions")
+        required_assertions = transition.get("requiredAssertions")
+        if (not isinstance(required_assertions, list) or not required_assertions or
+                any(not isinstance(value, str) or not value for value in required_assertions) or
+                len(set(required_assertions)) != len(required_assertions) or
+                not isinstance(assertions, list) or
+                any(not isinstance(value, str) or not value for value in assertions) or
+                len(set(assertions)) != len(assertions) or
+                not set(required_assertions).issubset(assertions)):
+            raise DeployError("Migration upgrade proof is missing required compatibility assertions")
+        candidate_package = self._database_package_identity(candidate)
+        if candidate_package["version"] != manifest.get("version"):
+            raise DeployError("Candidate database package version differs from the accepted release")
+        return {"status": "needsRuntimeCompatibility", "manifestSha256": self._manifest_identity(manifest),
+                "baselineInventorySha256": baseline_hash, "candidateInventorySha256": candidate_hash,
+                "baselinePackage": expected_package, "candidatePackage": candidate_package,
+                "transition": transition}
 
     def _verify_migrations(self, candidate: Path, manifest: dict):
         actual = _file_inventory(candidate, MIGRATION_ROOT.rstrip("/"))
@@ -738,10 +847,11 @@ class Deployer:
         hooks = self.c.get("hooks", [])
         if not isinstance(hooks, list):
             raise DeployError("Local hook registry is invalid")
-        allowed = {"codex-auth", "communication-policy", "direct-path-policy", "review-tool-access", "tool-review-probe"}
+        allowed = {"codex-auth", "communication-policy", "direct-path-policy", "review-tool-access", "tool-review-probe",
+                   MIGRATION_PROBE_KIND}
         kinds = set()
         for hook in hooks:
-            if not isinstance(hook, dict) or hook.get("kind") not in allowed:
+            if not isinstance(hook, dict) or not isinstance(hook.get("kind"), str) or hook.get("kind") not in allowed:
                 raise DeployError("Local hook kind is unknown")
             kind, path, digest = hook["kind"], Path(hook.get("path", "")), hook.get("sha256")
             if not path.is_absolute() or not isinstance(digest, str) or not HEX_64.fullmatch(digest):
@@ -752,8 +862,11 @@ class Deployer:
                 raise DeployError(f"Duplicate local hook: {kind}")
             kinds.add(kind)
         required = {"codex-auth", "communication-policy", "direct-path-policy", "review-tool-access", "tool-review-probe"}
-        if kinds != required:
+        if not required.issubset(kinds):
             raise DeployError("Local hook registry is incomplete")
+        probe = next((hook for hook in hooks if hook.get("kind") == MIGRATION_PROBE_KIND), None)
+        if probe is not None and probe.get("readOnlyProduction") is not True:
+            raise DeployError("Migration probe must declare read-only production access")
         support_files = self.c.get("supportFiles", {})
         if not isinstance(support_files, dict):
             raise DeployError("Support file registry is invalid")
@@ -937,6 +1050,60 @@ class Deployer:
                                  check=True, capture_output=True, text=True, timeout=30)
             if result.returncode != 0:
                 raise DeployError("Codex preservation hook produced invalid JavaScript")
+
+    def _run_migration_precondition_probe(self, old_target: Path, candidate: Path,
+                                          manifest: dict, migration_diff: dict, previous: dict):
+        hooks = self.c.get("hooks", [])
+        probes = [hook for hook in hooks if isinstance(hook, dict) and hook.get("kind") == MIGRATION_PROBE_KIND]
+        if len(probes) != 1:
+            raise DeployError("A registered migration precondition probe is required for changed migrations")
+        probe = probes[0]
+        path = Path(probe.get("path", ""))
+        if (not path.is_absolute() or probe.get("readOnlyProduction") is not True or
+                not isinstance(probe.get("sha256"), str) or not HEX_64.fullmatch(probe["sha256"]) or
+                not path.is_file() or hash_file(path) != probe["sha256"]):
+            raise DeployError("Registered migration precondition probe is invalid")
+
+        active_fingerprint = self._verify_active_fingerprint(old_target, previous)
+        candidate_fingerprint = self._protected_inventory(candidate, manifest["packageMap"].values())
+        active_fingerprint_sha = self._inventory_identity(active_fingerprint)
+        candidate_manifest_sha = self._manifest_identity(manifest)
+        expected = {
+            "schemaVersion": MIGRATION_PROBE_SCHEMA,
+            "baselineInventorySha256": migration_diff["baselineInventorySha256"],
+            "candidateInventorySha256": migration_diff["candidateInventorySha256"],
+            "activeFingerprintSha256": active_fingerprint_sha,
+            "candidateManifestSha256": candidate_manifest_sha,
+            "activePayloadPath": str(old_target),
+            "candidatePayloadPath": str(candidate),
+        }
+        # The registered script owns its read-only production query and its
+        # isolated migration/boot fixture. The deployer passes only this
+        # hash-bound context; it never executes SQL from a release manifest.
+        with tempfile.TemporaryDirectory(prefix="paperclip-migration-precondition-") as directory:
+            context_path = Path(directory) / "context.json"
+            context_path.write_text(self._canonical_json(expected) + "\n", encoding="utf-8")
+            context_path.chmod(0o600)
+            result = self.command(["/usr/bin/node", "--experimental-vm-modules", str(path), str(context_path)],
+                                  check=True, capture_output=True, text=True, timeout=180)
+        try:
+            receipt = _json_bytes((result.stdout or "").encode("utf-8"), "Migration precondition probe result")
+        except (AttributeError, UnicodeEncodeError) as exc:
+            raise DeployError("Migration precondition probe did not return a valid receipt") from exc
+        if (not isinstance(receipt, dict) or type(receipt.get("schemaVersion")) is not int or
+                any(receipt.get(key) != value for key, value in expected.items()
+                    if key != "activePayloadPath" and key != "candidatePayloadPath")):
+            raise DeployError("Migration precondition probe result is not bound to this cutover")
+        live = receipt.get("livePreconditions")
+        old_boot = receipt.get("oldApplicationBootProof")
+        candidate_boot = receipt.get("candidateApplicationBootProof")
+        if (not isinstance(live, dict) or live.get("passed") is not True or
+                not isinstance(old_boot, dict) or old_boot.get("passed") is not True or
+                old_boot.get("databaseInventorySha256") != migration_diff["candidateInventorySha256"] or
+                not isinstance(candidate_boot, dict) or candidate_boot.get("passed") is not True or
+                candidate_boot.get("databaseInventorySha256") != migration_diff["candidateInventorySha256"]):
+            raise DeployError("Migration probe did not prove live preconditions and both runtime boots")
+        return receipt
 
     def load_token(self):
         auth_path = Path(self.c.get("authFile", str(self.home / ".paperclip/auth.json")))
@@ -1154,8 +1321,15 @@ class Deployer:
         cutover_attempted = False
         restart_attempted = False
         try:
-            if migration_diff.get("added") or migration_diff.get("changed") or migration_diff.get("removed"):
-                raise DeployError("Candidate database migration inventory is not identical; activation refused")
+            has_migration_changes = any(migration_diff.get(key) for key in ("added", "changed", "removed"))
+            if has_migration_changes:
+                fresh_diff = self._migration_diff(old_target, candidate, manifest)
+                if (fresh_diff.get("baselineInventorySha256") != migration_diff.get("baselineInventorySha256") or
+                        fresh_diff.get("candidateInventorySha256") != migration_diff.get("candidateInventorySha256") or
+                        fresh_diff.get("compatibility", {}).get("status") != "needsRuntimeCompatibility" or
+                        fresh_diff.get("compatibility", {}).get("manifestSha256") !=
+                        migration_diff.get("compatibility", {}).get("manifestSha256")):
+                    raise DeployError("Migration compatibility proof changed after candidate staging")
             self._verify_registered_support_files()
             self._verify_local_hook_files(candidate, manifest)
             self._verify_runner_release_assets(candidate, manifest)
@@ -1168,13 +1342,29 @@ class Deployer:
                 raise DeployError("Active Paperclip payload changed during staging")
             active_migrations = _file_inventory(old_target, MIGRATION_ROOT.rstrip("/"))
             if (str(old_target) != migration_diff.get("baselinePath") or
-                    active_migrations != migration_diff.get("baselineInventory") or
-                    active_migrations != migration_diff.get("inventory")):
+                    active_migrations != migration_diff.get("baselineInventory")):
                 raise DeployError("Active migration baseline changed after candidate staging")
+            candidate_migrations = _file_inventory(candidate, MIGRATION_ROOT.rstrip("/"))
+            if candidate_migrations != migration_diff.get("inventory"):
+                raise DeployError("Candidate migration inventory changed after staging")
             self.verify_owned_drain(token, owner)
             self._verify_registered_support_files()
             self._verify_local_hook_files(candidate, manifest)
             self._verify_runner_release_assets(candidate, manifest)
+            if has_migration_changes:
+                self._verify_owned_candidate(candidate, manifest)
+                self._run_migration_precondition_probe(old_target, candidate, manifest, migration_diff, previous)
+                self._verify_owned_candidate(candidate, manifest)
+            # The probe runs immediately before cutover. Repeat the active and
+            # candidate inventory CAS after it to close any concurrent-change
+            # window while still holding the owned drain.
+            if self.current_link.resolve(strict=True) != old_target:
+                raise DeployError("Active Paperclip payload changed during migration precondition check")
+            self._verify_active_fingerprint(old_target, previous)
+            if (_file_inventory(old_target, MIGRATION_ROOT.rstrip("/")) != migration_diff.get("baselineInventory") or
+                    _file_inventory(candidate, MIGRATION_ROOT.rstrip("/")) != migration_diff.get("inventory")):
+                raise DeployError("Migration inventory changed during precondition check")
+            self.verify_owned_drain(token, owner)
             # The symlink and install receipt are two coordinated pieces of
             # state; mark cutover before either is mutated so partial writes
             # are always repaired on failure.

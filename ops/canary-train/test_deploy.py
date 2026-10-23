@@ -395,17 +395,19 @@ class CandidateTests(unittest.TestCase):
                 deployer(Path(tmp))._extract_payload(raw.getvalue(), Path(tmp), {name: digest(data)})
 
     def test_migration_diff_rejects_changed_or_removed_existing_migration(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            old = root / "old"
-            new = root / "new"
-            rel = Path(deploy.MIGRATION_ROOT) / "0001_initial.sql"
-            (old / rel).parent.mkdir(parents=True)
-            (new / rel).parent.mkdir(parents=True)
-            (old / rel).write_text("old migration")
-            (new / rel).write_text("changed migration")
-            with self.assertRaisesRegex(deploy.DeployError, "not identical"):
-                deployer(root)._migration_diff(old, new)
+        for candidate_state in ("changed", "removed"):
+            with self.subTest(candidate_state=candidate_state), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                old = root / "old"
+                new = root / "new"
+                rel = Path(deploy.MIGRATION_ROOT) / "0001_initial.sql"
+                (old / rel).parent.mkdir(parents=True)
+                (new / rel).parent.mkdir(parents=True)
+                (old / rel).write_text("old migration")
+                if candidate_state == "changed":
+                    (new / rel).write_text("changed migration")
+                with self.assertRaisesRegex(deploy.DeployError, "not identical|Could not establish"):
+                    deployer(root)._migration_diff(old, new)
 
     def test_migration_diff_rejects_additive_new_migrations(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -420,6 +422,155 @@ class CandidateTests(unittest.TestCase):
             (new / added).write_text("additive")
             with self.assertRaisesRegex(deploy.DeployError, "not identical"):
                 deployer(root)._migration_diff(old, new)
+
+    def _migration_transition_fixture(self, root: Path, *, approved=True, proof=True):
+        old, candidate = root / "old", root / "candidate"
+        old_migration = Path(deploy.MIGRATION_ROOT) / "0001_initial.sql"
+        new_migration = Path(deploy.MIGRATION_ROOT) / "0002_add_constraint.sql"
+        (old / old_migration).parent.mkdir(parents=True)
+        (candidate / new_migration).parent.mkdir(parents=True)
+        (old / old_migration).write_text("old schema")
+        (candidate / old_migration).parent.mkdir(parents=True, exist_ok=True)
+        (candidate / old_migration).write_text("old schema")
+        (candidate / new_migration).write_text("new constraint")
+        integrity = "sha512-" + "A" * 86 + "=="
+        for payload, version in ((old, "2026.1017.0-canary.6"), (candidate, "2026.1023.0-canary.13")):
+            package = payload / "node_modules/@paperclipai/db/package.json"
+            package.parent.mkdir(parents=True, exist_ok=True)
+            package.write_text(json.dumps({"name": "@paperclipai/db", "version": version}))
+            lock = payload / "node_modules/.package-lock.json"
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            lock.write_text(json.dumps({"packages": {"node_modules/@paperclipai/db": {
+                "version": version, "integrity": integrity}}}))
+        old_inventory = deploy._file_inventory(old, deploy.MIGRATION_ROOT.rstrip("/"))
+        new_inventory = deploy._file_inventory(candidate, deploy.MIGRATION_ROOT.rstrip("/"))
+        old_hash = deploy.Deployer._inventory_identity(old_inventory)
+        new_hash = deploy.Deployer._inventory_identity(new_inventory)
+        assertions = ["upgrade-tested", "old-schema-preserved"]
+        config = {"approvedMigrationTransitions": [{
+            "baselineInventorySha256": old_hash,
+            "candidateInventorySha256": new_hash,
+            "requiredAssertions": assertions,
+        }] if approved else []}
+        item = manifest()
+        item["version"] = "2026.1023.0-canary.13"
+        item["migrations"] = [{"path": name, "sha256": value} for name, value in new_inventory.items()]
+        context = {"runId": str(item["runId"]), "runAttempt": item["runAttempt"],
+                   "controllerCommit": item["controllerCommit"], "sourceCommit": item["sourceCommit"]}
+        proof_value = {"passed": True, **context, "patchCommit": item["patchedCommit"], "assertions": assertions}
+        item["migrationCompatibilityReceipt"] = {
+            "schemaVersion": 1, "baselineInventorySha256": old_hash,
+            "candidateInventorySha256": new_hash, "baselineFileCount": len(old_inventory),
+            "candidateFileCount": len(new_inventory),
+            "baselinePackage": {"version": "2026.1017.0-canary.6",
+                                "integrity": integrity},
+            "upgradeProof": proof_value if proof else {"passed": False, **context},
+        }
+        d = deployer(root, **config)
+        d._verified_workflow_contexts[d._manifest_identity(item)] = context
+        return d, old, candidate, item, old_hash, new_hash
+
+    def test_exact_transition_requires_verified_upgrade_proof_and_matching_inventory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d, old, candidate, item, old_hash, new_hash = self._migration_transition_fixture(Path(tmp))
+            diff = d._migration_diff(old, candidate, item)
+            self.assertEqual(diff["compatibility"]["status"], "needsRuntimeCompatibility")
+            self.assertEqual(diff["baselineInventorySha256"], old_hash)
+            self.assertEqual(diff["candidateInventorySha256"], new_hash)
+
+    def test_transition_rejects_missing_approval_proof_and_unverified_workflow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d, old, candidate, item, _, _ = self._migration_transition_fixture(Path(tmp), approved=False)
+            with self.assertRaisesRegex(deploy.DeployError, "not identical"):
+                d._migration_diff(old, candidate, item)
+        with tempfile.TemporaryDirectory() as tmp:
+            d, old, candidate, item, _, _ = self._migration_transition_fixture(Path(tmp), proof=False)
+            with self.assertRaisesRegex(deploy.DeployError, "upgrade proof is missing or failed"):
+                d._migration_diff(old, candidate, item)
+        with tempfile.TemporaryDirectory() as tmp:
+            d, old, candidate, item, _, _ = self._migration_transition_fixture(Path(tmp))
+            d._verified_workflow_contexts.clear()
+            with self.assertRaisesRegex(deploy.DeployError, "verified successful workflow"):
+                d._migration_diff(old, candidate, item)
+
+    def test_transition_rejects_wrong_workflow_and_missing_assertion(self):
+        for mutate in (lambda proof: proof.update(runAttempt=2),
+                       lambda proof: proof.update(assertions=["upgrade-tested"])):
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as tmp:
+                d, old, candidate, item, _, _ = self._migration_transition_fixture(Path(tmp))
+                mutate(item["migrationCompatibilityReceipt"]["upgradeProof"])
+                # Recompute only the accepted manifest identity: workflow provenance remains
+                # tied to the originally verified manifest and therefore must fail closed.
+                d._verified_workflow_contexts[d._manifest_identity(item)] = {
+                    "runId": str(item["runId"]), "runAttempt": item["runAttempt"],
+                    "controllerCommit": item["controllerCommit"], "sourceCommit": item["sourceCommit"],
+                }
+                with self.assertRaises(deploy.DeployError):
+                    d._migration_diff(old, candidate, item)
+
+    def test_migration_probe_requires_hash_bound_runtime_and_readonly_proofs(self):
+        for alteration in (None, "binding", "live", "old-boot", "candidate-boot"):
+            with self.subTest(alteration=alteration), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                probe = root / "probe.mjs"
+                probe.write_text("// registered probe")
+                hook = {"kind": deploy.MIGRATION_PROBE_KIND, "path": str(probe),
+                        "sha256": deploy.hash_file(probe), "readOnlyProduction": True}
+                d = deployer(root, hooks=[hook])
+                d._verify_active_fingerprint = lambda *args: {"active": "fingerprint"}
+                d._protected_inventory = lambda *args: {"candidate": "fingerprint"}
+                diff = {"baselineInventorySha256": "a" * 64, "candidateInventorySha256": "b" * 64}
+                item = manifest()
+                item["packageMap"] = {"@paperclipai/server#dist": "node_modules/@paperclipai/server/dist"}
+
+                def command(args, **kwargs):
+                    context = json.loads(Path(args[-1]).read_text())
+                    receipt = {"schemaVersion": 1,
+                               "baselineInventorySha256": context["baselineInventorySha256"],
+                               "candidateInventorySha256": context["candidateInventorySha256"],
+                               "activeFingerprintSha256": context["activeFingerprintSha256"],
+                               "candidateManifestSha256": context["candidateManifestSha256"],
+                               "livePreconditions": {"passed": True},
+                               "oldApplicationBootProof": {"passed": True,
+                                   "databaseInventorySha256": context["candidateInventorySha256"]},
+                               "candidateApplicationBootProof": {"passed": True,
+                                   "databaseInventorySha256": context["candidateInventorySha256"]}}
+                    if alteration == "binding":
+                        receipt["activeFingerprintSha256"] = "0" * 64
+                    elif alteration == "live":
+                        receipt["livePreconditions"]["passed"] = False
+                    elif alteration == "old-boot":
+                        receipt["oldApplicationBootProof"]["passed"] = False
+                    elif alteration == "candidate-boot":
+                        receipt["candidateApplicationBootProof"]["passed"] = False
+                    return SimpleNamespace(returncode=0, stdout=json.dumps(receipt))
+
+                d.command = command
+                if alteration is None:
+                    result = d._run_migration_precondition_probe(root, root, item, diff, {})
+                    self.assertTrue(result["livePreconditions"]["passed"])
+                else:
+                    with self.assertRaises(deploy.DeployError):
+                        d._run_migration_precondition_probe(root, root, item, diff, {})
+
+    def test_migration_probe_hook_rejects_unregistered_readonly_declaration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            probe = root / "probe.mjs"
+            probe.write_text("// probe")
+            hook = {"kind": deploy.MIGRATION_PROBE_KIND, "path": str(probe),
+                    "sha256": deploy.hash_file(probe), "readOnlyProduction": False}
+            existing = root / "existing-hook.py"
+            existing.write_text("# fixed")
+            existing_hook = {"path": str(existing), "sha256": deploy.hash_file(existing)}
+            hooks = [hook] + [dict(existing_hook, kind=kind) for kind in
+                              ("codex-auth", "communication-policy", "direct-path-policy",
+                               "review-tool-access", "tool-review-probe")]
+            support = root / "support.json"
+            support.write_text("{}")
+            d = deployer(root, hooks=hooks, supportFiles={str(support): deploy.hash_file(support)})
+            with self.assertRaisesRegex(deploy.DeployError, "read-only production"):
+                d._verify_registered_support_files()
 
     def test_changed_local_hook_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -871,7 +1022,9 @@ class ActivationTests(unittest.TestCase):
         cli.mkdir(parents=True, exist_ok=True)
         current = cli / "current"
         current.symlink_to(old)
-        old_install = {"version": "old-version", "payloadPath": str(old), "previous": []}
+        old_identity = "node_modules/@paperclipai/server/dist/build-info.json"
+        old_install = {"version": "old-version", "payloadPath": str(old), "previous": [],
+                       "patchedRelease": {"protectedFiles": {old_identity: deploy.hash_file(old / old_identity)}}}
         (cli / "install.json").write_text(json.dumps(old_install))
         return cli, old, candidate, current, old_install
 
@@ -915,6 +1068,24 @@ class ActivationTests(unittest.TestCase):
             self.assertEqual(current.resolve(), old.resolve())
             self.assertEqual(json.loads((cli / "install.json").read_text()), previous)
             self.assertEqual(calls, [])
+
+    def test_active_file_change_during_drain_defers_without_cutover(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli, old, candidate, current, previous = self.make_install(root)
+            calls, released = [], []
+            d = self.configured(root, lambda *a, **k: calls.append(a))
+            def start_drain(token):
+                (old / "node_modules/@paperclipai/server/dist/build-info.json").write_text("concurrent patch")
+                return "owned"
+            d.start_drain = start_drain
+            d.release_drain = lambda token, owner: released.append(owner)
+            with self.assertRaisesRegex(deploy.DeployError, "registered integrity receipt"):
+                d.activate(candidate, self.manifest(), d._migration_diff(old, candidate), "token")
+            self.assertEqual(current.resolve(), old.resolve())
+            self.assertEqual(json.loads((cli / "install.json").read_text()), previous)
+            self.assertEqual(calls, [])
+            self.assertEqual(released, ["owned"])
 
     def test_restart_rejection_restores_and_restarts_previous_install(self):
         with tempfile.TemporaryDirectory() as tmp:
