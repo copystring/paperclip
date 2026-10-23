@@ -11,6 +11,7 @@ import {
   EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON,
   isConfigurationIncompleteFailedRun,
   isWorkspaceValidationFailedRun,
+  parseObject,
   readNonEmptyString,
 } from "../domain/values.js";
 import type {
