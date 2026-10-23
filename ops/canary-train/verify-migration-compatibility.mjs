@@ -14,15 +14,15 @@ const EXPECTED_OLD_VERSION = '2026.1017.0-canary.6';
 const EXPECTED_OLD_SRI = 'sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg==';
 const EXPECTED_OLD_INVENTORY_COUNT = 354;
 const EXPECTED_OLD_INVENTORY_SHA256 = '9cec6945b6dd1c38b80940e5246d500da8b5d506a4be68db20ab89136fc11ed9';
-const EXPECTED_CANDIDATE_INVENTORY_COUNT = 376;
-const EXPECTED_CANDIDATE_INVENTORY_SHA256 = 'd4091a9a05fc45f25f3513d665dd2b1c68fc992aa8822a4db6c28c7b0971b91f';
-const EXPECTED_ADDED_SQL_COUNT = 22;
-const EXPECTED_DEFERRED_MIGRATIONS = ['0374_rare_wolfpack.sql', '0375_short_mercury.sql', '0376_clear_committed_native_recovery_state.sql'];
+const EXPECTED_CANDIDATE_INVENTORY_COUNT = 377;
+const EXPECTED_CANDIDATE_INVENTORY_SHA256 = 'cf72a4cb66052ff1c4d93f5ec4d29a291d08a28d2355e02e089d92e3052c9e3a';
+const EXPECTED_ADDED_SQL_COUNT = 23;
+const EXPECTED_DEFERRED_MIGRATIONS = ['0374_rare_wolfpack.sql', '0375_short_mercury.sql', '0376_clear_committed_native_recovery_state.sql', '0377_clear_settled_native_run_process_identity.sql'];
 const EMBEDDED_POSTGRES_PLATFORM = '@embedded-postgres/linux-x64';
 const EMBEDDED_POSTGRES_PLATFORM_VERSION = '18.1.0-beta.16';
 const EMBEDDED_POSTGRES_PLATFORM_SRI = 'sha512-+GIabpHh7QV2AcYBuzyQC41AYczSFphxfHy4ccTPIPrp6OSthZXH+A9fymjQzOiDHg9+1UeYET00Aj7sScjXrg==';
 export const MIGRATION_INVENTORY_PREFIX = 'node_modules/@paperclipai/db/dist/migrations/';
-const REQUIRED_ASSERTIONS = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'restore-point-checkout-migrations', 'committed-native-recovery-state-migration', 'migration-inventory-extension'];
+const REQUIRED_ASSERTIONS = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'restore-point-checkout-migrations', 'committed-native-recovery-state-migration', 'settled-native-run-process-identity-migration', 'migration-inventory-extension'];
 
 export function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 export function verifySRI(bytes, sri) {
@@ -331,7 +331,7 @@ async function main() {
     };
     const candidateJournal = JSON.parse(originalCandidateJournal.toString('utf8'));
     const deferredNames = candidateJournal.entries.slice(-EXPECTED_DEFERRED_MIGRATIONS.length).map((entry) => `${entry.tag}.sql`);
-    if (JSON.stringify(deferredNames) !== JSON.stringify(EXPECTED_DEFERRED_MIGRATIONS)) throw new Error('Candidate tail did not match the pinned 0374/0375/0376 compatibility migrations');
+    if (JSON.stringify(deferredNames) !== JSON.stringify(EXPECTED_DEFERRED_MIGRATIONS)) throw new Error('Candidate tail did not match the pinned 0374/0375/0376/0377 compatibility migrations');
     const deferredDirectory = path.join(temp, 'deferred-candidate-migrations');
     await mkdir(deferredDirectory);
     const deferredFiles = deferredNames.map((name) => ({
@@ -386,7 +386,64 @@ async function main() {
       await client`insert into heartbeat_runs(id,company_id,agent_id,status,runtime_mode,native_issue_id) values (${fixture.runId},${company},${agent},'succeeded','native',${issue})`;
       await client`insert into native_run_finalizations(run_id,company_id,issue_id,phase,lease_owner,recovery_state,recovery_request_id,recovery_history,updated_at) values (${fixture.runId},${company},${issue},${fixture.phase},${fixture.leaseOwner},${fixture.recoveryState},${fixture.recoveryRequestId},${client.json(recoveryHistory)},${baselineUpdatedAt})`;
     }
-    stage('apply exact candidate migrations 0374, 0375 and 0376');
+    const environment = '10000000-0000-4000-8000-000000000020';
+    await client`insert into environments(id,company_id,name) values (${environment},${company},'migration compatibility environment')`;
+    const oldFinishedAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const recentFinishedAt = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    const nativeProcessFixtures = [
+      { key: 'old-failed-with-stopped-remote-lease', status: 'failed', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: 'stopped', coordinatorPhase: null, clears: true },
+      { key: 'old-timeout-with-destroyed-lease-and-settled-coordinator', status: 'timed_out', finishedAt: oldFinishedAt, checkpoint: false, event: true, leaseMode: 'destroyed', coordinatorPhase: 'committed', clears: true },
+      { key: 'recent-failure', status: 'failed', finishedAt: recentFinishedAt, checkpoint: true, leaseMode: 'stopped', coordinatorPhase: null, clears: false },
+      { key: 'running-run', status: 'running', finishedAt: null, checkpoint: true, leaseMode: 'stopped', coordinatorPhase: null, clears: false },
+      { key: 'missing-lease', status: 'failed', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: null, coordinatorPhase: null, clears: false },
+      { key: 'missing-termination-receipt', status: 'failed', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: 'missing', coordinatorPhase: null, clears: false },
+      { key: 'misbound-termination-receipt', status: 'failed', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: 'misbound', coordinatorPhase: null, clears: false },
+      { key: 'local-lease', status: 'failed', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: 'local', coordinatorPhase: null, clears: false },
+      { key: 'one-unconfirmed-lease', status: 'failed', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: 'mixed', coordinatorPhase: null, clears: false },
+      { key: 'no-session-or-event-evidence', status: 'failed', finishedAt: oldFinishedAt, checkpoint: false, leaseMode: 'stopped', coordinatorPhase: null, clears: false },
+      { key: 'unsettled-coordinator', status: 'failed', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: 'stopped', coordinatorPhase: 'observed', clears: false },
+    ];
+    const processStartedAt = '2000-01-01T00:00:00.000Z';
+    const leaseFor = async (fixture, suffix, mode) => {
+      const runId = fixture.runId;
+      const leaseId = `10000000-0000-4000-8000-${String(60 + fixture.index * 2 + suffix).padStart(12, '0')}`;
+      const provider = mode === 'local' ? 'local' : 'fixture-provider';
+      const providerLeaseId = mode === 'local' ? null : `provider-lease-${fixture.key}-${suffix}`;
+      let termination = null;
+      if (['stopped', 'destroyed', 'misbound'].includes(mode)) {
+        termination = {
+          schema: 'paperclip.remote-termination.v1',
+          companyId: company,
+          runId: mode === 'misbound' ? '10000000-0000-4000-8000-000000000099' : runId,
+          leaseId,
+          provider,
+          providerLeaseId,
+          state: mode === 'destroyed' ? 'destroyed' : 'stopped',
+          confirmedAt: oldFinishedAt,
+        };
+      }
+      const metadata = termination ? { remoteExecutionTermination: termination } : {};
+      await client`insert into environment_leases(id,company_id,environment_id,heartbeat_run_id,status,provider,provider_lease_id,released_at,cleanup_status,metadata) values (${leaseId},${company},${environment},${runId},'released',${provider},${providerLeaseId},${oldFinishedAt},'success',${client.json(metadata)})`;
+    };
+    for (const [index, fixture] of nativeProcessFixtures.entries()) {
+      fixture.index = index;
+      fixture.runId = `10000000-0000-4000-8000-${String(30 + index).padStart(12, '0')}`;
+      const profile = fixture.checkpoint ? { sessionCheckpoint: { sessionId: `fixture-session-${index}` } } : {};
+      await client`insert into heartbeat_runs(id,company_id,agent_id,status,runtime_mode,native_issue_id,finished_at,runner_profile_json,process_pid,process_group_id,process_started_at) values (${fixture.runId},${company},${agent},${fixture.status},'native',${issue},${fixture.finishedAt},${client.json(profile)},${70000 + index},${80000 + index},${processStartedAt})`;
+      if (fixture.event) await client`insert into heartbeat_run_events(company_id,run_id,agent_id,seq,event_type,stream,level,message,payload) values (${company},${fixture.runId},${agent},1,'harness.ready','system','info','migration compatibility evidence',${client.json({ fixture: fixture.key })})`;
+      if (fixture.leaseMode === 'stopped' || fixture.leaseMode === 'destroyed' || fixture.leaseMode === 'misbound' || fixture.leaseMode === 'local') {
+        await leaseFor(fixture, 0, fixture.leaseMode);
+      } else if (fixture.leaseMode === 'missing') {
+        await leaseFor(fixture, 0, fixture.leaseMode);
+      } else if (fixture.leaseMode === 'mixed') {
+        await leaseFor(fixture, 0, 'stopped');
+        await leaseFor(fixture, 1, 'missing');
+      }
+      if (fixture.coordinatorPhase) {
+        await client`insert into native_run_finalizations(run_id,company_id,issue_id,phase) values (${fixture.runId},${company},${issue},${fixture.coordinatorPhase})`;
+      }
+    }
+    stage('apply exact candidate migrations 0374 through 0377');
     const applyScript = "import {pathToFileURL} from 'node:url'; const db=await import(pathToFileURL(process.argv[1])); const url=process.env.MIGRATION_COMPAT_DB_URL; await db.applyPendingMigrations(url); const state=await db.inspectMigrations(url); process.stdout.write(JSON.stringify(state));";
     const state = JSON.parse(runNode(['--input-type=module', '-e', applyScript, candidateIndex], temp, url));
     if (state.status !== 'upToDate') throw new Error(`Candidate migration state was ${state.status}`);
@@ -429,6 +486,18 @@ async function main() {
       preservedNullState.phase === 'committed' && preservedNullState.lease_owner === null &&
       preservedNullState.recovery_state === null && preservedNullState.recovery_request_id === 'null-state-request' &&
       historyPreserved(preservedNullState) && Date.parse(preservedNullState.updated_at) === baselineTimestamp;
+    const migratedProcessFixtures = new Map();
+    for (const fixture of nativeProcessFixtures) {
+      const [row] = await client`select status,process_pid,process_group_id,process_started_at from heartbeat_runs where id=${fixture.runId}`;
+      if (!row) throw new Error(`Native process identity migration fixture disappeared: ${fixture.key}`);
+      migratedProcessFixtures.set(fixture.key, row);
+    }
+    const settledNativeProcessIdentityMigrationPassed = nativeProcessFixtures.every((fixture) => {
+      const row = migratedProcessFixtures.get(fixture.key);
+      const cleared = row.process_pid === null && row.process_group_id === null && row.process_started_at === null;
+      const preserved = row.process_pid === 70000 + fixture.index && row.process_group_id === 80000 + fixture.index && Date.parse(row.process_started_at) === Date.parse(processStartedAt);
+      return fixture.clears ? cleared : preserved;
+    });
     const assertions = [
       { id: 'migration-engine-upgrade', passed: true, detail: 'old package schema upgraded using candidate migration engine' },
       { id: 'task-retry-row-preserved', passed: true, detail: 'company/agent/payload/idempotency data preserved' },
@@ -437,7 +506,8 @@ async function main() {
       { id: 'secret-scope-data-preserved', passed: secrets.length === 3 && secrets.some((s) => s.scope === 'company' && s.owner_user_id === null && s.user_secret_definition_id === null && s.owner_agent_id === null && s.owner_project_id === null && s.owner_plugin_id === null) && secrets.some((s) => s.scope === 'user' && s.owner_user_id === 'compat-user' && s.user_secret_definition_id === userDefinition && s.owner_agent_id === null && s.owner_project_id === null && s.owner_plugin_id === null) && secrets.some((s) => s.scope === 'instance' && s.owner_user_id === null && s.user_secret_definition_id === null && s.owner_agent_id === agent && s.owner_project_id === null && s.owner_plugin_id === plugin), detail: 'company, user, and agent-owned instance secret metadata survived with valid scope shapes' },
       { id: 'restore-point-checkout-migrations', passed: originalRestorePoint.length === 1 && originalRestorePoint[0].checkout_name === '' && originalRestorePoint[0].generation === 7 && originalRestorePoint[0].object_key === 'compat/primary' && deletedRestorePoint.length === 1 && alternateCheckout.length === 1 && duplicateAlternate.length === 0 && restoreIndex.length === 1 && restoreIndex[0].indexdef.includes('checkout_name') && restoreIndex[0].indexdef.includes('pending') && restoreIndex[0].indexdef.includes('active') && restoreIndex[0].indexdef.includes('expiring'), detail: '0374 preserves existing rows and default checkout name; 0375 enforces per-checkout live uniqueness while allowing deleted history' },
       { id: 'committed-native-recovery-state-migration', passed: nativeRecoveryMigrationPassed, detail: '0376 clears only recovery state on committed unleased rows, updates their timestamp, and preserves lease-owned, noncommitted, null-state and history data' },
-      { id: 'migration-inventory-extension', passed: extension.addedSql === 22, detail: `exact ${extension.oldCount}-file baseline plus ${extension.addedSql} pinned SQL migrations; no baseline SQL changed` },
+      { id: 'settled-native-run-process-identity-migration', passed: settledNativeProcessIdentityMigrationPassed, detail: '0377 clears process identity only for old terminal native runs with session evidence, a fully confirmed remote lease and no unsettled finalization; active, recent, local, unleased, unconfirmed, misbound, unactioned, and coordinator-owned rows retain all identity fields' },
+      { id: 'migration-inventory-extension', passed: extension.addedSql === 23, detail: `exact ${extension.oldCount}-file baseline plus ${extension.addedSql} pinned SQL migrations; no baseline SQL changed` },
     ];
     if (assertions.some((a) => !a.passed)) throw new Error('Candidate schema invariants failed');
     await restoreCandidateBoundary();

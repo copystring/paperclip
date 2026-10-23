@@ -57,10 +57,11 @@ MIGRATION_COMPAT_ASSERTIONS = {
     "secret-scope-data-preserved",
     "restore-point-checkout-migrations",
     "committed-native-recovery-state-migration",
+    "settled-native-run-process-identity-migration",
     "migration-inventory-extension",
 }
 MIGRATION_BASELINE_HASH = "9cec6945b6dd1c38b80940e5246d500da8b5d506a4be68db20ab89136fc11ed9"
-MIGRATION_CANDIDATE_HASH = "d4091a9a05fc45f25f3513d665dd2b1c68fc992aa8822a4db6c28c7b0971b91f"
+MIGRATION_CANDIDATE_HASH = "cf72a4cb66052ff1c4d93f5ec4d29a291d08a28d2355e02e089d92e3052c9e3a"
 MIGRATION_OLD_VERSION = "2026.1017.0-canary.6"
 MIGRATION_OLD_SRI = "sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg=="
 
@@ -86,7 +87,7 @@ def validate_migration_compatibility(manifest, controller, run_id, run_attempt):
         or receipt.get("baselineInventorySha256") != MIGRATION_BASELINE_HASH
         or receipt.get("candidateInventorySha256") != MIGRATION_CANDIDATE_HASH
         or receipt.get("baselineFileCount") != 354
-        or receipt.get("candidateFileCount") != 376
+        or receipt.get("candidateFileCount") != 377
         or receipt.get("baselinePackage") != {"version": MIGRATION_OLD_VERSION, "integrity": MIGRATION_OLD_SRI}
         or not isinstance(candidate_package, dict)
         or candidate_package.get("version") != manifest.get("version")
@@ -107,7 +108,7 @@ def validate_migration_compatibility(manifest, controller, run_id, run_attempt):
         raise RuntimeError("Published migration inventory contains an invalid path or hash")
     canonical = json.dumps(dict(sorted(inventory.items())), separators=(",", ":"), sort_keys=True).encode()
     actual = hashlib.sha256(canonical).hexdigest()
-    if len(inventory_rows) != 376 or len(inventory) != 376 or actual != MIGRATION_CANDIDATE_HASH or actual != receipt.get("candidateInventorySha256"):
+    if len(inventory_rows) != 377 or len(inventory) != 377 or actual != MIGRATION_CANDIDATE_HASH or actual != receipt.get("candidateInventorySha256"):
         raise RuntimeError("Published runtime migration inventory differs from the tested upgrade receipt")
 
 

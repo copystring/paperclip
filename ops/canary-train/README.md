@@ -90,11 +90,12 @@ Changed migration inventories remain blocked by default. A local
 inventory hashes and a nonempty `requiredAssertions` list. The release must
 contain a matching `migrationCompatibilityReceipt` from its verified successful
 workflow, including the installed baseline package version and npm integrity.
-The current reviewed transition also requires the isolated fixture assertion
-`committed-native-recovery-state-migration`, which verifies that migration
-0376 clears recovery fields only on committed, unleased rows with recovery
-state, while preserving leases, other phases, null-state rows, timestamps,
-and recovery history.
+The current reviewed transition also requires isolated fixture assertions for
+migrations 0376 and 0377. They verify that recovery fields clear only on
+committed, unleased finalizations and that process identity clears only for old
+terminal native runs with session evidence and exact successful remote
+termination receipts, with no unsettled finalization. Fixtures preserve active,
+recent, local, unleased, unconfirmed, misbound, and coordinator-owned work.
 The receipt is bound to the workflow run, attempt, controller, source and patched
 commit. Approval alone cannot substitute for that evidence.
 

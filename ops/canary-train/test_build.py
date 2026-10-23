@@ -706,7 +706,7 @@ class ArtifactTests(unittest.TestCase):
     def test_migration_receipt_binds_source_runtime_and_workflow_identity(self):
         inventory = {
             f"node_modules/@paperclipai/db/dist/migrations/{index:04d}_migration.sql": hashlib.sha256(str(index).encode()).hexdigest()
-            for index in range(375)
+            for index in range(376)
         }
         inventory["node_modules/@paperclipai/db/dist/migrations/meta/_journal.json"] = hashlib.sha256(b"journal").hexdigest()
         # Exercise the real JavaScript receipt producer, rather than deriving
@@ -729,9 +729,9 @@ class ArtifactTests(unittest.TestCase):
         body = {
             "schema": 1,
             "candidateSourceCommit": provenance["sourceCommit"],
-            "preparedSource": {"sourceCommit": provenance["sourceCommit"], "patchCommit": provenance["patchCommit"], "patchTree": provenance["patchTree"], "migrationInventoryCount": 376, "migrationInventorySha256": candidate_hash},
+            "preparedSource": {"sourceCommit": provenance["sourceCommit"], "patchCommit": provenance["patchCommit"], "patchTree": provenance["patchTree"], "migrationInventoryCount": 377, "migrationInventorySha256": candidate_hash},
             "oldPackage": {"version": build.MIGRATION_OLD_VERSION, "integrity": build.MIGRATION_OLD_SRI, "migrationInventoryCount": 354, "migrationInventorySha256": build.MIGRATION_BASELINE_HASH},
-            "candidate": {"version": candidate_version, "integrity": candidate_integrity, "migrationInventoryCount": 376, "migrationInventorySha256": candidate_hash},
+            "candidate": {"version": candidate_version, "integrity": candidate_integrity, "migrationInventoryCount": 377, "migrationInventorySha256": candidate_hash},
             "assertions": assertions,
         }
         receipt = {**body, "receiptSha256": hashlib.sha256(json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()}
