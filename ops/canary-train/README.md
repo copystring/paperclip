@@ -54,6 +54,20 @@ The `review-tool-access` instance registration requires `sourceReplacement` with
 
 The controller workflow runs once daily at 03:23 UTC; identical green builds are skipped. The instance timer template checks once daily at 08:30 UTC, with up to 40 seconds of random delay. It catches up once after downtime. Manual checks remain available. Install the timer template only after the first accepted activation; retain the existing service and its configuration. PR heads remain pinned until deliberately reviewed. A patch is retired automatically when the exact published Canary includes its merged commit or already contains the verified patch. A changed unreviewed PR head or unresolved source conflict blocks publication.
 
+### Manifest-aware preservation probes
+
+A registered `tool-review-probe` can set `verifiedReleaseManifest: true`.
+The consumer then requires its configured source pins to pass before it runs
+the probe. It passes the same accepted release manifest as one extra path
+argument after `patched`. The private temporary file is outside the payload
+and is removed on success or failure. Existing probes keep their original
+arguments when the option is absent. Invalid non-boolean options fail closed.
+
+This lets a source-integrated preservation probe use the verified CI file
+inventory and its existing behavior tests instead of fixed compiled hashes
+from an older installation. It does not authorize trusting a synthetic
+manifest or removing private policy, support-file, package, or source checks.
+
 ## Local checks
 
 ```sh
