@@ -850,7 +850,7 @@ class CandidateRetentionTests(unittest.TestCase):
             }, {})
             d._write_status = lambda data: None
 
-            result = d.run("check")
+            result = d.run("run")
 
             self.assertTrue(result["current"])
             self.assertTrue(candidates[0].exists())
@@ -858,6 +858,25 @@ class CandidateRetentionTests(unittest.TestCase):
             self.assertFalse(candidates[1].exists())
             self.assertFalse(candidates[2].exists())
             self.assertFalse(candidates[3].exists())
+
+    def test_check_mode_never_prunes_inactive_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli, candidates = self.make_candidates(root)
+            install_path = cli / "install.json"
+            install = json.loads(install_path.read_text())
+            install["patchedRelease"] = {"tag": "current-tag", "patchedCommit": "1" * 40}
+            install_path.write_text(json.dumps(install))
+            d = deployer(root, retainedInactiveCandidates=0)
+            d._verify_active_fingerprint = lambda current, install: None
+            d._verify_active = lambda version: None
+            d.find_release = lambda: ({"tag_name": "current-tag"}, {
+                "version": "active-version", "runId": "77", "runAttempt": 1,
+            }, {})
+            d._write_status = lambda data: None
+
+            self.assertTrue(d.run("check")["current"])
+            self.assertTrue(all(path.exists() for path in candidates))
 
     def test_run_keeps_history_if_pointer_or_manifest_changes_after_health(self):
         for mutation in ("pointer", "manifest"):
@@ -887,27 +906,36 @@ class CandidateRetentionTests(unittest.TestCase):
                 }, {})
                 d._write_status = lambda data: None
 
-                d.run("check")
+                d.run("run")
 
-                self.assertTrue(candidates[1].exists(), "history is the rollback copy if active identity changed")
+                self.assertTrue(all(path.exists() for path in candidates),
+                                "changed health identity must prevent zero-retention cleanup")
 
     def test_zero_retention_preserves_history_after_failed_health_readback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _, candidates = self.make_candidates(root)
+            cli, candidates = self.make_candidates(root)
+            install_path = cli / "install.json"
+            install = json.loads(install_path.read_text())
+            install["patchedRelease"] = {"tag": "current-tag", "patchedCommit": "1" * 40}
+            install_path.write_text(json.dumps(install))
             d = deployer(root, retainedInactiveCandidates=0)
             d._verify_active_fingerprint = lambda current, install: None
+            health_calls = []
 
             def fail_health(version):
+                health_calls.append(version)
                 raise deploy.DeployError("active health unavailable")
 
             d._verify_active = fail_health
-            d.find_release = lambda: (_ for _ in ()).throw(
-                deploy.DeployError("No patched Canary release is published"))
+            d.find_release = lambda: ({"tag_name": "current-tag"}, {
+                "version": "active-version", "runId": "77", "runAttempt": 1,
+            }, {})
             d._write_status = lambda data: None
 
-            d.run("check")
+            d.run("run")
 
+            self.assertEqual(health_calls, ["active-version"])
             self.assertTrue(all(path.exists() for path in candidates))
 
     def test_invalid_retention_values_fail_closed(self):

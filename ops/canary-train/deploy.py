@@ -360,7 +360,7 @@ class Deployer:
         stem = f"{manifest['version']}-patched-{manifest['runId']}-{manifest['runAttempt']}"
         target = self.installs / stem
         # Keep a previously verified target available for reuse while pruning.
-        # Unowned or symlink targets are never admitted into the retention set.
+        # Ownership is verified below; unowned entries are never pruned.
         reusable_target = target if target.is_dir() and not target.is_symlink() else None
         self._prune_owned_candidates(reusable_target)
         if target.exists():
@@ -640,6 +640,8 @@ class Deployer:
             preserve_history = (self.retained_inactive_candidates != 0 or
                                 active_identity is None or
                                 active_identity != self._active_health_verified_identity)
+            if self.retained_inactive_candidates == 0 and preserve_history:
+                return
             if preserve_history:
                 for entry in install.get("previous", []):
                     if isinstance(entry, dict) and isinstance(entry.get("payloadPath"), str):
@@ -1583,7 +1585,7 @@ class Deployer:
         manifest["tag"] = release["tag_name"]
         current_tag = (install.get("patchedRelease") or {}).get("tag")
         if current_tag == release["tag_name"]:
-            if self.retained_inactive_candidates == 0:
+            if self.retained_inactive_candidates == 0 and mode != "check":
                 stem = f"{manifest['version']}-patched-{manifest['runId']}-{manifest['runAttempt']}"
                 target = self.installs / stem
                 reusable_target = target if target.is_dir() and not target.is_symlink() else None
