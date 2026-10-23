@@ -42,7 +42,7 @@ jobs:
           test -f "$RUNNER_TEMP/paperclip-output/provenance.json"
       - name: Apply the reviewed Source25 wake queue patch
         env:
-          EXPECTED_PATCH_SHA256: 0b5c2abe6a2d56be7dcab0fb9a349121242c87a15fefa3ce5f53477cae10cf1d
+          EXPECTED_PATCH_SHA256: 5e638f9527e698204d29a6b1f41853499103ed006b6d0489a6ae9122c5d345e8
         run: |
           set -euo pipefail
           patch="$GITHUB_WORKSPACE/ops/canary-train/diagnostic-source25-handoff.patch"

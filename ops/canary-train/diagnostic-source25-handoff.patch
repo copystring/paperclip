@@ -1,5 +1,5 @@
 diff --git a/server/src/__tests__/heartbeat-case-handoff.test.ts b/server/src/__tests__/heartbeat-case-handoff.test.ts
-index 9faa3946f..cc950683b 100644
+index 9faa3946f..eac726d6e 100644
 --- a/server/src/__tests__/heartbeat-case-handoff.test.ts
 +++ b/server/src/__tests__/heartbeat-case-handoff.test.ts
 @@ -5,7 +5,7 @@ import { rm } from "node:fs/promises";
@@ -33,11 +33,12 @@ index 9faa3946f..cc950683b 100644
      expect(source.resultJson).not.toHaveProperty("caseHandoffExecutionReleased");
      expect(await isCaseHandoffSourceReleased(db, { runId: sourceRunId, issueId: f.issueId })).toBe(true);
      const [releasedSource] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId));
-@@ -354,6 +358,32 @@ describe("durable case handoff queue admission", () => {
+@@ -354,6 +358,34 @@ describe("durable case handoff queue admission", () => {
      expect(handoff.state).toBe("awaiting_release");
      expect(handoff.nextAttemptAt.getTime()).toBeLessThanOrEqual(Date.now());
    });
-+  it.each(["dispatch_claimed", "runtime_identity", "active_lease", "foreign_handoff", "operator_stop"] as const)(
++  it.each(["dispatch_claimed", "runtime_identity", "active_lease", "foreign_handoff", "operator_stop",
++    "wrong_cancellation_initiator", "malformed_cancellation"] as const)(
 +    "does not record queued case-handoff bootstrap evidence after %s", async scenario => {
 +      const f = await fixture(), sourceRunId = randomUUID(), startedAt = new Date();
 +      const [source] = await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId: f.companyId, agentId: f.agentId,
@@ -54,7 +55,8 @@ index 9faa3946f..cc950683b 100644
 +      const resultJson = { caseHandoffYieldStop: scenario !== "operator_stop", reassignmentStopRequested: true,
 +        reassignmentStopConfirmed: true, caseHandoffId: scenario === "foreign_handoff" ? randomUUID() : f.handoffId,
 +        cancellation: { source: scenario === "operator_stop" ? "operator" : "control_plane", expected: true,
-+          initiator: { type: "system" }, reason: "fixture stop", recordedAt: startedAt.toISOString() },
++          initiator: { type: scenario === "wrong_cancellation_initiator" ? "user" : "system" },
++          reason: "fixture stop", recordedAt: scenario === "malformed_cancellation" ? "invalid" : startedAt.toISOString() },
 +        startupCancellation: { errorCode: "issue_reassigned", requestedAt: startedAt.toISOString() } };
 +      const terminal = await terminalizeLegacyExecution({ db, run: source!, status: "cancelled",
 +        fromStatuses: ["queued", "running"], patch: { finishedAt: startedAt,
@@ -89,7 +91,7 @@ index 675f46d1e..11d734d96 100644
            : [];
          const confirmedAssignmentHandoffWakeId = assignmentHandoffWake?.id ?? null;
 diff --git a/server/src/services/legacy-execution-recovery.ts b/server/src/services/legacy-execution-recovery.ts
-index cec15ef9b..946e9cc5d 100644
+index cec15ef9b..c82c6cce0 100644
 --- a/server/src/services/legacy-execution-recovery.ts
 +++ b/server/src/services/legacy-execution-recovery.ts
 @@ -1,5 +1,5 @@
@@ -108,7 +110,7 @@ index cec15ef9b..946e9cc5d 100644
  import { issueRecoveryActionService } from "./issue-recovery-actions.js";
  import { parseIssueExecutionState } from "./issue-execution-policy.js";
  import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
-@@ -107,6 +107,54 @@ export async function terminalizeLegacyExecution(input: {
+@@ -107,6 +107,62 @@ export async function terminalizeLegacyExecution(input: {
      )).for("update");
      if (!current || (current.runtimeMode !== "legacy" && !(input.recordRestoreFailureOnly && current.runtimeMode === "native")) ||
          (!input.recordRestoreFailureOnly && !(input.fromStatuses ?? [run.status]).includes(current.status))) return null;
@@ -130,7 +132,7 @@ index cec15ef9b..946e9cc5d 100644
 +            eq(caseHandoffs.companyId, current.companyId),
 +            eq(caseHandoffs.sourceRunId, current.id),
 +            eq(caseHandoffs.issueId, issueId),
-+            sql`${caseHandoffs.id} = ${caseHandoffId}`,
++            eq(caseHandoffs.id, caseHandoffId),
 +            eq(caseHandoffs.destinationKind, "agent"),
 +            eq(caseHandoffs.state, "awaiting_release"),
 +          )).limit(1)
@@ -144,13 +146,21 @@ index cec15ef9b..946e9cc5d 100644
 +        current.processPid, current.processGroupId, current.nativeIssueId, current.nativeSessionId,
 +        current.sessionIdAfter, current.controllerBootId, current.controllerLeaseExpiresAt,
 +        current.executionStage, current.runnerInstanceId, current.logRef].every(value => value === null);
-+      const unclaimedWithoutStartupFence = isUnclaimedRun({
++      const cancellationInitiator = cancellation?.initiator as Record<string, unknown> | undefined;
++      const cancellationRecordedAt = typeof cancellation?.recordedAt === "string"
++        ? Date.parse(cancellation.recordedAt)
++        : Number.NaN;
++      const validControlPlaneCancellation = cancellation?.source === "control_plane" &&
++        cancellation.expected === true && cancellationInitiator?.type === "system" &&
++        typeof cancellation.reason === "string" && cancellation.reason.trim().length > 0 &&
++        Number.isFinite(cancellationRecordedAt);
++      const unclaimedWithoutStopFences = isUnclaimedRun({
 +        ...current,
-+        resultJson: current.resultJson ? { ...current.resultJson, startupCancellation: undefined } : null,
++        resultJson: { ...result, startupCancellation: undefined, cancellation: undefined },
 +      });
 +      if (handoff && handoff.id === result.caseHandoffId &&
 +          !activeLease && hasNoExecutionIdentity &&
-+          unclaimedWithoutStartupFence &&
++          unclaimedWithoutStopFences && validControlPlaneCancellation &&
 +          result.caseHandoffYieldStop === true && result.reassignmentStopRequested === true &&
 +          result.reassignmentStopConfirmed === true && startupCancellation?.errorCode === "issue_reassigned" &&
 +          cancellation?.source === "control_plane" && cancellation.expected === true &&
