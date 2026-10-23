@@ -6513,6 +6513,27 @@ export function createToolGatewayService(
       if (error instanceof McpHttpInitializationError && (error.status === 401 || error.status === 403)) {
         await markCallHealth("error", "Remote MCP session authorization failed.");
       }
+      if (error instanceof McpHttpInitializationError && error.status !== null) {
+        const response = error.response;
+        execution.response = {
+          httpStatus: error.status,
+          contentType: response?.headers.get("content-type") ?? null,
+          bodySizeBytes: 0,
+          upstreamRequestId: response?.headers.get("x-request-id") ?? response?.headers.get("traceparent") ?? null,
+        };
+        await response?.body?.cancel().catch(() => undefined);
+        throw new ToolGatewayHttpError(
+          502,
+          "Remote MCP server returned an HTTP error during session initialization",
+          "mcp_remote_status",
+          {
+            status: error.status,
+            connectionId: connection.id,
+            catalogEntryId: entry.id,
+            execution,
+          },
+        );
+      }
       if (mcpSession) forgetMcpHttpSession(mcpSession);
       throw new ToolGatewayHttpError(
         502,

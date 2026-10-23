@@ -257,21 +257,16 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
     const updatedEntries = descriptors.map(descriptor => toCatalogEntry(catalogByName.get(descriptor.name)!));
 
     const preserveQuarantine = connectorPolicy.quarantineNewEntries;
-    const normalizedConfig = preserveQuarantine
-      ? { ...connection.config, quarantineNewEntries: true }
+    const catalogConfigPatch = preserveQuarantine
+      ? { quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
-      ? { ...connection.config, quarantineNewEntries: false }
-      : connection.config;
-    const normalizedTransportConfig = preserveQuarantine
-      ? { ...connection.transportConfig, quarantineNewEntries: true }
-      : refreshOptions.enableAllByDefault
-      ? { ...connection.transportConfig, quarantineNewEntries: false }
-      : connection.transportConfig;
+      ? { quarantineNewEntries: false }
+      : {};
     const [updatedConnection] = await db
       .update(toolConnections)
       .set({
-        config: normalizedConfig,
-        transportConfig: normalizedTransportConfig,
+        config: sql`${toolConnections.config} || ${JSON.stringify(catalogConfigPatch)}::jsonb`,
+        transportConfig: sql`${toolConnections.transportConfig} || ${JSON.stringify(catalogConfigPatch)}::jsonb`,
         healthStatus: "ok",
         healthMessage: unavailableServices.length > 0
           ? `Actions refreshed. Google services unavailable: ${unavailableServices.join(", ")}. Other services remain available; retry refreshing actions.`
