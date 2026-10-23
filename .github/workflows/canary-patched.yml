@@ -27,7 +27,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
       - run: python3 -m unittest discover -s ops/canary-train -p 'test_*.py' -v
+      - run: node --test ops/canary-train/verify-migration-compatibility.test.mjs ops/canary-train/test_migration_precondition_probe.mjs
       - run: node --test .github/scripts/check-pr-test-coverage.test.mjs
 
   assemble:
