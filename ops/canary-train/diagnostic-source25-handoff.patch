@@ -1,0 +1,165 @@
+diff --git a/server/src/__tests__/heartbeat-case-handoff.test.ts b/server/src/__tests__/heartbeat-case-handoff.test.ts
+index 9faa3946f..cc950683b 100644
+--- a/server/src/__tests__/heartbeat-case-handoff.test.ts
++++ b/server/src/__tests__/heartbeat-case-handoff.test.ts
+@@ -5,7 +5,7 @@ import { rm } from "node:fs/promises";
+ import { hostname } from "node:os";
+ import { afterAll, beforeAll, describe, expect, it } from "vitest";
+ import { and, eq } from "drizzle-orm";
+-import { agents, agentWakeupRequests, authSessions, authUsers, caseEvents, caseHandoffs, cases, companies, companyMemberships,
++import { agents, agentWakeupRequests, authSessions, authUsers, caseEvents, caseHandoffs, cases, companies, companyMemberships, environmentLeases,
+   createDb, heartbeatRunEvents, heartbeatRuns, issueComments, issues } from "@paperclipai/db";
+ import { issueRecoveryActions, issueRelations } from "@paperclipai/db";
+ import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+@@ -20,6 +20,7 @@ import { prepareHeartbeatRunScratch, cleanupHeartbeatRunScratch } from "../servi
+ import { appendHeartbeatRunEvent } from "../services/heartbeat-run-events.js";
+ import { createAgentIdentityRedactor } from "../services/agent-identity-redaction.js";
+ import { createHeartbeatRunOutput } from "../services/heartbeat/run-output.js";
++import { terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
+ 
+ describe("durable case handoff queue admission", () => {
+   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
+@@ -342,8 +343,11 @@ describe("durable case handoff queue admission", () => {
+       nextAttemptAt: new Date(Date.now() + 60_000) }).where(eq(caseHandoffs.id, f.handoffId));
+     await heartbeatService(db).requestCaseHandoffYield({ runId: sourceRunId, issueId: f.issueId, handoffId: f.handoffId });
+     const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId));
+-    expect(source).toMatchObject({ status: "cancelled", startedAt: null, runtimeModeResolvedAt: null,
+-      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } });
++    expect(source).toMatchObject({ status: "cancelled", runtimeMode: "legacy", startedAt: null, runtimeModeResolvedAt: null,
++      processStartedAt: null, processPid: null, processGroupId: null, executionStage: null,
++      resultJson: { caseHandoffYieldStop: true, reassignmentStopRequested: true, reassignmentStopConfirmed: true,
++        startupCancellation: { errorCode: "issue_reassigned" }, cancellation: { source: "control_plane", expected: true },
++        executionRecovery: { kind: "bootstrap", providerWorkStarted: false }, caseHandoffId: f.handoffId } });
+     expect(source.resultJson).not.toHaveProperty("caseHandoffExecutionReleased");
+     expect(await isCaseHandoffSourceReleased(db, { runId: sourceRunId, issueId: f.issueId })).toBe(true);
+     const [releasedSource] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId));
+@@ -354,6 +358,32 @@ describe("durable case handoff queue admission", () => {
+     expect(handoff.state).toBe("awaiting_release");
+     expect(handoff.nextAttemptAt.getTime()).toBeLessThanOrEqual(Date.now());
+   });
++  it.each(["dispatch_claimed", "runtime_identity", "active_lease", "foreign_handoff", "operator_stop"] as const)(
++    "does not record queued case-handoff bootstrap evidence after %s", async scenario => {
++      const f = await fixture(), sourceRunId = randomUUID(), startedAt = new Date();
++      const [source] = await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId: f.companyId, agentId: f.agentId,
++        status: "queued", runtimeMode: "legacy", contextSnapshot: { issueId: f.issueId }, responsibleUserId: f.userId }).returning();
++      await db.update(issues).set({ executionRunId: sourceRunId }).where(eq(issues.id, f.issueId));
++      await db.update(caseHandoffs).set({ sourceRunId, state: "awaiting_release", createdAt: new Date(Date.now() - 31_000) })
++        .where(eq(caseHandoffs.id, f.handoffId));
++      if (scenario === "dispatch_claimed") await db.update(heartbeatRuns).set({ status: "running", startedAt,
++        runtimeModeResolvedAt: startedAt, executionStage: "preparing" }).where(eq(heartbeatRuns.id, sourceRunId));
++      if (scenario === "runtime_identity") await db.update(heartbeatRuns).set({ runtimeModeResolvedAt: startedAt })
++        .where(eq(heartbeatRuns.id, sourceRunId));
++      if (scenario === "active_lease") await db.insert(environmentLeases).values({ companyId: f.companyId,
++        heartbeatRunId: sourceRunId, provider: "fixture" });
++      const resultJson = { caseHandoffYieldStop: scenario !== "operator_stop", reassignmentStopRequested: true,
++        reassignmentStopConfirmed: true, caseHandoffId: scenario === "foreign_handoff" ? randomUUID() : f.handoffId,
++        cancellation: { source: scenario === "operator_stop" ? "operator" : "control_plane", expected: true,
++          initiator: { type: "system" }, reason: "fixture stop", recordedAt: startedAt.toISOString() },
++        startupCancellation: { errorCode: "issue_reassigned", requestedAt: startedAt.toISOString() } };
++      const terminal = await terminalizeLegacyExecution({ db, run: source!, status: "cancelled",
++        fromStatuses: ["queued", "running"], patch: { finishedAt: startedAt,
++          errorCode: scenario === "operator_stop" ? "cancelled" : "issue_reassigned", resultJson } });
++      expect(terminal).toMatchObject({ status: "cancelled" });
++      expect(terminal?.resultJson).not.toHaveProperty("executionRecovery");
++      expect(await isCaseHandoffSourceReleased(db, { runId: sourceRunId, issueId: f.issueId })).toBe(false);
++    });
+   it("does not launch an old same-agent receipt after a later phase without an assignment version change", async () => {
+     const f = await fixture(), heartbeat = heartbeatService(db);
+     const queued = await heartbeat.wakeup(f.agentId, f.options);
+diff --git a/server/src/modules/wake-queue/adapters/postgres.ts b/server/src/modules/wake-queue/adapters/postgres.ts
+index 675f46d1e..11d734d96 100644
+--- a/server/src/modules/wake-queue/adapters/postgres.ts
++++ b/server/src/modules/wake-queue/adapters/postgres.ts
+@@ -5,7 +5,7 @@ import { isCompletedOnboardingHandoffWake } from "../../../services/chat-complet
+ import { instanceSettingsService } from "../../../services/instance-settings.js";
+ import { currentConversationCommentCondition } from "../../../services/agent-conversations.js";
+ import { getExecutionBlocker, hasPendingRunCleanup } from "../../../services/execution-blocker.js";
+-import { and, asc, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
++import { and, asc, eq, gt, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
+ import type { Db } from "@paperclipai/db";
+ import { extractIssueReferenceIdentifiers, isUuidLike } from "@paperclipai/shared";
+ import {
+@@ -1217,7 +1217,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
+               eq(agentWakeupRequests.status, DEFERRED_WAKE_STATUS),
+               sql`${agentWakeupRequests.payload}->>'issueId' = ${issueRow.id}`,
+               sql`${agentWakeupRequests.payload}->>'interruptedRunId' = ${run.id}`,
+-              sql`${agentWakeupRequests.requestedAt} > ${run.finishedAt}`,
++              gt(agentWakeupRequests.requestedAt, run.finishedAt),
+             )).orderBy(asc(agentWakeupRequests.requestedAt)).limit(1)
+           : [];
+         const confirmedAssignmentHandoffWakeId = assignmentHandoffWake?.id ?? null;
+diff --git a/server/src/services/legacy-execution-recovery.ts b/server/src/services/legacy-execution-recovery.ts
+index cec15ef9b..e84037833 100644
+--- a/server/src/services/legacy-execution-recovery.ts
++++ b/server/src/services/legacy-execution-recovery.ts
+@@ -1,5 +1,5 @@
+ import { notifyExecutionRunWork } from "./execution-control-notifications.js";
+-import { hasNonDispatchContradiction, isNonDispatchVerified, matchesNonDispatchSource } from "./non-dispatch-receipt.js";
++import { hasNonDispatchContradiction, isNonDispatchVerified, isUnclaimedRun, matchesNonDispatchSource } from "./non-dispatch-receipt.js";
+ import { hasRequiredWorkspaceRecovery, preserveWorkspaceRestoreRecoveryMetadata, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "./workspace-restore-recovery-state.js";
+ import { hasUnrestoredRemoteWorkspace, preserveLegacyWorkspaceRestoreSources, type LegacyWorkspaceRestoreSource } from "./legacy-workspace-restore-recovery.js";
+ import { isPreDispatchReviewWaitVerified } from "./pre-dispatch-review-wait.js";
+@@ -10,7 +10,7 @@ import { claimedAdapterType, hasConversationContinuationPolicy } from "./convers
+ import { canonicalExecutionUuid } from "./execution-identity.js";
+ import { randomUUID } from "node:crypto";
+ import { and, desc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
+-import { environmentLeases, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
++import { caseHandoffs, environmentLeases, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
+ import { issueRecoveryActionService } from "./issue-recovery-actions.js";
+ import { parseIssueExecutionState } from "./issue-execution-policy.js";
+ import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
+@@ -107,6 +107,54 @@ export async function terminalizeLegacyExecution(input: {
+     )).for("update");
+     if (!current || (current.runtimeMode !== "legacy" && !(input.recordRestoreFailureOnly && current.runtimeMode === "native")) ||
+         (!input.recordRestoreFailureOnly && !(input.fromStatuses ?? [run.status]).includes(current.status))) return null;
++    // A Stop may race queue dispatch. The pre-lock snapshot alone cannot prove
++    // that a queued run never acquired execution. Grant bootstrap evidence only
++    // when this transaction still owns the queued row and the exact pending
++    // case handoff that requested the cancellation, with no runtime or lease
++    // ownership having been acquired.
++    if (!input.recordRestoreFailureOnly && issueId && status === "cancelled" && run.status === "queued" &&
++        current.status === "queued" && current.runtimeMode === "legacy" && input.patch?.errorCode === "issue_reassigned") {
++      const result = { ...current.resultJson, ...patch?.resultJson };
++      const cancellation = result.cancellation as Record<string, unknown> | undefined;
++      const startupCancellation = result.startupCancellation as Record<string, unknown> | undefined;
++      const caseHandoffId = typeof result.caseHandoffId === "string"
++        ? canonicalExecutionUuid(sql`${result.caseHandoffId}`)
++        : null;
++      const [handoff] = caseHandoffId
++        ? await tx.select({ id: caseHandoffs.id }).from(caseHandoffs).where(and(
++            eq(caseHandoffs.companyId, current.companyId),
++            eq(caseHandoffs.sourceRunId, current.id),
++            eq(caseHandoffs.issueId, issueId),
++            eq(caseHandoffs.id, caseHandoffId),
++            eq(caseHandoffs.destinationKind, "agent"),
++            eq(caseHandoffs.state, "awaiting_release"),
++          )).limit(1)
++        : [];
++      const [activeLease] = await tx.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
++        eq(environmentLeases.companyId, current.companyId), eq(environmentLeases.heartbeatRunId, current.id),
++        or(isNull(environmentLeases.releasedAt), eq(environmentLeases.status, "pending_cleanup"),
++          eq(environmentLeases.cleanupStatus, "failed")),
++      )).limit(1);
++      const hasNoExecutionIdentity = [current.startedAt, current.runtimeModeResolvedAt, current.processStartedAt,
++        current.processPid, current.processGroupId, current.nativeIssueId, current.nativeSessionId,
++        current.sessionIdAfter, current.controllerBootId, current.controllerLeaseExpiresAt,
++        current.executionStage, current.runnerInstanceId, current.logRef].every(value => value === null);
++      const unclaimedWithoutStartupFence = isUnclaimedRun({
++        ...current,
++        resultJson: current.resultJson ? { ...current.resultJson, startupCancellation: undefined } : null,
++      });
++      if (handoff && handoff.id === result.caseHandoffId &&
++          !activeLease && hasNoExecutionIdentity &&
++          unclaimedWithoutStartupFence &&
++          result.caseHandoffYieldStop === true && result.reassignmentStopRequested === true &&
++          result.reassignmentStopConfirmed === true && startupCancellation?.errorCode === "issue_reassigned" &&
++          cancellation?.source === "control_plane" && cancellation.expected === true &&
++          !hasWorkspaceRestoreFailure(result) && !hasRequiredWorkspaceRecovery(result)) {
++        patch = { ...patch, resultJson: { ...result,
++          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
++        } };
++      }
++    }
+     const controllerStillOwnsSettlement = Boolean(
+       !input.recordRestoreFailureOnly && current.controllerBootId &&
+       current.controllerLeaseExpiresAt && current.controllerLeaseExpiresAt > new Date() &&

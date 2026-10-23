@@ -7,7 +7,7 @@ permissions:
 jobs:
   verify-upgrade:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -16,6 +16,9 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          version: 9.15.4
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           artifact-ids: 12530487274
@@ -37,17 +40,34 @@ jobs:
           tar -xzf "$RUNNER_TEMP/prepared-source/canary-source.tgz" -C "$RUNNER_TEMP"
           test -f "$RUNNER_TEMP/paperclip-source/.canary-train.json"
           test -f "$RUNNER_TEMP/paperclip-output/provenance.json"
-      - name: Validate receipt contracts and verify Canary 6 to prepared candidate migration
+      - name: Apply the reviewed Source25 wake queue patch
+        env:
+          EXPECTED_PATCH_SHA256: 8739ed133d54a2147431949ec7baf5a931f0fa095a3376c6e3a6a531d65de77e
         run: |
           set -euo pipefail
-          node --test ops/canary-train/verify-migration-compatibility.test.mjs
-          node ops/canary-train/verify-migration-compatibility.mjs \
-            "$RUNNER_TEMP/migration-preparation.json" \
-            "$RUNNER_TEMP/paperclip-source" \
-            "$RUNNER_TEMP/paperclip-output/provenance.json"
+          patch="$GITHUB_WORKSPACE/ops/canary-train/diagnostic-source25-handoff.patch"
+          echo "$EXPECTED_PATCH_SHA256  $patch" | sha256sum --check --status
+          git -C "$RUNNER_TEMP/paperclip-source" apply --check "$patch"
+          git -C "$RUNNER_TEMP/paperclip-source" apply "$patch"
+          git -C "$RUNNER_TEMP/paperclip-source" status --short
+      - name: Install and run focused wake queue PostgreSQL regressions
+        working-directory: ${{ runner.temp }}/paperclip-source
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm run preflight:workspace-links
+          pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+          set -o pipefail
+          pnpm --filter @paperclipai/server exec vitest run \
+            src/modules/wake-queue/adapters/postgres.test.ts \
+            src/modules/wake-queue/domain/policy.test.ts \
+            src/__tests__/heartbeat-case-handoff.test.ts \
+            src/__tests__/heartbeat-stale-queue-invalidation.test.ts \
+            2>&1 | tee "$RUNNER_TEMP/source25-handoff-tests.log"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
         with:
-          name: migration-preparation-proof-canary6-to-prepared-candidate
-          path: ${{ runner.temp }}/migration-preparation.json
-          retention-days: 1
-          if-no-files-found: error
+          name: source25-wake-queue-focused-test-log
+          path: ${{ runner.temp }}/source25-handoff-tests.log
+          retention-days: 7
+          if-no-files-found: warn
