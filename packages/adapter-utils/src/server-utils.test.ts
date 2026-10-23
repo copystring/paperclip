@@ -110,6 +110,19 @@ describe("runtime connection tool delivery", () => {
     expect(DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE).not.toContain("Execution contract:");
     expect(DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE).not.toContain("child issues");
   });
+
+  it("gives agents target-aware tool, MCP, and HTTP diagnostics guidance", () => {
+    for (const prompt of [DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE, DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE]) {
+      expect(prompt).toContain("Repeat discovery after the shell or target changes.");
+      expect(prompt).toContain("do not spend a separate model round on preflight alone");
+      expect(prompt).toContain("Finding `py` alone does not prove Python 3 is installed.");
+      expect(prompt).toContain("use `Select-String` if `rg` is missing");
+      expect(prompt).toContain("Do not add an unrequested `read_only_only` or other capability or risk filter.");
+      expect(prompt).toContain("Treat the returned tool name and schema as authoritative");
+      expect(prompt).toContain("Never append a `curl -w` status marker or other diagnostic text to a JSON stream.");
+      expect(prompt).toContain("do not blindly retry a parse failure");
+    }
+  });
 });
 
 describe("legacy adapter skill selection", () => {
@@ -1487,15 +1500,22 @@ describe("renderPaperclipWakePrompt", () => {
     );
   });
 
-  it("keeps task and chat defaults to identity and connection guidance", () => {
+  it("keeps task and chat defaults to identity, connection, and tool guidance", () => {
     for (const template of [
       DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
       DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE,
     ]) {
-      expect(template).toBe(
-        `You are agent {{agent.id}} ({{agent.name}}).\n\n${CONNECTION_INTENT_AGENT_GUIDANCE}`,
-      );
+      expect(template.startsWith("You are agent {{agent.id}} ({{agent.name}}).\n")).toBe(true);
+      expect(template).toContain("Before running a script or optional executable");
+      expect(template).toContain("do not spend a separate model round on preflight alone");
+      expect(template).toContain("Before using optional search or JSON tools");
+      expect(template).toContain("When using assigned MCP tools");
+      expect(template).toContain("For HTTP JSON, keep the response body, HTTP status, headers, and transport diagnostics separate");
+      expect(template).toContain(CONNECTION_INTENT_AGENT_GUIDANCE);
     }
+    expect(DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE).toBe(
+      DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
+    );
   });
 
   it("keeps current task data without generic procedures on fresh scoped wake prompts", () => {
