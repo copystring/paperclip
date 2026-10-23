@@ -1,3 +1,4 @@
+import { makeNonDispatchReceipt } from "../../../services/non-dispatch-receipt.js";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { getNativeReviewAssignment } from "../../../services/native-runtime/native-review-participant.js";
@@ -97,6 +98,7 @@ type LoadStalenessFactsInput = {
 type CancelSuppressedRetryInput = {
   runId: string;
   companyId: string;
+  sourceRun: HeartbeatRun;
   now: Date;
   reason: string;
   errorCode: string;
@@ -682,6 +684,17 @@ export function createPostgresRunDispatchAdapter(
     tx: Db,
     input: CancelSuppressedRetryInput,
   ): Promise<CancelSuppressedRetryResult> {
+    const [receiptIssue] = input.issueId
+      ? await tx.select({ statusVersion: issues.statusVersion }).from(issues).where(and(
+          eq(issues.companyId, input.companyId), eq(issues.id, input.issueId),
+        )).limit(1)
+      : [];
+    const receipt = makeNonDispatchReceipt(
+      input.sourceRun,
+      input.errorCode,
+      "scheduled_retry_gate",
+      receiptIssue?.statusVersion ?? null,
+    );
     const [row] = await tx
       .update(heartbeatRuns)
       .set({
@@ -689,6 +702,7 @@ export function createPostgresRunDispatchAdapter(
         finishedAt: input.now,
         error: input.reason,
         errorCode: input.errorCode,
+        ...(receipt ? { resultJson: { ...parseObject(input.sourceRun.resultJson), nonDispatchReceipt: receipt } } : {}),
         updatedAt: input.now,
       })
       .where(
@@ -785,6 +799,7 @@ export function createPostgresRunDispatchAdapter(
         const cancelled = await cancelSuppressedRetryInTx(tx as unknown as Db, {
           runId: input.runId,
           companyId: input.companyId,
+          sourceRun: run,
           now,
           reason: "Scheduled retry suppressed because the agent no longer exists",
           errorCode: "agent_not_invokable",
@@ -820,6 +835,7 @@ export function createPostgresRunDispatchAdapter(
         const cancelled = await cancelSuppressedRetryInTx(tx as unknown as Db, {
           runId: input.runId,
           companyId: input.companyId,
+          sourceRun: run,
           now,
           reason: gate.reason,
           errorCode: gate.errorCode,
@@ -884,6 +900,15 @@ export function createPostgresRunDispatchAdapter(
     now: Date,
     providerDispatchNotStarted = false,
   ): Promise<CancelStaleQueuedRunOutcome> {
+      const [receiptIssue] = await tx.select({ statusVersion: issues.statusVersion }).from(issues).where(and(
+        eq(issues.companyId, run.companyId), eq(issues.id, issueId),
+      )).limit(1);
+      const receipt = makeNonDispatchReceipt(
+        run,
+        decision.errorCode,
+        "stale_queued_run_gate",
+        receiptIssue?.statusVersion ?? null,
+      );
       const [row] = await tx
         .update(heartbeatRuns)
         .set({
@@ -894,6 +919,7 @@ export function createPostgresRunDispatchAdapter(
           resultJson: {
             ...parseObject(run.resultJson),
             stopReason: decision.errorCode,
+            ...(receipt ? { nonDispatchReceipt: receipt } : {}),
             ...(providerDispatchNotStarted && decision.errorCode === "issue_waiting_for_response"
               ? { preDispatchResponseWait: { version: 1, providerWorkStarted: false } }
               : {}),

@@ -145,10 +145,12 @@ Read enough ancestor/comment context to understand _why_ the task exists and wha
 
 **Execution-policy review/approval wakes.** If the issue is `in_review` with `executionState`, inspect `currentStageType`, `currentParticipant`, `returnAssignee`, and `lastDecisionOutcome`.
 
-If `currentParticipant` matches you, submit your decision via the normal update route — there is no separate execution-decision endpoint:
+Only the authorized `currentParticipant` may decide. If the matching action is in `allowedActions`, submit it through the normal issue update route with your authenticated agent identity and `X-Paperclip-Run-Id` — there is no separate execution-decision endpoint:
 
-- Approve: `PATCH /api/issues/{issueId}` with `{ "status": "done", "comment": "Approved: …" }`. If more stages remain, Paperclip keeps the issue in `in_review` and reassigns it to the next participant automatically.
-- Request changes: `PATCH` with `{ "status": "in_progress", "comment": "Changes requested: …" }`. Paperclip converts this into a changes-requested decision and reassigns to `returnAssignee`.
+- Approve: `PATCH /api/issues/{issueId}` with `{ "status": "done", "comment": "Approved: …" }` and `X-Paperclip-Run-Id`. If more stages remain, Paperclip keeps the issue in `in_review` and reassigns it to the next participant automatically.
+- Request changes: `PATCH /api/issues/{issueId}` with `{ "status": "in_progress", "comment": "Changes requested: …" }` and `X-Paperclip-Run-Id`. Paperclip records the changes-requested decision and reassigns to `returnAssignee`.
+
+A comment, report, or statement such as “Approve” is not itself a decision. After the PATCH, `GET /api/issues/{issueId}` and confirm the native `executionState` transition before reporting the decision as complete.
 
 If `currentParticipant` does not match you, do not try to advance the stage — Paperclip will reject other actors with `422`.
 

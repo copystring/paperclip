@@ -11,8 +11,52 @@ describe("legacy continuation authority", () => {
   it("requests agent repair for a successful process without a task disposition", () => {
     expect(decideLegacyContinuation(input)).toMatchObject({ kind: "enqueue", nextAttempt: 1 });
   });
-  it.each(["done", "cancelled", "blocked", "in_review"])("respects persisted %s disposition", status => {
+  it.each(["done", "cancelled", "in_review"])("respects persisted %s disposition", status => {
     expect(decideLegacyContinuation({ ...input, issue: { ...input.issue!, status } }).kind).toBe("skip");
+  });
+  it("does not mistake a blocked self-owner note for a durable wait", () => {
+    const blocked = { ...input, issue: {
+      ...input.issue!,
+      status: "blocked",
+      unblockDescriptor: { owner: { agentId: input.run.agentId }, action: "Continue after the owner wake" },
+    } };
+    expect(decideLegacyContinuation(blocked)).toMatchObject({ kind: "enqueue", nextAttempt: 1 });
+    expect(decideLegacyContinuation({ ...blocked, episode: { ...input.episode, attempt: 2 } }))
+      .toMatchObject({ kind: "exhausted", attempt: 2, maxAttempts: 2 });
+  });
+  it.each([
+    { owner: "board" },
+    { owner: { userId: "human-owner" } },
+  ])("preserves a blocked issue with human-owned unblock responsibility (%j)", descriptor => {
+    expect(decideLegacyContinuation({
+      ...input,
+      issue: { ...input.issue!, status: "blocked", unblockDescriptor: { ...descriptor, action: "Review and unblock" } },
+    }).kind).toBe("skip");
+  });
+  it.each([
+    ["pendingWait", "durable_wait"],
+    ["activeExecution", "existing_execution"],
+    ["paused", "paused"],
+    ["stopped", "stopped"],
+    ["budgetBlocked", "budget_blocked"],
+  ] as const)("keeps a blocked self-owner issue with real %s evidence out of automatic repair", (gate, reason) => {
+    expect(decideLegacyContinuation({
+      ...input,
+      issue: {
+        ...input.issue!,
+        status: "blocked",
+        unblockDescriptor: { owner: { agentId: input.run.agentId }, action: "Continue after the owner wake" },
+      },
+      gates: { ...input.gates, [gate]: true },
+    })).toEqual({ kind: "skip", reason });
+  });
+  it.each([
+    [null, "missing"],
+    [undefined, "absent"],
+    [{ owner: { agentId: "another-agent" }, action: "Continue" }, "foreign agent"],
+  ] as const)("does not reinterpret a blocked issue without a self-owner descriptor (%s)", (descriptor, _label) => {
+    const issue = { ...input.issue!, status: "blocked", unblockDescriptor: descriptor };
+    expect(decideLegacyContinuation({ ...input, issue })).toEqual({ kind: "skip", reason: "recorded_disposition" });
   });
   it.each(["failed", "cancelled", "interrupted", "timed_out", "running"])("does not convert a %s process into repair", status => {
     expect(decideLegacyContinuation({ ...input, run: { ...input.run, status } }).kind).toBe("skip");
@@ -26,6 +70,7 @@ describe("legacy continuation authority", () => {
   it("rejects foreign agent and reassigned issue", () => {
     expect(decideLegacyContinuation({ ...input, agent: { ...input.agent!, id: "other" } }).kind).toBe("skip");
     expect(decideLegacyContinuation({ ...input, issue: { ...input.issue!, assigneeAgentId: "other" } }).kind).toBe("skip");
+    expect(decideLegacyContinuation({ ...input, issue: { ...input.issue!, status: "blocked", assigneeUserId: "human-owner" } }).kind).toBe("skip");
   });
   it("preserves the episode through two attempts and exhaustion", () => {
     const first = decideLegacyContinuation(input);
