@@ -102,6 +102,63 @@ test('prepared source must be a clean provenance-bound patch commit', async (t) 
   }), /clean immutable provenance/);
 });
 
+test('prepared source patch binding ignores canonical JSON object key order but preserves patch data', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'paperclip-prepared-source-patches-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  git('init', '-b', 'deploy/canary-patched');
+  git('config', 'user.name', 'Migration test');
+  git('config', 'user.email', 'migration-test@example.invalid');
+  const migrations = path.join(root, 'packages', 'db', 'src', 'migrations');
+  await mkdir(path.join(migrations, 'meta'), { recursive: true });
+  await writeFile(path.join(migrations, '0001_base.sql'), 'select 1;\n');
+  await writeFile(path.join(migrations, 'meta', '_journal.json'), '{"entries":[]}\n');
+  git('add', '.'); git('commit', '-m', 'upstream');
+  const sourceCommit = git('rev-parse', 'HEAD');
+  const sourceTree = git('rev-parse', 'HEAD^{tree}');
+  const sourceInventory = {
+    [`${MIGRATION_INVENTORY_PREFIX}0001_base.sql`]: createHash('sha256').update('select 1;\n').digest('hex'),
+    [`${MIGRATION_INVENTORY_PREFIX}meta/_journal.json`]: createHash('sha256').update('{"entries":[]}\n').digest('hex'),
+  };
+  const patch = {
+    number: 16678,
+    repository: 'copystring/paperclip',
+    head: 'a'.repeat(40),
+    state: 'merged',
+    integrationPatch: { sha256: 'b'.repeat(64), path: 'outputs/patch.patch' },
+  };
+  const marker = { schemaVersion: 1, version: candidateVersion, sourceCommit, patches: [{
+    head: patch.head,
+    integrationPatch: { path: patch.integrationPatch.path, sha256: patch.integrationPatch.sha256 },
+    number: patch.number,
+    repository: patch.repository,
+    state: patch.state,
+  }] };
+  await writeFile(path.join(root, '.canary-train.json'), JSON.stringify(marker));
+  git('add', '.canary-train.json'); git('commit', '-m', 'canary-train: assemble candidate');
+  const provenance = {
+    schemaVersion: 1, version: marker.version, sourceCommit, sourceTree,
+    branch: 'deploy/canary-patched', patchCommit: git('rev-parse', 'HEAD'), patchTree: git('rev-parse', 'HEAD^{tree}'), patches: [patch],
+    npmPackages: { '@paperclipai/db': { version: marker.version, integrity: candidateSRI } },
+  };
+  const provenancePath = path.join(path.dirname(root), `${path.basename(root)}.provenance.json`);
+  t.after(() => rm(provenancePath, { force: true }));
+  await writeFile(provenancePath, JSON.stringify(provenance));
+  assert.deepEqual(await assertPreparedSource(root, provenancePath, sourceInventory, {
+    expectedInventoryCount: 2, expectedInventorySha256: canonicalInventoryHash(sourceInventory),
+  }), {
+    sourceCommit, patchCommit: provenance.patchCommit, patchTree: provenance.patchTree,
+    migrationInventoryCount: 2, migrationInventorySha256: canonicalInventoryHash(sourceInventory),
+  });
+
+  const changedPatch = structuredClone(provenance);
+  changedPatch.patches[0].integrationPatch.sha256 = 'c'.repeat(64);
+  await writeFile(provenancePath, JSON.stringify(changedPatch));
+  await assert.rejects(assertPreparedSource(root, provenancePath, sourceInventory, {
+    expectedInventoryCount: 2, expectedInventorySha256: canonicalInventoryHash(sourceInventory),
+  }), /marker-patches/);
+});
+
 test('migration inventory hash is canonical and package path prefixes are part of its binding', () => {
   assert.equal(canonicalInventoryHash({ 'b.sql': '2', 'a.sql': '1' }), canonicalInventoryHash({ 'a.sql': '1', 'b.sql': '2' }));
   const inventory = {};

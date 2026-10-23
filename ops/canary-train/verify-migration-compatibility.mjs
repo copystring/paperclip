@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { inspect } from 'node:util';
+import { inspect, isDeepStrictEqual } from 'node:util';
 import { existsSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 
@@ -238,7 +238,7 @@ export async function assertPreparedSource(sourceRoot, provenancePath, candidate
   if (!/^\d{4}\.\d+\.0-canary\.\d+$/.test(provenance.version ?? '')) failures.push('candidate-version');
   if (marker.version !== provenance.version) failures.push('marker-version');
   if (provenance.branch !== 'deploy/canary-patched') failures.push('provenance-branch');
-  if (!Array.isArray(provenance.patches) || !Array.isArray(marker.patches) || JSON.stringify(marker.patches) !== JSON.stringify(markerPatches)) failures.push('marker-patches');
+  if (!Array.isArray(provenance.patches) || !Array.isArray(marker.patches) || !isDeepStrictEqual(marker.patches, markerPatches)) failures.push('marker-patches');
   if (failures.length) throw new Error(`Prepared candidate source does not match its clean immutable provenance: ${failures.join(', ')}`);
   const packagePin = provenance.npmPackages?.['@paperclipai/db'];
   if (packagePin?.version !== provenance.version || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(packagePin?.integrity ?? '')) throw new Error('Prepared source provenance does not pin the exact database package for this candidate version');
