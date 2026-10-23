@@ -1225,7 +1225,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     ["notifications/initialized", 401],
     ["notifications/initialized", 403],
     ["notifications/initialized", 503],
-  ] as const)("gates only authentication failures during %s with HTTP %s", async (method, status) => {
+  ] as const)("reports HTTP status and gates only authentication failures during %s with HTTP %s", async (method, status) => {
     const { company, agent, run } = await createRunFixture(db);
     const { connection } = await createRemoteMcpToolFixture(db, company.id);
     await db.update(toolConnections).set({
@@ -1245,7 +1245,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     const tool = (await gateway.listToolsForSession(session.token)).find((entry) => entry.connectionId === connection.id)!;
 
     await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: {} }))
-      .rejects.toMatchObject({ reasonCode: "mcp_remote_fetch_failed" });
+      .rejects.toMatchObject({ reasonCode: "mcp_remote_status", details: { status, execution: { response: { httpStatus: status } } } });
     const [updated] = await db.select().from(toolConnections).where(eq(toolConnections.id, connection.id));
     const authenticationFailure = status === 401 || status === 403;
     expect(updated.healthStatus).toBe(authenticationFailure ? "error" : "ok");

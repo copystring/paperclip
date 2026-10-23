@@ -114,8 +114,10 @@ export async function initializeMcpHttpSession(input: {
       `Remote MCP initialized notification returned HTTP ${initializedResponse.status}`,
       "initialized_notification",
       initializedResponse.status,
+      initializedResponse,
     ));
   }
+  await initializedResponse.body?.cancel().catch(() => undefined);
   return sessionHeaders;
 }
 
@@ -280,4 +282,26 @@ export function forgetMcpHttpSession(input: { scope: string; headers?: Record<st
 export function forgetMcpHttpSessions(connectionId: string) {
   for (const key of sessions.keys()) if (key.startsWith(`${connectionId}:`)) sessions.delete(key);
   for (const key of initializing.keys()) if (key.startsWith(`${connectionId}:`)) initializing.delete(key);
+}
+
+export async function requestMcpHttpToolsList(input: Parameters<typeof getMcpHttpSession>[0]) {
+  const request = (headers: Record<string, string>) => input.send({
+    method: "POST",
+    headers: mcpHttpRequestHeaders(headers),
+    body: JSON.stringify({ jsonrpc: "2.0", id: input.requestId, method: "tools/list", params: {} }),
+  });
+  let headers = await getMcpHttpSession(input);
+  let response = await request(headers);
+  const sessionId = new Headers(headers).get("mcp-session-id");
+  if (response.status === 404 && sessionId) {
+    forgetMcpHttpSession({ ...input, sessionId });
+    await response.body?.cancel().catch(() => undefined);
+    headers = await getMcpHttpSession(input);
+    response = await request(headers);
+    const replacementId = new Headers(headers).get("mcp-session-id");
+    if (response.status === 404 && replacementId) {
+      forgetMcpHttpSession({ ...input, sessionId: replacementId });
+    }
+  }
+  return { headers, response };
 }
