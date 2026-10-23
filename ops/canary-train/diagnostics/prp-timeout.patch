@@ -1,0 +1,36 @@
+diff --git a/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts b/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
+index 8df1cc9af..bce284d30 100644
+--- a/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
++++ b/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
+@@ -89,6 +89,19 @@ for await (const line of createInterface({input:process.stdin})) {
+         normalizedSessionId: "saved-test-session", turnId: "saved-test-turn", itemId: "saved-test-item" },
+     });
+     const sizes: Array<{ result: number; wrapper: number }> = [];
++    const failureEvidence = () => {
++      const evidence = bundle.evidence();
++      return {
++        sizes: sizes.slice(-8),
++        notifications: notifications.slice(-12),
++        runnerExited: evidence.runnerExited,
++        runnerExitCode: evidence.runnerExitCode,
++        runnerSignal: evidence.runnerSignal,
++        // Diagnostics are useful to explain a native transport timeout, but
++        // cap both count and text length so failures cannot dump unbounded logs.
++        diagnostics: evidence.diagnostics.slice(-8).map((message) => message.slice(0, 300)),
++      };
++    };
+     bundle.transport.setServerRequestHandler(async request => {
+       const params = request.params;
+       const result = await authority.execute({ tool: String(params.tool), arguments: params.arguments, callId: String(params.callId) });
+@@ -110,9 +123,9 @@ for await (const line of createInterface({input:process.stdin})) {
+           if (notification.method === "item/completed" && (notification.params.item as { text?: string })?.text === "all-pages-verified") verified = true;
+           if (notification.method === "turn/completed") return;
+         } })(),
+-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Escaped pages did not reach the provider")), 15_000); }),
++        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`Escaped pages did not reach the provider: ${JSON.stringify(failureEvidence())}`)), 15_000); }),
+       ]);
+-      expect(verified, JSON.stringify({ sizes, notifications, diagnostics: bundle.evidence().diagnostics })).toBe(true);
++      expect(verified, JSON.stringify(failureEvidence())).toBe(true);
+       expect(executeTool.mock.calls.map(([call]) => call.parameters)).toEqual([{ variant: "large" }, { variant: "inline" }]);
+       expect(sizes.every(size => size.result <= RUNNER_TOOL_RESULT_MAX_BYTES)).toBe(true);
+       // The provider-facing text wrapper is decoded before the PRP command.
