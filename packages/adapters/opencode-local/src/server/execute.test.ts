@@ -138,6 +138,24 @@ describe("OpenCode local skill injection", () => {
     for (const prompt of prompts) expect(prompt).not.toContain("Execution contract:");
     expect(prompts[1]).toContain("You are agent agent-1 (OpenCode).");
     expect(prompts[1]).toContain("Connection tools:");
+    expect(prompts[1]).toContain("command -v python3");
+    expect(prompts[1]).toContain("Get-Command python3, python, py");
+    expect(prompts[1]).toContain("py -3 --version");
+    expect(prompts[1]).toContain("availability already verified for this same shell and execution target");
+    expect(prompts[1]).toContain("combine the check with the intended operation in one shell invocation when practical");
+    expect(prompts[1]).toContain("do not spend a separate model round on preflight alone");
+    expect(prompts[1]).toContain("Repeat discovery after the shell or target changes");
+    expect(prompts[1]).toContain("Never infer executable availability from the Paperclip host");
+    expect(prompts[1]).toContain("command -v rg");
+    expect(prompts[1]).toContain("use `grep`");
+    expect(prompts[1]).toContain("Select-String");
+    expect(prompts[1]).toContain("PowerShell `ConvertFrom-Json`");
+    expect(prompts[1]).toContain("check the transport result and confirm the HTTP status is successful before parsing the body");
+    expect(prompts[1]).toContain("If the status is non-2xx or the body is unexpected");
+    expect(prompts[1]).toContain("Never append a `curl -w` status marker");
+    expect(prompts[1]).toContain("do not blindly retry a parse failure");
+    expect(prompts[1]).toContain("follow the search tool's documented query semantics");
+    expect(prompts[1]).toContain("no result from a narrower filter or mismatched query does not prove the tool is unavailable");
   });
 
   it("injects runtime skills into the configured child HOME", async () => {
@@ -283,6 +301,77 @@ describe("OpenCode local skill injection", () => {
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("OpenCode runtime MCP handoff", () => {
+  let configHome: string;
+
+  beforeEach(async () => {
+    configHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-mcp-handoff-"));
+    vi.stubEnv("XDG_CONFIG_HOME", configHome);
+    vi.stubEnv("OPENCODE_ALLOW_ALL_MODELS", "1");
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(configHome, { recursive: true, force: true });
+  });
+
+  it("passes the run MCP server into OpenCode and removes its local secret config after execution", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-mcp");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", "utf8");
+    await fs.chmod(commandPath, 0o755);
+    const secret = "runtime-mcp-run-secret";
+    let configPath = "";
+    let configAtExecution: Record<string, unknown> | undefined;
+    const logOutput: string[] = [];
+
+    runProcessMock.mockReset();
+    runProcessMock.mockImplementation(async (...args) => {
+      const options = args[4] as { env: Record<string, string> };
+      if (args[3].includes("run")) {
+        configPath = path.join(options.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
+        configAtExecution = JSON.parse(await fs.readFile(configPath, "utf8")) as Record<string, unknown>;
+      }
+      return probeResult({ stdout: JSON.stringify({ type: "text", sessionID: "mcp-session", part: { text: "done" } }) });
+    });
+
+    const result = await execute({
+      runId: "run-mcp-handoff",
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        command: commandPath,
+        cwd: configHome,
+        model: "openai/gpt-5",
+        dangerouslySkipPermissions: false,
+        env: { OPENCODE_ALLOW_ALL_MODELS: "1" },
+      },
+      context: {},
+      runtimeMcp: {
+        getServers: () => [{
+          name: "PowerShell on Felix PC",
+          connectionId: "felix-pc-powershell",
+          url: "https://paperclip.example/api/mcp/run-1",
+          token: secret,
+        }],
+      },
+      onLog: async (_stream, chunk) => { logOutput.push(chunk); },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(configAtExecution?.permission).toBeUndefined();
+    expect(configAtExecution?.mcp).toMatchObject({
+      PowerShell_on_Felix_PC: {
+        type: "remote",
+        url: "https://paperclip.example/api/mcp/run-1",
+        headers: { Authorization: `Bearer ${secret}` },
+        oauth: false,
+      },
+    });
+    expect(JSON.stringify({ result, logs: logOutput })).not.toContain(secret);
+    await expect(fs.access(configPath)).rejects.toThrow();
   });
 });
 
