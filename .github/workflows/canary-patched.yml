@@ -179,6 +179,51 @@ jobs:
           overwrite: true
           if-no-files-found: error
 
+  migration-compatibility:
+    needs: assemble
+    if: needs.assemble.outputs.needed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout build controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: canary-prepared-source
+          path: ${{ runner.temp }}/prepared
+      - name: Verify and extract the exact prepared source
+        env:
+          EXPECTED_SOURCE_SHA256: ${{ needs.assemble.outputs.source_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, os, pathlib
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'prepared/canary-source.tgz'
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == os.environ['EXPECTED_SOURCE_SHA256'], 'Prepared source digest mismatch'
+          PY
+          tar -xzf "$RUNNER_TEMP/prepared/canary-source.tgz" -C "$RUNNER_TEMP"
+      - name: Run pinned-package migration compatibility against disposable PostgreSQL
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/migration-compatibility"
+          node ops/canary-train/verify-migration-compatibility.mjs \
+            "$RUNNER_TEMP/migration-compatibility/receipt.json" \
+            "$RUNNER_TEMP/paperclip-source" \
+            "$RUNNER_TEMP/paperclip-output/provenance.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: canary-migration-compatibility
+          path: ${{ runner.temp }}/migration-compatibility/receipt.json
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
   runner-artifacts:
     needs: assemble
     if: needs.assemble.outputs.needed == 'true'
@@ -308,8 +353,8 @@ jobs:
           if-no-files-found: error
 
   build:
-    needs: [assemble, verify-tests, runner-artifacts]
-    if: needs.assemble.outputs.needed == 'true' && needs.verify-tests.result == 'success' && needs.runner-artifacts.result == 'success'
+    needs: [assemble, verify-tests, runner-artifacts, migration-compatibility]
+    if: needs.assemble.outputs.needed == 'true' && needs.verify-tests.result == 'success' && needs.runner-artifacts.result == 'success' && needs.migration-compatibility.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -384,6 +429,10 @@ jobs:
           save-if: ${{ github.repository == 'copystring/paperclip' && github.ref == 'refs/heads/master' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
+          name: canary-migration-compatibility
+          path: ${{ runner.temp }}/paperclip-migration-compatibility
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
           pattern: canary-test-*
           path: ${{ runner.temp }}/paperclip-test-receipts
           merge-multiple: true
@@ -407,6 +456,7 @@ jobs:
         run: >-
           python3 ops/canary-train/build.py package
           --workspace "$RUNNER_TEMP/paperclip-source" --output "$RUNNER_TEMP/paperclip-output"
+          --migration-receipt "$RUNNER_TEMP/paperclip-migration-compatibility/receipt.json"
       - name: Save prepared Canary pnpm store
         if: github.repository == 'copystring/paperclip' && github.ref == 'refs/heads/master' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && steps.pnpm_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9

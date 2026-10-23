@@ -71,13 +71,23 @@ class DependencyCacheWorkflowTests(unittest.TestCase):
                                ("darwin-arm64", "macos-15"), ("darwin-x64", "macos-15-intel")):
             self.assertIn(f"- target: {target}\n            runner: {runner}", self.text)
         self.assertIn("timeout-minutes: 45", self.text)
-        self.assertIn("needs: [assemble, verify-tests, runner-artifacts]", self.text)
+        self.assertIn("needs: [assemble, verify-tests, runner-artifacts, migration-compatibility]", self.text)
         self.assertIn("needs.runner-artifacts.result == 'success'", self.text)
         self.assertIn("--runner-artifacts", self.text)
         self.assertIn("--provider-pack", self.text)
         self.assertIn("build:provider-pack -- \"$RUNNER_TEMP/provider-pack-output\"", self.text)
         self.assertIn("canary-provider-pack", self.text)
         self.assertGreaterEqual(self.text.count("EXPECTED_SOURCE_SHA256"), 3)
+
+    def test_migration_evidence_uses_frozen_source_and_gates_package(self):
+        job = self.text.split("  migration-compatibility:\n", 1)[1].split("  runner-artifacts:\n", 1)[0]
+        self.assertIn("needs: assemble", job)
+        self.assertIn("EXPECTED_SOURCE_SHA256", job)
+        self.assertIn("verify-migration-compatibility.mjs", job)
+        self.assertIn('"$RUNNER_TEMP/paperclip-output/provenance.json"', job)
+        self.assertIn("if-no-files-found: error", job)
+        self.assertIn("needs.migration-compatibility.result == 'success'", self.text)
+        self.assertIn('--migration-receipt "$RUNNER_TEMP/paperclip-migration-compatibility/receipt.json"', self.text)
 
 
 if __name__ == "__main__":
