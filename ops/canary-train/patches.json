@@ -73,7 +73,7 @@
       "integrationPatch": {
         "number": 8,
         "path": "backport-installed-recovery.patch",
-        "sha256": "e04dc205e6bc5be79ba74abdf91aae7cc8e6bf378f3a25d8eec5ec4a2c96e414"
+        "sha256": "9e582f115a930278a2c48e0940855189293d00ab457f269b7a1f7e781f1fa898"
       }
     },
     {

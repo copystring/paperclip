@@ -1,5 +1,5 @@
 diff --git a/maps/agent-access-map/app-permissions.md b/maps/agent-access-map/app-permissions.md
-index 7183dcb59..765f58e8d 100644
+index 7183dcb59bf16cbdc91fdd2e91a41f830318cb6e..765f58e8d951668dbcbca86fcbbc64a606b51edc 100644
 --- a/maps/agent-access-map/app-permissions.md
 +++ b/maps/agent-access-map/app-permissions.md
 @@ -44,6 +44,20 @@ profile assignments with `ctx.agents.getRuntime`. It requires the existing
@@ -24,7 +24,7 @@ index 7183dcb59..765f58e8d 100644
  ## `action-policy`
  
 diff --git a/maps/agent-access-map/task-coordination.md b/maps/agent-access-map/task-coordination.md
-index a9bd1ddcc..4d4b794e8 100644
+index a9bd1ddcc56f42875b895cfd97ebe97fc3fd12c2..4d4b794e87a4343c34012ae89fa89339871cb8fe 100644
 --- a/maps/agent-access-map/task-coordination.md
 +++ b/maps/agent-access-map/task-coordination.md
 @@ -98,6 +98,15 @@ remaining operations before qualifying the whole capability.
@@ -44,10 +44,10 @@ index a9bd1ddcc..4d4b794e8 100644
  
  Capability ID: `task-coordination/tree-control`.
 diff --git a/maps/feature-map/tasks.md b/maps/feature-map/tasks.md
-index 505885652..ed7405b73 100644
+index 639bd31c4f30bb7b116f2d934d65ca90e491f314..dc5f4c49fdb757e6f28d703307befb70cae7951b 100644
 --- a/maps/feature-map/tasks.md
 +++ b/maps/feature-map/tasks.md
-@@ -101,6 +101,9 @@ Automated: [paused assignee relevance](../../tests/e2e/completed-task-paused-ass
+@@ -107,6 +107,9 @@ Automated: [paused assignee relevance](../../tests/e2e/completed-task-paused-ass
  uses a real disposable server and paused process agent, with no inference, to
  check both task interfaces. Done and cancelled tasks hide the paused-agent
  warning; reopening restores it. The agent stays paused and no run starts.
@@ -58,10 +58,10 @@ index 505885652..ed7405b73 100644
  Manual: For a disposable task owned by a legacy agent, have its current run
  assign the task to a human with status In review. Verify that assignment and
 diff --git a/packages/adapter-utils/src/server-utils.test.ts b/packages/adapter-utils/src/server-utils.test.ts
-index 1f3aa928a..61aed3646 100644
+index f65a77d5f0580ab90295f113acbc302cabc35f27..072004a86230ebeb1ad6028a84ed2c83f69b3e4a 100644
 --- a/packages/adapter-utils/src/server-utils.test.ts
 +++ b/packages/adapter-utils/src/server-utils.test.ts
-@@ -2906,6 +2906,8 @@ describe("renderPaperclipWakePrompt", () => {
+@@ -2894,6 +2894,8 @@ describe("renderPaperclipWakePrompt", () => {
              "Please focus on edge cases and leave a short risk summary.",
          },
          allowedActions: ["approve", "request_changes"],
@@ -70,7 +70,7 @@ index 1f3aa928a..61aed3646 100644
        },
        fallbackFetchNeeded: false,
      });
-@@ -2917,6 +2919,33 @@ describe("renderPaperclipWakePrompt", () => {
+@@ -2905,6 +2907,33 @@ describe("renderPaperclipWakePrompt", () => {
      expect(prompt).toContain(
        "You are waking as the active reviewer for this issue.",
      );
@@ -105,7 +105,7 @@ index 1f3aa928a..61aed3646 100644
  
    it("delivers typed disposition repair instructions without liveness classification", () => {
 diff --git a/packages/adapter-utils/src/server-utils.ts b/packages/adapter-utils/src/server-utils.ts
-index a14abc080..76e924905 100644
+index a14abc080657c7b8140ccf69d8df123796f56380..76e924905fecc4fc7159171c67796d721b682377 100644
 --- a/packages/adapter-utils/src/server-utils.ts
 +++ b/packages/adapter-utils/src/server-utils.ts
 @@ -553,6 +553,7 @@ type PaperclipWakeExecutionStage = {
@@ -295,7 +295,7 @@ index a14abc080..76e924905 100644
        );
      }
 diff --git a/packages/adapters/opencode-local/src/server/execute.test.ts b/packages/adapters/opencode-local/src/server/execute.test.ts
-index 1c0ef466f..0836f0b14 100644
+index 1c0ef466fb8d02febd81030c407d2d392110e895..0836f0b145b8e8aa76472750f4a4dbe5e7dcf797 100644
 --- a/packages/adapters/opencode-local/src/server/execute.test.ts
 +++ b/packages/adapters/opencode-local/src/server/execute.test.ts
 @@ -6,14 +6,19 @@ import { createServer } from "node:http";
@@ -708,7 +708,7 @@ index 1c0ef466f..0836f0b14 100644
        expect(result.model).toBe(model);
        expect(result.billingType).toBe("metered_api");
 diff --git a/packages/adapters/opencode-local/src/server/execute.timeout.test.ts b/packages/adapters/opencode-local/src/server/execute.timeout.test.ts
-index eac949db0..67f9a73cf 100644
+index eac949db088b2814c5ef167723486be5f69e39f6..67f9a73cf5d168d8fa7bb473050bc399feb44066 100644
 --- a/packages/adapters/opencode-local/src/server/execute.timeout.test.ts
 +++ b/packages/adapters/opencode-local/src/server/execute.timeout.test.ts
 @@ -23,6 +23,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async (importOriginal) =>
@@ -759,7 +759,7 @@ index eac949db0..67f9a73cf 100644
      expect(mocks.stop).toHaveBeenCalledTimes(1);
    });
 diff --git a/packages/adapters/opencode-local/src/server/execute.ts b/packages/adapters/opencode-local/src/server/execute.ts
-index bc387a4ef..85833f0f2 100644
+index bc387a4efe487853256c98690b345cefe7c82164..85833f0f212833e4c4a3a6d1da2ee0a12603202c 100644
 --- a/packages/adapters/opencode-local/src/server/execute.ts
 +++ b/packages/adapters/opencode-local/src/server/execute.ts
 @@ -52,6 +52,7 @@ import {
@@ -1054,7 +1054,7 @@ index bc387a4ef..85833f0f2 100644
          sessionParams: resolvedSessionParams,
 diff --git a/packages/adapters/opencode-local/src/server/model-stream-timeout.test.ts b/packages/adapters/opencode-local/src/server/model-stream-timeout.test.ts
 new file mode 100644
-index 000000000..fe9bf758b
+index 0000000000000000000000000000000000000000..fe9bf758bab0604096c5e2de9f76fcf7f23f40e3
 --- /dev/null
 +++ b/packages/adapters/opencode-local/src/server/model-stream-timeout.test.ts
 @@ -0,0 +1,72 @@
@@ -1131,7 +1131,7 @@ index 000000000..fe9bf758b
 +  expect(JSON.stringify(diagnostics.mock.calls)).not.toMatch(/secret|fixture\.invalid|write|call-1/);
 +});
 diff --git a/packages/adapters/opencode-local/src/server/parse.test.ts b/packages/adapters/opencode-local/src/server/parse.test.ts
-index 66e4604ad..1668dee9e 100644
+index 66e4604ade63ad732f97bd9179a5b99951cbd79d..1668dee9eb31aaddce31bedcfb0f392048d94d79 100644
 --- a/packages/adapters/opencode-local/src/server/parse.test.ts
 +++ b/packages/adapters/opencode-local/src/server/parse.test.ts
 @@ -67,6 +67,28 @@ describe("parseOpenCodeJsonl", () => {
@@ -1164,7 +1164,7 @@ index 66e4604ad..1668dee9e 100644
  
    it("detects unknown session errors", () => {
 diff --git a/packages/adapters/opencode-local/src/server/parse.ts b/packages/adapters/opencode-local/src/server/parse.ts
-index c244fa0e1..a016b8ad0 100644
+index c244fa0e102a68a54c5ac8dc4ab0cd27d6dfa5c2..a016b8ad0bba7317b9dba6342b974ac836237ec5 100644
 --- a/packages/adapters/opencode-local/src/server/parse.ts
 +++ b/packages/adapters/opencode-local/src/server/parse.ts
 @@ -29,6 +29,7 @@ export function createOpenCodeJsonlParser() {
@@ -1195,7 +1195,7 @@ index c244fa0e1..a016b8ad0 100644
        usageReported,
        usageComplete: usageReported && !missingUsage,
 diff --git a/packages/adapters/opencode-local/src/server/runtime-config.test.ts b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
-index 86a4bf056..2bb1c96b7 100644
+index 86a4bf05637def9449b14ddbc198b177583495ca..2bb1c96b706bc544d20be1839c685cd129cb9187 100644
 --- a/packages/adapters/opencode-local/src/server/runtime-config.test.ts
 +++ b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
 @@ -1,11 +1,13 @@
@@ -2108,7 +2108,7 @@ index 86a4bf056..2bb1c96b7 100644
    });
  });
 diff --git a/packages/adapters/opencode-local/src/server/runtime-config.ts b/packages/adapters/opencode-local/src/server/runtime-config.ts
-index a06abded3..f70e9a67e 100644
+index a06abded38432a68b5757b646e9a5745395fa39f..f70e9a67e69b3e3b95d6e9061b5da1c112f5b54b 100644
 --- a/packages/adapters/opencode-local/src/server/runtime-config.ts
 +++ b/packages/adapters/opencode-local/src/server/runtime-config.ts
 @@ -1,10 +1,11 @@
@@ -2964,7 +2964,7 @@ index a06abded3..f70e9a67e 100644
 +}
 diff --git a/packages/adapters/opencode-local/src/server/task-tools.test.ts b/packages/adapters/opencode-local/src/server/task-tools.test.ts
 new file mode 100644
-index 000000000..6df353600
+index 0000000000000000000000000000000000000000..6df353600a4cf52de19ee4eb29f18f25d53b10c5
 --- /dev/null
 +++ b/packages/adapters/opencode-local/src/server/task-tools.test.ts
 @@ -0,0 +1,254 @@
@@ -3224,7 +3224,7 @@ index 000000000..6df353600
 +});
 diff --git a/packages/adapters/opencode-local/src/server/task-tools.ts b/packages/adapters/opencode-local/src/server/task-tools.ts
 new file mode 100644
-index 000000000..b1f80a39e
+index 0000000000000000000000000000000000000000..b1f80a39e3f4e71f511ca890e056c7d2b3ef685c
 --- /dev/null
 +++ b/packages/adapters/opencode-local/src/server/task-tools.ts
 @@ -0,0 +1,208 @@
@@ -3438,7 +3438,7 @@ index 000000000..b1f80a39e
 +`;
 diff --git a/server/src/__tests__/ai-model-input-capabilities.test.ts b/server/src/__tests__/ai-model-input-capabilities.test.ts
 new file mode 100644
-index 000000000..7a713dbbf
+index 0000000000000000000000000000000000000000..7a713dbbff281a67110f9f37c9427f5bf2b486e3
 --- /dev/null
 +++ b/server/src/__tests__/ai-model-input-capabilities.test.ts
 @@ -0,0 +1,46 @@
@@ -3489,10 +3489,10 @@ index 000000000..7a713dbbf
 +  });
 +});
 diff --git a/server/src/__tests__/heartbeat-process-recovery.test.ts b/server/src/__tests__/heartbeat-process-recovery.test.ts
-index d0d98e6a5..cf2d0b2cd 100644
+index 3af86f73e77c111055d53cec651babf91e5420df..cc898bb57a98ba1b28e8600ecc17faac08718f21 100644
 --- a/server/src/__tests__/heartbeat-process-recovery.test.ts
 +++ b/server/src/__tests__/heartbeat-process-recovery.test.ts
-@@ -1738,6 +1738,86 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+@@ -1739,6 +1739,86 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
      },
    );
  
@@ -3579,7 +3579,7 @@ index d0d98e6a5..cf2d0b2cd 100644
    it.each(["timeout", "upstream", "cleanup_pending", "cleanup_pending_edited", "cleanup_pending_exhausted", "edited", "exhausted", "new_message", "no_claim", "reassigned", "superseded", "stopped"])(
      "settles explicit retry admission through real executor cleanup: %s", async scenario => {
        const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
-@@ -10239,11 +10319,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+@@ -10266,11 +10346,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
        retryReason: "execution_review_participant_recovery",
        source: "issue.execution_review_recovery",
        retryOfRunId: runId,
@@ -3601,7 +3601,7 @@ index d0d98e6a5..cf2d0b2cd 100644
      });
      expect(
        retryRun?.contextSnapshot as Record<string, unknown>,
-@@ -10567,6 +10652,42 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+@@ -10594,6 +10679,42 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
    });
  
    it("retries a pending execution-review participant once before blocking with a recovery action", async () => {
@@ -3644,7 +3644,7 @@ index d0d98e6a5..cf2d0b2cd 100644
      const { companyId, agentId, issueId, runId, stageId } =
        await seedInReviewParticipantRunFixture();
      const heartbeat = heartbeatService(db);
-@@ -10598,16 +10719,18 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+@@ -10625,16 +10746,18 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
        retryReason: "execution_review_participant_recovery",
        source: "issue.execution_review_recovery",
        retryOfRunId: runId,
@@ -3670,7 +3670,7 @@ index d0d98e6a5..cf2d0b2cd 100644
        const row = await selectRecoveryIssueById(issueId);
        return row?.status === "blocked" ? row : null;
 diff --git a/server/src/__tests__/heartbeat-run-summary.test.ts b/server/src/__tests__/heartbeat-run-summary.test.ts
-index c47eeef0c..cb6f73b55 100644
+index c47eeef0c9808b75fbda730ea574edc66bcd6018..cb6f73b55bea553dec4070f16b002b9ee6d12a87 100644
 --- a/server/src/__tests__/heartbeat-run-summary.test.ts
 +++ b/server/src/__tests__/heartbeat-run-summary.test.ts
 @@ -355,6 +355,15 @@ describe("buildHeartbeatRunIssueComment", () => {
@@ -3690,7 +3690,7 @@ index c47eeef0c..cb6f73b55 100644
      nativeResult: {
        schema: "paperclip.run_result.v1",
 diff --git a/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts b/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
-index 826fe78ec..24f8f5d63 100644
+index 826fe78ec31eca39a2eabf2e3e65611b8759766a..24f8f5d6391708324de79315986c735f84cf54ef 100644
 --- a/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
 +++ b/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
 @@ -2979,6 +2979,127 @@ describe("agent issue mutation checkout ownership", () => {
@@ -3822,7 +3822,7 @@ index 826fe78ec..24f8f5d63 100644
      const watchdogRunId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab";
      const watchdogReportIssueId = "cccccccc-cccc-4ccc-8ccc-cccccccccccd";
 diff --git a/server/src/__tests__/issue-continuation-summary.test.ts b/server/src/__tests__/issue-continuation-summary.test.ts
-index 73cf9ba4e..058a478d6 100644
+index 73cf9ba4e49b5ca0467f705313ac8512dc74ec4b..058a478d606e289b9072994276a272f370dc40ca 100644
 --- a/server/src/__tests__/issue-continuation-summary.test.ts
 +++ b/server/src/__tests__/issue-continuation-summary.test.ts
 @@ -45,6 +45,10 @@ describe("issue continuation summaries", () => {
@@ -3837,7 +3837,7 @@ index 73cf9ba4e..058a478d6 100644
      expect(body).toContain("Keep work resumable after adapter session reset.");
      expect(body).toContain("## Acceptance Criteria");
 diff --git a/server/src/__tests__/issue-execution-policy-persistence.test.ts b/server/src/__tests__/issue-execution-policy-persistence.test.ts
-index 743c248ef..08faf7294 100644
+index 743c248efc1531b948510a3259a810bbc574670c..08faf72947791ca62202aded2c44afe28ed8add4 100644
 --- a/server/src/__tests__/issue-execution-policy-persistence.test.ts
 +++ b/server/src/__tests__/issue-execution-policy-persistence.test.ts
 @@ -1,6 +1,8 @@
@@ -3892,7 +3892,7 @@ index 743c248ef..08faf7294 100644
      const companyId = randomUUID();
      const issueId = randomUUID();
 diff --git a/server/src/__tests__/issue-execution-policy.test.ts b/server/src/__tests__/issue-execution-policy.test.ts
-index 7a796ba7a..4fbdf5e41 100644
+index 7a796ba7a8d8a705a7ee822e5f6eed9381da268a..4fbdf5e4179ca7a18fd36dbf501a53a1484c688f 100644
 --- a/server/src/__tests__/issue-execution-policy.test.ts
 +++ b/server/src/__tests__/issue-execution-policy.test.ts
 @@ -1,5 +1,5 @@
@@ -3970,7 +3970,7 @@ index 7a796ba7a..4fbdf5e41 100644
    describe("happy path: executor → review → approval → done", () => {
      const policy = twoStagePolicy();
 diff --git a/server/src/__tests__/issue-wake-diagnostics-routes.test.ts b/server/src/__tests__/issue-wake-diagnostics-routes.test.ts
-index 1de34cb03..abda05ac5 100644
+index 1de34cb0300d6a6049aa556cbeda365ae89d0d10..abda05ac5b90a4dea0d07ebb32adf9200242cd04 100644
 --- a/server/src/__tests__/issue-wake-diagnostics-routes.test.ts
 +++ b/server/src/__tests__/issue-wake-diagnostics-routes.test.ts
 @@ -280,6 +280,31 @@ describeEmbeddedPostgres("issue wake diagnostics route", () => {
@@ -4006,7 +4006,7 @@ index 1de34cb03..abda05ac5 100644
      const company = await seedCompany(db);
      const project = await seedProject(db, company.id, "Core");
 diff --git a/server/src/__tests__/issues-service.test.ts b/server/src/__tests__/issues-service.test.ts
-index f335f6628..eadd41ab6 100644
+index f335f6628a101fa9a45fde51428a1f3f26cfe0cd..eadd41ab6fda544a7d8de3d92b34e8768255fbfa 100644
 --- a/server/src/__tests__/issues-service.test.ts
 +++ b/server/src/__tests__/issues-service.test.ts
 @@ -189,6 +189,53 @@ describeEmbeddedPostgres("issueService run attachment artifacts", () => {
@@ -4122,10 +4122,10 @@ index f335f6628..eadd41ab6 100644
      const seeded = await seedOwnershipIssue({ checkoutStatus: "failed" });
  
 diff --git a/server/src/__tests__/tool-gateway.test.ts b/server/src/__tests__/tool-gateway.test.ts
-index 2633130a1..8ef82209a 100644
+index 43168ee4a3cffc091361e9a7e7a498d22fb4f497..f4a4aa5bfb77fd0fb4766bae1d59e0743f0ff846 100644
 --- a/server/src/__tests__/tool-gateway.test.ts
 +++ b/server/src/__tests__/tool-gateway.test.ts
-@@ -4470,6 +4470,61 @@ rl.on("line", (line) => {
+@@ -4518,6 +4518,61 @@ rl.on("line", (line) => {
      });
    }
  
@@ -4188,7 +4188,7 @@ index 2633130a1..8ef82209a 100644
      return {
        headers: { "mcp-session-id": sessionId },
 diff --git a/server/src/agent-run-cancellation.ts b/server/src/agent-run-cancellation.ts
-index b49e71558..e46be0f37 100644
+index b49e7155848c7b84ece14d87be39ee8272d06cf7..e46be0f37193599a0f946cfe396b5593e4e6bc0f 100644
 --- a/server/src/agent-run-cancellation.ts
 +++ b/server/src/agent-run-cancellation.ts
 @@ -20,6 +20,7 @@ export async function assertAgentRunWriteAllowed(tx: Db, companyId: string, acto
@@ -4201,7 +4201,7 @@ index b49e71558..e46be0f37 100644
      .from(heartbeatRuns).where(and(eq(heartbeatRuns.id, actor.runId),
 diff --git a/server/src/legacy-run-task-ownership.test.ts b/server/src/legacy-run-task-ownership.test.ts
 new file mode 100644
-index 000000000..9226ed30c
+index 0000000000000000000000000000000000000000..9226ed30c91c5debe9c02f2724e85b3ba497ece8
 --- /dev/null
 +++ b/server/src/legacy-run-task-ownership.test.ts
 @@ -0,0 +1,38 @@
@@ -4244,7 +4244,7 @@ index 000000000..9226ed30c
 +  });
 +});
 diff --git a/server/src/legacy-run-task-ownership.ts b/server/src/legacy-run-task-ownership.ts
-index 2c9bfbf5b..ef6dd30e5 100644
+index 2c9bfbf5b6a06be37892912cb76f5aa11bb8788c..ef6dd30e563caaa2be10bf956ac114473db94056 100644
 --- a/server/src/legacy-run-task-ownership.ts
 +++ b/server/src/legacy-run-task-ownership.ts
 @@ -4,6 +4,7 @@ export function assertLegacyRunTaskOwnership(
@@ -4278,7 +4278,7 @@ index 2c9bfbf5b..ef6dd30e5 100644
    }
  }
 diff --git a/server/src/modules/wake-queue/adapters/postgres.test.ts b/server/src/modules/wake-queue/adapters/postgres.test.ts
-index 242309899..28c6ebb48 100644
+index 24230989937115f7ab3932563940e9820d2b0768..28c6ebb4858e632fc17e4fb71504a2ad4679fc78 100644
 --- a/server/src/modules/wake-queue/adapters/postgres.test.ts
 +++ b/server/src/modules/wake-queue/adapters/postgres.test.ts
 @@ -158,6 +158,8 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
@@ -4560,7 +4560,7 @@ index 242309899..28c6ebb48 100644
      it(`plans conversation recovery during owner cleanup without draining messages (queued=${hasDeferredMessage})`, async () => {
        const companyId = await seedCompany();
 diff --git a/server/src/modules/wake-queue/adapters/postgres.ts b/server/src/modules/wake-queue/adapters/postgres.ts
-index c4929f482..c25218693 100644
+index c4929f482ba35a1341ab4f383ad0a42eb9bea2d2..c252186930f4dcfddcde337a3cb7db16b46b6254 100644
 --- a/server/src/modules/wake-queue/adapters/postgres.ts
 +++ b/server/src/modules/wake-queue/adapters/postgres.ts
 @@ -36,7 +36,10 @@ import { issueService } from "../../../services/issues.js";
@@ -4669,7 +4669,7 @@ index c4929f482..c25218693 100644
          const candidateIssues = await tx
            .select()
 diff --git a/server/src/modules/wake-queue/application/use-cases.ts b/server/src/modules/wake-queue/application/use-cases.ts
-index 1e3ffa936..47d4e0a28 100644
+index 1e3ffa936098342a3dc1e0d1b1bbeb836e7b4606..47d4e0a281b235deeccb6dd411666842029f5af0 100644
 --- a/server/src/modules/wake-queue/application/use-cases.ts
 +++ b/server/src/modules/wake-queue/application/use-cases.ts
 @@ -82,6 +82,39 @@ function currentAgentParticipant(issue: IssueSnapshot): { agentId: string } | nu
@@ -4729,7 +4729,7 @@ index 1e3ffa936..47d4e0a28 100644
      !workingCandidate.authorizedFailedChatRetry &&
      workingCandidate.deferredCommentIds.length > 0 &&
 diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
-index 7ea94ad54..2f802ce59 100644
+index 01ce215dea101b9194326fb3a0f108750d867bc5..5294c7c9a85fcdf7d544d3d59d2e17801199c93f 100644
 --- a/server/src/routes/issues.ts
 +++ b/server/src/routes/issues.ts
 @@ -328,6 +328,7 @@ import {
@@ -4880,7 +4880,7 @@ index 7ea94ad54..2f802ce59 100644
        };
        const shouldCollectCompletionPublication =
 diff --git a/server/src/routes/tool-gateway.ts b/server/src/routes/tool-gateway.ts
-index 91becb88b..1f97282c2 100644
+index 91becb88bf3128de9990dc94cd1e281d2698d254..1f97282c2088f47f9c0e72b4948ef8fecbd075ca 100644
 --- a/server/src/routes/tool-gateway.ts
 +++ b/server/src/routes/tool-gateway.ts
 @@ -14,6 +14,7 @@ import {
@@ -4908,7 +4908,7 @@ index 91becb88b..1f97282c2 100644
        return;
      }
 diff --git a/server/src/services/ai-connection-runtime.ts b/server/src/services/ai-connection-runtime.ts
-index 2620e8cbb..9020b3209 100644
+index 54fe1ded35b00f220b105a3c2374a2824e71fd57..c1724b9d18cced0fd9db44159a0632fda6898225 100644
 --- a/server/src/services/ai-connection-runtime.ts
 +++ b/server/src/services/ai-connection-runtime.ts
 @@ -14,6 +14,7 @@ import {
@@ -4934,7 +4934,7 @@ index 2620e8cbb..9020b3209 100644
        Object.assign(env, projected.env);
 diff --git a/server/src/services/ai-model-input-capabilities.ts b/server/src/services/ai-model-input-capabilities.ts
 new file mode 100644
-index 000000000..1b73c48dc
+index 0000000000000000000000000000000000000000..1b73c48dc380a8678f3252e99a2bfc2ff86ced95
 --- /dev/null
 +++ b/server/src/services/ai-model-input-capabilities.ts
 @@ -0,0 +1,55 @@
@@ -4994,7 +4994,7 @@ index 000000000..1b73c48dc
 +  return vision;
 +}
 diff --git a/server/src/services/ai-provider-routing.ts b/server/src/services/ai-provider-routing.ts
-index 5efc70561..7bb94d59e 100644
+index 5efc70561bcab369bc830c1fc5c876a5f5c99f29..7bb94d59e5cd354c0754419282b611c6970a3649 100644
 --- a/server/src/services/ai-provider-routing.ts
 +++ b/server/src/services/ai-provider-routing.ts
 @@ -11,6 +11,7 @@ export function managedProviderRouting(
@@ -5017,7 +5017,7 @@ index 5efc70561..7bb94d59e 100644
        },
        enabled_providers: [provider],
 diff --git a/server/src/services/heartbeat-run-summary.ts b/server/src/services/heartbeat-run-summary.ts
-index eec171112..290b39945 100644
+index eec17111280079e0b048a105c337a66975c17b10..290b3994571faee4e00ccccd9ef9e5b209db030e 100644
 --- a/server/src/services/heartbeat-run-summary.ts
 +++ b/server/src/services/heartbeat-run-summary.ts
 @@ -401,6 +401,8 @@ function decision(
@@ -5043,10 +5043,10 @@ index eec171112..290b39945 100644
    const continuationSummary = readAcceptedTaskContinuationSummary(resultJson);
    if (continuationSummary) {
 diff --git a/server/src/services/heartbeat.ts b/server/src/services/heartbeat.ts
-index 0d2d33e61..9470fd173 100644
+index 99060a28540db1033f6f698b860505958cb5cc6a..ccd5a060e3692c8aa2391c43d9acb820380c8ce4 100644
 --- a/server/src/services/heartbeat.ts
 +++ b/server/src/services/heartbeat.ts
-@@ -548,6 +548,7 @@ export { isNonAssigneeWorkspaceBusyRetry };
+@@ -550,6 +550,7 @@ export { isNonAssigneeWorkspaceBusyRetry };
  // Routes and the scheduler construct separate heartbeatService instances, but
  // they must agree on in-process adapter executions when reaping stale runs.
  const activeRunExecutions = new Set<string>();
@@ -5054,7 +5054,7 @@ index 0d2d33e61..9470fd173 100644
  // A legacy process adapter's signal exit can race the operator cancellation CAS while
  // its owned process group is still being joined. Keep that exit from becoming
  // a successful result (or a competing failure) before Stop settles. This is an
-@@ -1413,6 +1414,14 @@ export function heartbeatService(
+@@ -1417,6 +1418,14 @@ export function heartbeatService(
    }
  
    function releaseIssueExecutionAndPromote(...args: Parameters<typeof runControl.releaseIssueExecutionAndPromote>) {
@@ -5069,8 +5069,8 @@ index 0d2d33e61..9470fd173 100644
      return runControl.releaseIssueExecutionAndPromote(...args);
    }
  
-@@ -3846,7 +3855,7 @@ export function heartbeatService(
-           }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
+@@ -3858,7 +3867,7 @@ export function heartbeatService(
+           });
          }
          await db.update(heartbeatRuns).set({
 -          executionStage: sql`case when ${heartbeatRuns.status} = 'cancelled' then 'settled' else ${heartbeatRuns.executionStage} end`,
@@ -5078,7 +5078,7 @@ index 0d2d33e61..9470fd173 100644
            controllerLeaseExpiresAt: null,
          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.runtimeMode, "legacy"),
            eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
-@@ -3883,12 +3892,16 @@ export function heartbeatService(
+@@ -3895,12 +3904,16 @@ export function heartbeatService(
        }
        // Terminalization precedes lease and adapter cleanup. Only now is the
        // owner gone; retry pending input for ordinary completions as well as Stop.
@@ -5096,7 +5096,7 @@ index 0d2d33e61..9470fd173 100644
            logger.error({ err, runId: run.id }, "failed to settle explicit continuation after cleanup");
          });
        }
-@@ -3898,10 +3911,25 @@ export function heartbeatService(
+@@ -3910,10 +3923,25 @@ export function heartbeatService(
            eq(agentWakeupRequests.status, "deferred_issue_execution"),
            sql`${agentWakeupRequests.payload}->>'issueId' = ${String(latestRun.contextSnapshot?.issueId)}`,
          )).limit(1);
@@ -5127,10 +5127,10 @@ index 0d2d33e61..9470fd173 100644
        }
        if (
 diff --git a/server/src/services/heartbeat/queue.ts b/server/src/services/heartbeat/queue.ts
-index a0ff4a085..ad8e99cee 100644
+index c6ac63b6a53f7296812146127544105230ee839f..c63c15af1edcf6b3ce96bf882f99a3b8dc735de4 100644
 --- a/server/src/services/heartbeat/queue.ts
 +++ b/server/src/services/heartbeat/queue.ts
-@@ -3285,6 +3285,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -3301,6 +3301,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
              }
              if (durableRequest || wakeCommentId ||
                  hasInteractionContinuationWakeContext(enrichedContextSnapshot) ||
@@ -5142,7 +5142,7 @@ index a0ff4a085..ad8e99cee 100644
                await tx.insert(agentWakeupRequests).values({
                  ...durableReceiptFields,
 diff --git a/server/src/services/heartbeat/run-completion.test.ts b/server/src/services/heartbeat/run-completion.test.ts
-index 39df53e1d..f32a9e622 100644
+index 39df53e1d52306d571e81954a231f8e3ba16244e..f32a9e622041d2330763931d3bf337e3a38adb58 100644
 --- a/server/src/services/heartbeat/run-completion.test.ts
 +++ b/server/src/services/heartbeat/run-completion.test.ts
 @@ -294,6 +294,21 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
@@ -5168,7 +5168,7 @@ index 39df53e1d..f32a9e622 100644
      const f = await fixture();
      f.input.adapterResult.clearSession = true;
 diff --git a/server/src/services/heartbeat/run-completion.ts b/server/src/services/heartbeat/run-completion.ts
-index 7f2b486df..d84a90c30 100644
+index 7f2b486dfe7066d180b3e6d587b7021141bbda92..d84a90c3055949fd2fb8f96763ea289f9eaaeeb7 100644
 --- a/server/src/services/heartbeat/run-completion.ts
 +++ b/server/src/services/heartbeat/run-completion.ts
 @@ -806,6 +806,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
@@ -5180,7 +5180,7 @@ index 7f2b486df..d84a90c30 100644
              && persistedResultJson?.finalizationReasonCode === "conversation_turn_finished",
            existingComment: existingRunComment,
 diff --git a/server/src/services/heartbeat/run-preparation.test.ts b/server/src/services/heartbeat/run-preparation.test.ts
-index 10a447e1a..fa9350352 100644
+index 10a447e1a74a509bb70d05efe8e477a27ec3eb6e..fa9350352a940f5a28ffb465f49938f1833db3f1 100644
 --- a/server/src/services/heartbeat/run-preparation.test.ts
 +++ b/server/src/services/heartbeat/run-preparation.test.ts
 @@ -2,6 +2,7 @@ import type { Db } from "@paperclipai/db";
@@ -5272,10 +5272,10 @@ index 10a447e1a..fa9350352 100644
      expect(first.scopes[0]).toEqual(expect.arrayContaining(["company-one", "issue-one"]));
      expect(second.scopes[0]).toEqual(expect.arrayContaining(["company-two", "issue-two"]));
 diff --git a/server/src/services/heartbeat/run-preparation.ts b/server/src/services/heartbeat/run-preparation.ts
-index 7c635e5cb..5706bd7b3 100644
+index c55c81fbddb965167e47710ca341a9ea66240f2e..02d9bcaa86c3debe609b03053108cfebe8fb32d2 100644
 --- a/server/src/services/heartbeat/run-preparation.ts
 +++ b/server/src/services/heartbeat/run-preparation.ts
-@@ -2659,8 +2659,23 @@ export async function buildPaperclipWakePayload(input: {
+@@ -2661,8 +2661,23 @@ export async function buildPaperclipWakePayload(input: {
            notice: externalAttachmentOmissionNotice(omission),
          }))
      : [];
@@ -5299,7 +5299,7 @@ index 7c635e5cb..5706bd7b3 100644
      executionContinuation: input.contextSnapshot.executionContinuation ?? null,
      chatCompletionUpdates: input.contextSnapshot.chatCompletionUpdates ?? null,
      attachmentOmissions,
-@@ -2920,6 +2935,7 @@ export function createHeartbeatRunPreparation(db: Db) {
+@@ -2924,6 +2939,7 @@ export function createHeartbeatRunPreparation(db: Db) {
          executionWorkspaceId: issues.executionWorkspaceId,
          executionWorkspacePreference: issues.executionWorkspacePreference,
          assigneeAgentId: issues.assigneeAgentId,
@@ -5308,10 +5308,10 @@ index 7c635e5cb..5706bd7b3 100644
          executionPolicy: issues.executionPolicy,
          executionState: issues.executionState,
 diff --git a/server/src/services/heartbeat/run-state.test.ts b/server/src/services/heartbeat/run-state.test.ts
-index 2191ca195..1464266f4 100644
+index 4a7293280276b082abc11dc7aad832b9c7242f24..a993ff3eda459a71972a48bdd633b6c07f470dc9 100644
 --- a/server/src/services/heartbeat/run-state.test.ts
 +++ b/server/src/services/heartbeat/run-state.test.ts
-@@ -269,9 +269,14 @@ describePostgres("heartbeat run state database wiring", () => {
+@@ -301,9 +301,14 @@ describePostgres("heartbeat run state database wiring", () => {
      const decision = await state.evaluateSessionCompaction({
        agent: { ...agent, runtimeConfig: { heartbeat: { sessionCompaction: { maxRawInputTokens: 100 } } } },
        sessionId: "compact", issueId: issue.id,
@@ -5327,10 +5327,10 @@ index 2191ca195..1464266f4 100644
      expect(decision.handoffMarkdown).not.toContain("omit this");
    });
 diff --git a/server/src/services/heartbeat/run-state.ts b/server/src/services/heartbeat/run-state.ts
-index e979572e2..4f0cb8fde 100644
+index 30f9ef0b001879b0c0de4d7cf3838d172b7f67a1..5811bbd2b6b40b8494a6312b606651a3ff142e0a 100644
 --- a/server/src/services/heartbeat/run-state.ts
 +++ b/server/src/services/heartbeat/run-state.ts
-@@ -1372,12 +1372,14 @@ export function createHeartbeatRunState(db: Db) {
+@@ -1397,12 +1397,14 @@ export function createHeartbeatRunState(db: Db) {
  
      const handoffMarkdown = [
        "Paperclip session handoff:",
@@ -5349,7 +5349,7 @@ index e979572e2..4f0cb8fde 100644
      ]
 diff --git a/server/src/services/heartbeat/task-context.test.ts b/server/src/services/heartbeat/task-context.test.ts
 new file mode 100644
-index 000000000..beb952c61
+index 0000000000000000000000000000000000000000..beb952c61473632ebb7a12fd2c5e9436a8dd2a6b
 --- /dev/null
 +++ b/server/src/services/heartbeat/task-context.test.ts
 @@ -0,0 +1,212 @@
@@ -5566,7 +5566,7 @@ index 000000000..beb952c61
 +  });
 +});
 diff --git a/server/src/services/heartbeat/task-context.ts b/server/src/services/heartbeat/task-context.ts
-index b6565d6b1..982005905 100644
+index b6565d6b1b49d62c39aec020e9b5eb9b5fdd84f2..982005905a81b4097015f80685281a81ae8d5e2a 100644
 --- a/server/src/services/heartbeat/task-context.ts
 +++ b/server/src/services/heartbeat/task-context.ts
 @@ -4,6 +4,7 @@ import { FAST_RESPONSE_AGENT_GUIDANCE, fastResponseHistoryBody } from "@papercli
@@ -5654,7 +5654,7 @@ index b6565d6b1..982005905 100644
      : null;
 diff --git a/server/src/services/issue-comment-review-context.ts b/server/src/services/issue-comment-review-context.ts
 new file mode 100644
-index 000000000..5ed2d8405
+index 0000000000000000000000000000000000000000..5ed2d8405085420da492a9d6c777dcc98bff7c6e
 --- /dev/null
 +++ b/server/src/services/issue-comment-review-context.ts
 @@ -0,0 +1,21 @@
@@ -5680,7 +5680,7 @@ index 000000000..5ed2d8405
 +  return UNREVIEWED_AGENT_REPORT_PREFIX + body;
 +}
 diff --git a/server/src/services/issue-continuation-summary.ts b/server/src/services/issue-continuation-summary.ts
-index 554c8313b..29de4d0c1 100644
+index 554c8313bab18edab60ef4faeee4ff0b5a37b82d..29de4d0c1b067cecc7c40b53758f2a3c93867f11 100644
 --- a/server/src/services/issue-continuation-summary.ts
 +++ b/server/src/services/issue-continuation-summary.ts
 @@ -149,7 +149,7 @@ export function buildContinuationSummaryMarkdown(input: {
@@ -5711,7 +5711,7 @@ index 554c8313b..29de4d0c1 100644
      "## Objective",
      "",
 diff --git a/server/src/services/issue-execution-policy.ts b/server/src/services/issue-execution-policy.ts
-index d2fe9c834..bdd9d8fc3 100644
+index d2fe9c834baabde6a7ba1b24f5e555860f27da49..bdd9d8fc34055a6420fd50e496b64212a318fd5c 100644
 --- a/server/src/services/issue-execution-policy.ts
 +++ b/server/src/services/issue-execution-policy.ts
 @@ -61,6 +61,67 @@ type TransitionResult = {
@@ -5783,7 +5783,7 @@ index d2fe9c834..bdd9d8fc3 100644
   * Consecutive agent-initiated changes-requested rounds tolerated on one stage
   * before the pending review escalates to the responsible human. Policies can
 diff --git a/server/src/services/issues.ts b/server/src/services/issues.ts
-index c25ee30f3..257ccab4b 100644
+index cc6eba9236cf8aaf8a65a6a1f68455d7663566a2..9e570680ba6c6eea3b94376f7ac90904ed8e5cbb 100644
 --- a/server/src/services/issues.ts
 +++ b/server/src/services/issues.ts
 @@ -21,6 +21,7 @@ import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
@@ -5794,7 +5794,7 @@ index c25ee30f3..257ccab4b 100644
  import { parseTaskSearch, taskSearchCtes, taskSearchScore } from "./task-search.js";
  import { createdFromIssueCondition } from "./issue-creation-origin.js";
  import { executionProjectionsForRuns } from "./execution-projection.js";
-@@ -7570,6 +7571,7 @@ export function issueService(db: Db) {
+@@ -7575,6 +7576,7 @@ export function issueService(db: Db) {
      actorAgentId: string;
      actorRunId: string;
      expectedCheckoutRunId: string;
@@ -5802,7 +5802,7 @@ index c25ee30f3..257ccab4b 100644
    }) {
      return db.transaction(async (tx) => {
        const lockedIssue = await tx
-@@ -7590,7 +7592,7 @@ export function issueService(db: Db) {
+@@ -7595,7 +7597,7 @@ export function issueService(db: Db) {
        }
  
        if (
@@ -5811,7 +5811,7 @@ index c25ee30f3..257ccab4b 100644
          lockedIssue.assigneeAgentId !== input.actorAgentId ||
          lockedIssue.checkoutRunId !== input.expectedCheckoutRunId
        ) {
-@@ -7648,7 +7650,7 @@ export function issueService(db: Db) {
+@@ -7653,7 +7655,7 @@ export function issueService(db: Db) {
          .where(
            and(
              eq(issues.id, input.issueId),
@@ -5820,7 +5820,7 @@ index c25ee30f3..257ccab4b 100644
              eq(issues.assigneeAgentId, input.actorAgentId),
              eq(issues.checkoutRunId, input.expectedCheckoutRunId),
            ),
-@@ -10827,6 +10829,7 @@ export function issueService(db: Db) {
+@@ -10832,6 +10834,7 @@ export function issueService(db: Db) {
          /** Server-owned transfer being applied; never accepted from HTTP input. */
          caseHandoffId?: string;
          actorRunStopId?: string | null;
@@ -5828,7 +5828,7 @@ index c25ee30f3..257ccab4b 100644
          actorUserId?: string | null;
          companyGuard?: string;
          workspaceSelectionActor?: AuthorizationActor;
-@@ -10878,6 +10881,7 @@ export function issueService(db: Db) {
+@@ -10883,6 +10886,7 @@ export function issueService(db: Db) {
          actorRunId,
          caseHandoffId,
          actorRunStopId,
@@ -5836,7 +5836,7 @@ index c25ee30f3..257ccab4b 100644
          actorUserId,
          companyGuard,
          workspaceSelectionActor,
-@@ -10958,6 +10962,19 @@ export function issueService(db: Db) {
+@@ -10963,6 +10967,19 @@ export function issueService(db: Db) {
          ...issueData,
          updatedAt: new Date(),
        };
@@ -5856,7 +5856,7 @@ index c25ee30f3..257ccab4b 100644
        if (issueData.visibility === "private") {
          patch.privacyRootIssueId = existing.privacyRootIssueId ?? existing.id;
        } else if (issueData.visibility === "open") {
-@@ -11112,17 +11129,18 @@ export function issueService(db: Db) {
+@@ -11117,17 +11134,18 @@ export function issueService(db: Db) {
        if (issueData.status && issueData.status !== "cancelled") {
          patch.cancelledAt = null;
        }
@@ -5879,7 +5879,7 @@ index c25ee30f3..257ccab4b 100644
        ) {
          patch.checkoutRunId = null;
          patch.executionRunId = null;
-@@ -11217,6 +11235,20 @@ export function issueService(db: Db) {
+@@ -11222,6 +11240,20 @@ export function issueService(db: Db) {
              agentId: actorAgentId, runId: actorRunId, stopId: actorRunStopId,
            });
            assertLegacyRunTaskOwnership(actorRun, receiptExisting);
@@ -5900,7 +5900,7 @@ index c25ee30f3..257ccab4b 100644
          }
          if (actorAgentId && patch.status === "done") {
            const [review] = await tx.select({ id: toolActionRequests.id }).from(toolActionRequests).where(and(eq(toolActionRequests.companyId, existing.companyId), eq(toolActionRequests.issueId, id), inArray(toolActionRequests.status, ["pending", "approved", "executing"]))).limit(1);
-@@ -11830,8 +11862,8 @@ export function issueService(db: Db) {
+@@ -11835,8 +11867,8 @@ export function issueService(db: Db) {
            assigneeUserId: null,
            checkoutRunId,
            executionRunId: checkoutRunId,
@@ -5911,7 +5911,7 @@ index c25ee30f3..257ccab4b 100644
            updatedAt: now,
          })
          .where(
-@@ -11866,7 +11898,7 @@ export function issueService(db: Db) {
+@@ -11871,7 +11903,7 @@ export function issueService(db: Db) {
  
        if (
          current.assigneeAgentId === agentId &&
@@ -5920,7 +5920,7 @@ index c25ee30f3..257ccab4b 100644
          current.checkoutRunId == null &&
          (current.executionRunId == null ||
            current.executionRunId === checkoutRunId) &&
-@@ -11882,7 +11914,7 @@ export function issueService(db: Db) {
+@@ -11887,7 +11919,7 @@ export function issueService(db: Db) {
            .where(
              and(
                eq(issues.id, id),
@@ -5929,7 +5929,7 @@ index c25ee30f3..257ccab4b 100644
                eq(issues.assigneeAgentId, agentId),
                isNull(issues.checkoutRunId),
                or(
-@@ -11899,7 +11931,7 @@ export function issueService(db: Db) {
+@@ -11904,7 +11936,7 @@ export function issueService(db: Db) {
        if (
          checkoutRunId &&
          current.assigneeAgentId === agentId &&
@@ -5938,7 +5938,7 @@ index c25ee30f3..257ccab4b 100644
          current.checkoutRunId &&
          current.checkoutRunId !== checkoutRunId
        ) {
-@@ -11908,6 +11940,7 @@ export function issueService(db: Db) {
+@@ -11913,6 +11945,7 @@ export function issueService(db: Db) {
            actorAgentId: agentId,
            actorRunId: checkoutRunId,
            expectedCheckoutRunId: current.checkoutRunId,
@@ -5946,7 +5946,7 @@ index c25ee30f3..257ccab4b 100644
          });
          if (staleAdoption.adopted) {
            const row = await db
-@@ -11941,12 +11974,10 @@ export function issueService(db: Db) {
+@@ -11946,12 +11979,10 @@ export function issueService(db: Db) {
              executionRunId: checkoutRunId,
              executionAgentNameKey: null,
              executionLockedAt: now,
@@ -5961,7 +5961,7 @@ index c25ee30f3..257ccab4b 100644
            const adopted = await db
              .update(issues)
              .set(adoptionSet)
-@@ -11973,7 +12004,7 @@ export function issueService(db: Db) {
+@@ -11978,7 +12009,7 @@ export function issueService(db: Db) {
        // If this run already owns it and it's in_progress, return it (no self-409)
        if (
          current.assigneeAgentId === agentId &&
@@ -5970,7 +5970,7 @@ index c25ee30f3..257ccab4b 100644
          sameRunLock(current.checkoutRunId, checkoutRunId)
        ) {
          const row = await db
-@@ -12531,7 +12562,7 @@ export function issueService(db: Db) {
+@@ -12536,7 +12567,7 @@ export function issueService(db: Db) {
        },
        dbOrTx: any = db,
      ): Promise<IssueComment> {
@@ -5979,7 +5979,7 @@ index c25ee30f3..257ccab4b 100644
          const append = () =>
            measureRunTransaction(db, "response", async (tx) => {
              // Serialize run-authored comments on the issue so a provider retry
-@@ -12553,13 +12584,13 @@ export function issueService(db: Db) {
+@@ -12558,13 +12589,13 @@ export function issueService(db: Db) {
        // The query below locks human comments on caller-owned transactions too,
        // sharing the fence with both question creation and Slack settlement.
        const issueQuery = dbOrTx
@@ -5996,7 +5996,7 @@ index c25ee30f3..257ccab4b 100644
  
        if (!issue) throw notFound("Issue not found");
  
-@@ -12574,6 +12605,7 @@ export function issueService(db: Db) {
+@@ -12579,6 +12610,7 @@ export function issueService(db: Db) {
            .censorUsernameInLogs,
        };
        const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
@@ -6004,7 +6004,7 @@ index c25ee30f3..257ccab4b 100644
        if (actor.userId && options?.clientRequestId) {
          const [existing] = await dbOrTx.select().from(issueComments).where(and(eq(issueComments.issueId, issueId),
            eq(issueComments.authorUserId, actor.userId), eq(issueComments.clientRequestId, options.clientRequestId)));
-@@ -12734,7 +12766,7 @@ export function issueService(db: Db) {
+@@ -12739,7 +12771,7 @@ export function issueService(db: Db) {
                actor.agentId
                  ? eq(issueComments.authorAgentId, actor.agentId)
                  : isNull(issueComments.authorAgentId),
@@ -6013,7 +6013,7 @@ index c25ee30f3..257ccab4b 100644
                isNull(issueComments.deletedAt),
              ),
            )
-@@ -13088,7 +13120,7 @@ export function issueService(db: Db) {
+@@ -13093,7 +13125,7 @@ export function issueService(db: Db) {
                  payload: projectSafeChatPublication({
                    classification: "external",
                    source: "agent_comment",
@@ -6023,7 +6023,7 @@ index c25ee30f3..257ccab4b 100644
                  state: "pending",
                  createdAt: publicationCreatedAt,
 diff --git a/server/src/services/legacy-controller-lease.test.ts b/server/src/services/legacy-controller-lease.test.ts
-index da5483570..f1e36f839 100644
+index da54835709f6f1ad1c1d57a2ce864f9eab995179..f1e36f839afefc228a116068e7e3a84e9ffa32ed 100644
 --- a/server/src/services/legacy-controller-lease.test.ts
 +++ b/server/src/services/legacy-controller-lease.test.ts
 @@ -121,6 +121,19 @@ const support = await getEmbeddedPostgresTestSupport();
@@ -6047,7 +6047,7 @@ index da5483570..f1e36f839 100644
      const run = await seed();
      const hungDb = fakeRenewalDb(() => new Promise(() => {}));
 diff --git a/server/src/services/legacy-controller-lease.ts b/server/src/services/legacy-controller-lease.ts
-index 55a8439de..79daf1cf6 100644
+index 55a8439debc73703e047b8d521fcdedadae77fc4..79daf1cf6b504d8597d46b59c305a857fc6b5354 100644
 --- a/server/src/services/legacy-controller-lease.ts
 +++ b/server/src/services/legacy-controller-lease.ts
 @@ -1,5 +1,5 @@
@@ -6071,7 +6071,7 @@ index 55a8439de..79daf1cf6 100644
      gt(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`),
    )).returning({ id: heartbeatRuns.id });
 diff --git a/server/src/services/legacy-execution-recovery.ts b/server/src/services/legacy-execution-recovery.ts
-index f1b16bd0e..f8d477cad 100644
+index f1b16bd0e494e7859861d8fd638406e4bc0e8ea4..f8d477cad326704d9d8cc8f5c3451644320caf81 100644
 --- a/server/src/services/legacy-execution-recovery.ts
 +++ b/server/src/services/legacy-execution-recovery.ts
 @@ -105,6 +105,11 @@ export async function terminalizeLegacyExecution(input: {
@@ -6095,7 +6095,7 @@ index f1b16bd0e..f8d477cad 100644
          updatedAt: new Date(),
        })
 diff --git a/server/src/services/native-runtime/native-session-handoff.test.ts b/server/src/services/native-runtime/native-session-handoff.test.ts
-index c55b633b6..9545fc49f 100644
+index c55b633b6e9413a0ee7478d95cc65fdc5d71fb21..9545fc49ffd5193f5fce7aaf9b088a4d8df6b4ee 100644
 --- a/server/src/services/native-runtime/native-session-handoff.test.ts
 +++ b/server/src/services/native-runtime/native-session-handoff.test.ts
 @@ -1,4 +1,7 @@
@@ -6239,7 +6239,7 @@ index c55b633b6..9545fc49f 100644
      const runId = randomUUID();
      await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "succeeded", nativeIssueId: issueId,
 diff --git a/server/src/services/native-runtime/native-session-handoff.ts b/server/src/services/native-runtime/native-session-handoff.ts
-index 2cf178e76..cf7f21f3b 100644
+index 2cf178e760ff4434bafd2e5b39df50a075da5181..cf7f21f3bc189f4ba7253b780613d001478f5c7e 100644
 --- a/server/src/services/native-runtime/native-session-handoff.ts
 +++ b/server/src/services/native-runtime/native-session-handoff.ts
 @@ -4,6 +4,8 @@ import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
@@ -6362,7 +6362,7 @@ index 2cf178e76..cf7f21f3b 100644
    const prioritized = [...new Set([...priority, ...entries])];
 diff --git a/server/src/services/on-demand-tool-search.test.ts b/server/src/services/on-demand-tool-search.test.ts
 new file mode 100644
-index 000000000..e1a539854
+index 0000000000000000000000000000000000000000..e1a53985466a0da8a1937ba55d5e0ed39f1d6c7b
 --- /dev/null
 +++ b/server/src/services/on-demand-tool-search.test.ts
 @@ -0,0 +1,42 @@
@@ -6410,7 +6410,7 @@ index 000000000..e1a539854
 +});
 diff --git a/server/src/services/on-demand-tool-search.ts b/server/src/services/on-demand-tool-search.ts
 new file mode 100644
-index 000000000..1b5da5e76
+index 0000000000000000000000000000000000000000..1b5da5e76c57497cf7307b9ac0023f5d8be9254d
 --- /dev/null
 +++ b/server/src/services/on-demand-tool-search.ts
 @@ -0,0 +1,55 @@
@@ -6470,10 +6470,10 @@ index 000000000..1b5da5e76
 +    .map(({ tool }) => tool);
 +}
 diff --git a/server/src/services/recovery/service.ts b/server/src/services/recovery/service.ts
-index aa44265bb..b6e9a1966 100644
+index 42765bb3606bce9eb05b2dddb3af480a735bbb4b..b461dc1edd8aa853fc0464a01d6ee71f04cda7aa 100644
 --- a/server/src/services/recovery/service.ts
 +++ b/server/src/services/recovery/service.ts
-@@ -117,6 +117,7 @@ import {
+@@ -118,6 +118,7 @@ import {
    type IssuePostCommitAction,
  } from "../issues.js";
  import {
@@ -6481,7 +6481,7 @@ index aa44265bb..b6e9a1966 100644
    applyIssueMonitorPolicyTransition,
    normalizeIssueExecutionPolicy,
    parseIssueExecutionState,
-@@ -214,6 +215,7 @@ type RecoveryWakeupOptions = {
+@@ -215,6 +216,7 @@ type RecoveryWakeupOptions = {
    issueStateGuard?: {
      statuses: string[];
      assigneeAgentId: string;
@@ -6489,7 +6489,7 @@ index aa44265bb..b6e9a1966 100644
    };
  };
  
-@@ -1979,6 +1981,11 @@ export function recoveryService(
+@@ -1982,6 +1984,11 @@ export function recoveryService(
      source: string;
      retryOfRunId?: string | null;
      extraContext?: Record<string, unknown>;
@@ -6501,7 +6501,7 @@ index aa44265bb..b6e9a1966 100644
      /**
       * Out-parameter: set `retryExhausted` when no successor was queued
       * because the failed predecessor has spent its bounded transient retry
-@@ -2070,6 +2077,9 @@ export function recoveryService(
+@@ -2073,6 +2080,9 @@ export function recoveryService(
              },
            }
          : {}),
@@ -6511,7 +6511,7 @@ index aa44265bb..b6e9a1966 100644
        payload: withRecoveryContext(
          {
            issueId: input.issueId,
-@@ -5243,10 +5253,20 @@ export function recoveryService(
+@@ -5253,10 +5263,20 @@ export function recoveryService(
            source: "issue.execution_review_recovery",
            retryOfRunId: participantLatestRun.id,
            extraContext: {
@@ -6537,7 +6537,7 @@ index aa44265bb..b6e9a1966 100644
            outcome: reviewOutcome,
          });
 diff --git a/server/src/services/recovery/successful-run-handoff.test.ts b/server/src/services/recovery/successful-run-handoff.test.ts
-index 67baafc12..64d2cf1cb 100644
+index 67baafc12903963bdfd48f971627b77fec9e6d46..64d2cf1cb89c127e5b5d1e194319cd6dbd90f8d1 100644
 --- a/server/src/services/recovery/successful-run-handoff.test.ts
 +++ b/server/src/services/recovery/successful-run-handoff.test.ts
 @@ -109,8 +109,22 @@ describe("successful run handoff decision", () => {
@@ -6566,7 +6566,7 @@ index 67baafc12..64d2cf1cb 100644
  
    it("does not launch generic recovery when native semantic finalization owns disposition", () => {
 diff --git a/server/src/services/recovery/successful-run-handoff.ts b/server/src/services/recovery/successful-run-handoff.ts
-index cf33b61cf..95564149a 100644
+index cf33b61cf51641ffb24307e46415550da2c76a8c..95564149abbd3b17f5d255665f6f5bdf64c2e462 100644
 --- a/server/src/services/recovery/successful-run-handoff.ts
 +++ b/server/src/services/recovery/successful-run-handoff.ts
 @@ -448,12 +448,15 @@ export function buildSuccessfulRunHandoffInstruction(input: {
@@ -6589,7 +6589,7 @@ index cf33b61cf..95564149a 100644
    ].join("\n");
 diff --git a/server/src/services/tool-gateway-mcp-result.test.ts b/server/src/services/tool-gateway-mcp-result.test.ts
 new file mode 100644
-index 000000000..7863911a6
+index 0000000000000000000000000000000000000000..7863911a6eb78af50b4faba24b00a0229f2e0b5f
 --- /dev/null
 +++ b/server/src/services/tool-gateway-mcp-result.test.ts
 @@ -0,0 +1,78 @@
@@ -6673,7 +6673,7 @@ index 000000000..7863911a6
 +});
 diff --git a/server/src/services/tool-gateway-mcp-result.ts b/server/src/services/tool-gateway-mcp-result.ts
 new file mode 100644
-index 000000000..34d4066f6
+index 0000000000000000000000000000000000000000..34d4066f6c253b8236793bab5497796b8bb2ba7f
 --- /dev/null
 +++ b/server/src/services/tool-gateway-mcp-result.ts
 @@ -0,0 +1,36 @@
@@ -6714,10 +6714,10 @@ index 000000000..34d4066f6
 +  };
 +}
 diff --git a/server/src/services/tool-gateway.ts b/server/src/services/tool-gateway.ts
-index 169e4a4a6..b3f2fa5c1 100644
+index 45cc45ad8d63b92ef1d05a9865fc9eabacdcff4f..f4c7dd3b442cebadeeb109753806cf319215eab0 100644
 --- a/server/src/services/tool-gateway.ts
 +++ b/server/src/services/tool-gateway.ts
-@@ -28,6 +28,7 @@ import { captureRunIdentity } from "./run-identity.js";
+@@ -29,6 +29,7 @@ import { captureRunIdentity } from "./run-identity.js";
  import { emitConnectionInvoked } from "./connector-telemetry.js";
  import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
  import { extractRemoteMcpPending } from "./remote-mcp-pending.js";
@@ -6725,7 +6725,7 @@ index 169e4a4a6..b3f2fa5c1 100644
  import { logger } from "../middleware/logger.js";
  import { getAppDefinitionForApplicationKey, isConnectorFeatureEnabled } from "@paperclipai/shared";
  import { instanceSettingsService } from "./instance-settings.js";
-@@ -3043,20 +3044,11 @@ export function createToolGatewayService(
+@@ -3057,20 +3058,11 @@ export function createToolGatewayService(
      const query =
        typeof params.query === "string" ? params.query.trim().toLowerCase() : "";
      const limit = Math.max(1, Math.min(50, Number(params.limit ?? 10) || 10));
@@ -6751,7 +6751,7 @@ index 169e4a4a6..b3f2fa5c1 100644
        .map((tool) => ({
          name: tool.name,
          displayName: tool.displayName ?? tool.name,
-@@ -6469,6 +6461,23 @@ export function createToolGatewayService(
+@@ -6510,6 +6502,23 @@ export function createToolGatewayService(
        );
        return { result, headerSummary, execution };
      } catch (error) {
@@ -6776,7 +6776,7 @@ index 169e4a4a6..b3f2fa5c1 100644
          const failure = error.reason === "too_large" ? responseTooLargeError()
            : error.reason === "malformed_response" ? malformedRemoteMcpResponse()
 diff --git a/ui/src/components/IssueRecoveryActionCard.test.tsx b/ui/src/components/IssueRecoveryActionCard.test.tsx
-index cd5132269..e8fcd5cca 100644
+index cd513226984bc5d0b757c14d4a3734d374d42fab..e8fcd5cca735ff3f062af5b0b769b190a59a2e00 100644
 --- a/ui/src/components/IssueRecoveryActionCard.test.tsx
 +++ b/ui/src/components/IssueRecoveryActionCard.test.tsx
 @@ -326,6 +326,28 @@ describe("IssueRecoveryActionCard", () => {
@@ -6809,7 +6809,7 @@ index cd5132269..e8fcd5cca 100644
      const node = render(
        <IssueRecoveryActionCard
 diff --git a/ui/src/components/IssueRecoveryActionCard.tsx b/ui/src/components/IssueRecoveryActionCard.tsx
-index e61adbbb9..00691f0ff 100644
+index e61adbbb96627176fbbc0339da1aae4e3f4d5e4b..00691f0ff83feaf7a91ec9758838cf780b08529f 100644
 --- a/ui/src/components/IssueRecoveryActionCard.tsx
 +++ b/ui/src/components/IssueRecoveryActionCard.tsx
 @@ -1013,6 +1013,9 @@ export function IssueRecoveryActionCard({
@@ -6832,7 +6832,7 @@ index e61adbbb9..00691f0ff 100644
    // A lane with no path left must not keep advertising a retry that will never run — whether
    // the budget ran out or the scheduled attempt simply never fired.
 diff --git a/ui/src/components/TaskChatThread.test.tsx b/ui/src/components/TaskChatThread.test.tsx
-index c84e2edc5..e4f0a4a1a 100644
+index 4f7b6c85308e11ddab544830e8f1292e76af2bb7..6b6c178ba7b953a99efd84af1d916fbc3d1e1cf0 100644
 --- a/ui/src/components/TaskChatThread.test.tsx
 +++ b/ui/src/components/TaskChatThread.test.tsx
 @@ -11,6 +11,7 @@ import { TaskChatThread } from "./TaskChatThread";
@@ -6927,10 +6927,10 @@ index c84e2edc5..e4f0a4a1a 100644
    flushSync(() => root?.unmount());
    queryClient.clear();
 diff --git a/ui/src/components/TaskChatThread.tsx b/ui/src/components/TaskChatThread.tsx
-index e33b7194e..a6866e810 100644
+index 8d77a9b03eea0d2200a021f89141aacb02ba3b32..5d2f0e47c6c651cadc3033fa0b9f8b59bc8ec7d1 100644
 --- a/ui/src/components/TaskChatThread.tsx
 +++ b/ui/src/components/TaskChatThread.tsx
-@@ -135,6 +135,7 @@ import { issuesApi } from "@/api/issues";
+@@ -136,6 +136,7 @@ import { issuesApi } from "@/api/issues";
  import { queryKeys } from "@/lib/queryKeys";
  import { useQueryClient } from "@tanstack/react-query";
  import { TaskChatPresentationProvider } from "@/components/task-chat/presentation-mode";
@@ -6938,7 +6938,7 @@ index e33b7194e..a6866e810 100644
  
  const EMPTY_BROWSERS: TaskBrowser[] = [];
  
-@@ -800,7 +801,8 @@ export function TaskChatThread(props: TaskChatThreadProps) {
+@@ -802,7 +803,8 @@ export function TaskChatThread(props: TaskChatThreadProps) {
    );
  
    const threadHeaderWithBlockers =
@@ -6948,7 +6948,7 @@ index e33b7194e..a6866e810 100644
        <>
          {threadHeader}
          {liveWorkLinks ? (
-@@ -812,6 +814,23 @@ export function TaskChatThread(props: TaskChatThreadProps) {
+@@ -814,6 +816,23 @@ export function TaskChatThread(props: TaskChatThreadProps) {
              placement="top"
            />
          ) : null}
