@@ -1,8 +1,12 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
+import type { AdapterRuntimeMcpServer } from "@paperclipai/adapter-utils";
 import { isOpenRouterUrl, openRouterAttributionHeaders } from "@paperclipai/adapter-utils/openrouter-attribution";
 import { asBoolean } from "@paperclipai/adapter-utils/server-utils";
+
+const MAX_RUNTIME_MCP_SERVER_NAME_LENGTH = 22;
 
 type PreparedOpenCodeRuntimeConfig = {
   env: Record<string, string>;
@@ -104,6 +108,63 @@ async function readJsonObject(filepath: string): Promise<Record<string, unknown>
   }
 }
 
+function buildRuntimeMcpConfig(
+  existing: Record<string, unknown>,
+  servers: readonly AdapterRuntimeMcpServer[],
+): Record<string, unknown> {
+  const mcp: Record<string, unknown> = { ...existing };
+  const usedNames = new Set(Object.keys(mcp));
+
+  for (const server of servers) {
+    const safeServerName = server.name.replace(/[^a-zA-Z0-9_-]/g, "_") || "connection";
+    let suffix = 1;
+    let name: string;
+    do {
+      const collisionSuffix = suffix === 1 ? "" : `_${suffix}`;
+      const nameBudget = MAX_RUNTIME_MCP_SERVER_NAME_LENGTH - collisionSuffix.length;
+      if (safeServerName.length <= nameBudget) {
+        name = `${safeServerName}${collisionSuffix}`;
+      } else {
+        const hash = createHash("sha256").update(safeServerName).digest("hex").slice(0, 8);
+        const prefixLength = nameBudget - hash.length - 1;
+        name = `${safeServerName.slice(0, prefixLength)}_${hash}${collisionSuffix}`;
+      }
+      suffix += 1;
+    } while (usedNames.has(name));
+    usedNames.add(name);
+    mcp[name] = {
+      type: "remote",
+      url: server.url,
+      headers: { Authorization: `Bearer ${server.token}` },
+      enabled: true,
+      oauth: false,
+      timeout: 30_000,
+    };
+  }
+
+  return mcp;
+}
+
+async function replaceRuntimeConfigSymlink(filepath: string): Promise<void> {
+  let stat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    stat = await fs.lstat(filepath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return;
+    throw err;
+  }
+  if (!stat.isSymbolicLink()) return;
+
+  let contents: Buffer | null = null;
+  try {
+    contents = await fs.readFile(filepath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw err;
+  }
+  await fs.unlink(filepath);
+  if (contents) await fs.writeFile(filepath, contents, { mode: 0o600 });
+}
+
 /** Carry effective explicit settings into the inline layer before catalog discovery. */
 function preserveExplicitModelModalities(
   env: Record<string, string>, providers: unknown, model: unknown,
@@ -131,14 +192,14 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   env: Record<string, string>;
   config: Record<string, unknown>;
   targetIsRemote?: boolean;
+  runtimeMcpServers?: readonly AdapterRuntimeMcpServer[];
 }): Promise<PreparedOpenCodeRuntimeConfig> {
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
+  const runtimeMcpServers = input.runtimeMcpServers ?? [];
   const targetIsRemote = input.targetIsRemote === true;
-  const notes = [
-    skipPermissions
-      ? "Injected runtime OpenCode config with permission=allow for all tools and connections."
-      : "Prepared isolated OpenCode provider configuration.",
-  ];
+  const notes = skipPermissions
+    ? ["Injected runtime OpenCode config with permission=allow for all tools and connections."]
+    : [];
   const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
   const gatewayProviders = parseProviderConfig(
     input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS,
@@ -146,7 +207,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     notes,
   );
   const smallModel = (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim();
-  if (targetIsRemote && !skipPermissions && !gatewayProviders && !smallModel) {
+  if (targetIsRemote && !skipPermissions && !gatewayProviders && !smallModel && runtimeMcpServers.length === 0) {
     return {
       env: preserveExplicitModelModalities(input.env, undefined, input.config.model),
       notes,
@@ -155,6 +216,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     };
   }
 
+  if (!skipPermissions) notes.push("Prepared isolated OpenCode provider configuration.");
   const sourceConfigDir = targetIsRemote
     ? null
     : path.join(resolveXdgConfigHome(input.env), "opencode");
@@ -162,7 +224,15 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
   const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
 
-  await fs.mkdir(runtimeConfigDir, { recursive: true });
+  let cleanupDone = false;
+  const cleanup = async () => {
+    if (cleanupDone) return;
+    cleanupDone = true;
+    await fs.rm(runtimeConfigHome, { recursive: true, force: true });
+  };
+
+  try {
+  await fs.mkdir(runtimeConfigDir, { recursive: true, mode: 0o700 });
   if (sourceConfigDir) {
     try {
       await fs.cp(sourceConfigDir, runtimeConfigDir, {
@@ -173,11 +243,13 @@ export async function prepareOpenCodeRuntimeConfig(input: {
       });
     } catch (err) {
       if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
+        await cleanup();
         throw err;
       }
     }
   }
 
+  await replaceRuntimeConfigSymlink(runtimeConfigPath);
   const existingConfig = await readJsonObject(runtimeConfigPath);
   const existingProvider = isPlainObject(existingConfig.provider) ? existingConfig.provider : {};
   let nextProvider = gatewayProviders
@@ -238,6 +310,12 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     nextConfig.provider = nextProvider;
   }
 
+  if (runtimeMcpServers.length > 0) {
+    const existingMcp = isPlainObject(existingConfig.mcp) ? existingConfig.mcp : {};
+    nextConfig.mcp = buildRuntimeMcpConfig(existingMcp, runtimeMcpServers);
+    notes.push(`Injected ${runtimeMcpServers.length} run-scoped Paperclip MCP server(s) into OpenCode.`);
+  }
+
   // Pin OpenCode's auxiliary "small" model (used for session-title generation and
   // other helper tasks) via PAPERCLIP_OPENCODE_SMALL_MODEL. OpenCode otherwise
   // defaults the small model to a built-in provider default (e.g. a claude-* model
@@ -248,7 +326,8 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     nextConfig.small_model = smallModel;
     notes.push(`Pinned OpenCode small_model to ${smallModel}.`);
   }
-  await fs.writeFile(runtimeConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, "utf8");
+  await fs.writeFile(runtimeConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await fs.chmod(runtimeConfigPath, 0o600);
 
   const runtimeEnv = preserveExplicitModelModalities(input.env, nextProvider, input.config.model);
   return {
@@ -265,10 +344,12 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     },
     notes,
     runtimeConfigHome,
-    cleanup: async () => {
-      await fs.rm(runtimeConfigHome, { recursive: true, force: true });
-    },
+    cleanup,
   };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
 }
 
 /** Managed credentials must never leave host-only homes in a remote process. */
