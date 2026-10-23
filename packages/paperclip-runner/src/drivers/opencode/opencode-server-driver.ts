@@ -85,6 +85,7 @@ import {
   type OpenCodeMcpBridge,
 } from "./mcp-bridge.js";
 import { nativeMcpLaunchBinding } from "../native-mcp.js";
+import { discoverModelImageInput } from "./model-input.js";
 import { materializeNativeRuntimeSkills } from "../runtime-context-materializer.js";
 
 export const OPENCODE_SERVER_DRIVER_KIND = "opencode_server" as const;
@@ -2247,6 +2248,7 @@ async function startOpenCodeProviderProxy(baseUrl: string, key: string, model: s
   return {
     baseURL: `http://127.0.0.1:${address.port}/v1`,
     token,
+    imageInput: await discoverModelImageInput(new URL(`${baseUrl.replace(/\/+$/, "")}/models`), key, model, agent),
     close: async () => {
       for (const controller of controllers) controller.abort();
       agent.destroy();
@@ -2355,6 +2357,7 @@ async function startRuntime(input: {
     }
   };
   try {
+    const imageInput = providerProxy?.imageInput;
     const config = {
       $schema: "https://opencode.ai/config.json",
       model: input.options.model,
@@ -2382,6 +2385,9 @@ async function startRuntime(input: {
           models: {
             [providerModelId]: {
               name: providerModelId,
+              ...(imageInput === undefined ? {} : {
+                modalities: { input: imageInput ? ["text", "image"] : ["text"], output: ["text"] },
+              }),
               ...(modelProvider === "openrouter"
                 ? { variants: {
                     "paperclip-default": {},
