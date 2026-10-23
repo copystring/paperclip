@@ -464,6 +464,7 @@ class CandidateTests(unittest.TestCase):
             "candidateFileCount": len(new_inventory),
             "baselinePackage": {"version": "2026.1017.0-canary.6",
                                 "integrity": integrity},
+            "candidatePackage": {"version": item["version"], "integrity": integrity},
             "upgradeProof": proof_value if proof else {"passed": False, **context},
         }
         d = deployer(root, **config)
@@ -507,6 +508,15 @@ class CandidateTests(unittest.TestCase):
                 }
                 with self.assertRaises(deploy.DeployError):
                     d._migration_diff(old, candidate, item)
+
+    def test_transition_rejects_another_tested_candidate_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d, old, candidate, item, _, _ = self._migration_transition_fixture(Path(tmp))
+            context = d._verified_workflow_contexts[d._manifest_identity(item)]
+            item["migrationCompatibilityReceipt"]["candidatePackage"]["integrity"] = "sha512-" + "B" * 86 + "=="
+            d._verified_workflow_contexts[d._manifest_identity(item)] = context
+            with self.assertRaisesRegex(deploy.DeployError, "differs from the tested"):
+                d._migration_diff(old, candidate, item)
 
     def test_migration_probe_requires_hash_bound_runtime_and_readonly_proofs(self):
         for alteration in (None, "binding", "live", "old-boot", "candidate-boot"):

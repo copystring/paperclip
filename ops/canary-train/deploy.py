@@ -829,8 +829,9 @@ class Deployer:
                 not set(required_assertions).issubset(assertions)):
             raise DeployError("Migration upgrade proof is missing required compatibility assertions")
         candidate_package = self._database_package_identity(candidate)
-        if candidate_package["version"] != manifest.get("version"):
-            raise DeployError("Candidate database package version differs from the accepted release")
+        if (candidate_package["version"] != manifest.get("version") or
+                receipt.get("candidatePackage") != candidate_package):
+            raise DeployError("Candidate database package differs from the tested accepted release")
         return {"status": "needsRuntimeCompatibility", "manifestSha256": self._manifest_identity(manifest),
                 "baselineInventorySha256": baseline_hash, "candidateInventorySha256": candidate_hash,
                 "baselinePackage": expected_package, "candidatePackage": candidate_package,
