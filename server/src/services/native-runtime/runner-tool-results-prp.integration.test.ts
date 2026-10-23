@@ -117,6 +117,7 @@ for await (const line of createInterface({input:process.stdin})) {
       return response;
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let testFailure: unknown;
     let verified = false;
     const notifications: Array<{ method: string; type: unknown; status?: string }> = [];
     try {
@@ -143,6 +144,17 @@ for await (const line of createInterface({input:process.stdin})) {
       expect(executeTool.mock.calls.map(([call]) => call.parameters)).toEqual([{ variant: "large" }, { variant: "inline" }]);
       expect(sizes.every(size => size.wrapper <= RUNNER_TOOL_RESULT_MAX_BYTES)).toBe(true);
       expect(bundle.evidence().diagnostics).toContain("runnerd authenticated to the durable PRP control plane");
-    } finally { clearTimeout(timer); await bundle.transport.close(); }
+    } catch (error) {
+      testFailure = new Error(`PRP saved-result test failed: ${error instanceof Error ? error.message : String(error)}; bounded evidence: ${JSON.stringify(failureEvidence())}`, { cause: error });
+    } finally {
+      clearTimeout(timer);
+      try {
+        await bundle.transport.close();
+      } catch (cleanupError) {
+        if (testFailure !== undefined) throw new AggregateError([testFailure, cleanupError], "PRP test and transport cleanup both failed");
+        throw new Error(`PRP transport cleanup failed; bounded evidence: ${JSON.stringify(failureEvidence())}`, { cause: cleanupError });
+      }
+    }
+    if (testFailure !== undefined) throw testFailure;
   }, 30_000);
 });
