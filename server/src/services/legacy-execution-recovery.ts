@@ -211,10 +211,26 @@ export async function terminalizeLegacyExecution(input: {
     }
     const lockedExecutionRecovery = current.resultJson?.executionRecovery as Record<string, unknown> | undefined;
     const patchedExecutionRecovery = patch?.resultJson?.executionRecovery as Record<string, unknown> | undefined;
-    if (patch?.resultJson !== undefined && lockedExecutionRecovery?.providerWorkStarted === true &&
-        patchedExecutionRecovery?.providerWorkStarted !== true) {
+    const lockedExecutionCancellation = current.resultJson?.executionCancellation as Record<string, unknown> | undefined;
+    const hasLockedSettledInterruptedWork = lockedExecutionRecovery?.kind === "interrupted" &&
+      lockedExecutionRecovery.providerStopped === true && lockedExecutionRecovery.sessionPreserved === true &&
+      lockedExecutionRecovery.actionOutcomes === "settled" && lockedExecutionCancellation?.state === "acknowledged";
+    if (patch?.resultJson !== undefined && hasLockedSettledInterruptedWork) {
+      const hasPatchedSettlement = patchedExecutionRecovery?.kind === "interrupted" &&
+        patchedExecutionRecovery.providerStopped === true && patchedExecutionRecovery.sessionPreserved === true &&
+        patchedExecutionRecovery.actionOutcomes === "settled";
+      const executionRecovery = hasPatchedSettlement
+        ? { ...lockedExecutionRecovery, ...patchedExecutionRecovery, kind: "interrupted", providerStopped: true,
+          sessionPreserved: true, actionOutcomes: "settled" }
+        : lockedExecutionRecovery;
       patch = { ...patch, resultJson: { ...(patch.resultJson ?? current.resultJson ?? {}),
-        executionRecovery: { ...lockedExecutionRecovery, ...(patchedExecutionRecovery ?? {}), providerWorkStarted: true } } };
+        executionRecovery, executionCancellation: lockedExecutionCancellation } };
+    }
+    const effectivePatchedExecutionRecovery = patch?.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+    if (patch?.resultJson !== undefined && lockedExecutionRecovery?.providerWorkStarted === true &&
+        effectivePatchedExecutionRecovery?.providerWorkStarted !== true) {
+      patch = { ...patch, resultJson: { ...(patch.resultJson ?? current.resultJson ?? {}),
+        executionRecovery: { ...lockedExecutionRecovery, ...(effectivePatchedExecutionRecovery ?? {}), providerWorkStarted: true } } };
     }
     if (patch?.resultJson !== undefined) patch = { ...patch,
       resultJson: preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,

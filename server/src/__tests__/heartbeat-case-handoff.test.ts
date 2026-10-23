@@ -374,13 +374,20 @@ describe("durable case handoff queue admission", () => {
   it.each(["dispatch_claimed", "runtime_identity", "active_lease", "foreign_handoff", "operator_stop",
     "wrong_cancellation_initiator", "malformed_cancellation", "stale_patch_erases_provider_evidence",
     "current_operator_cancellation", "current_wrong_startup_cancellation", "dispatch_claimed_stale_bootstrap",
-    "current_operator_cancellation_stale_bootstrap", "later_interrupted_settlement"] as const)(
+    "current_operator_cancellation_stale_bootstrap", "later_interrupted_settlement",
+    "locked_interrupted_without_work_flag_patch_missing", "locked_interrupted_without_work_flag_stale_bootstrap",
+    "locked_interrupted_later_settlement", "locked_interrupted_with_provider_flag_stale_bootstrap"] as const)(
     "does not record queued case-handoff bootstrap evidence after %s", async scenario => {
       const f = await fixture(), sourceRunId = randomUUID(), startedAt = new Date();
       const [source] = await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId: f.companyId, agentId: f.agentId,
         status: "queued", runtimeMode: "legacy", contextSnapshot: { issueId: f.issueId }, responsibleUserId: f.userId,
         resultJson: ["stale_patch_erases_provider_evidence", "later_interrupted_settlement"].includes(scenario)
           ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: true } }
+          : scenario.startsWith("locked_interrupted_")
+            ? { executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled",
+              ...(["locked_interrupted_with_provider_flag_stale_bootstrap", "locked_interrupted_later_settlement"].includes(scenario)
+                ? { providerWorkStarted: true } : {}) },
+              executionCancellation: { state: "acknowledged" } }
           : ["current_operator_cancellation", "current_operator_cancellation_stale_bootstrap"].includes(scenario)
             ? { cancellation: { source: "operator", expected: true, initiator: { type: "user" }, reason: "operator stop",
                 recordedAt: startedAt.toISOString() } }
@@ -403,8 +410,12 @@ describe("durable case handoff queue admission", () => {
           initiator: { type: scenario === "wrong_cancellation_initiator" ? "user" : "system" },
           reason: "fixture stop", recordedAt: scenario === "malformed_cancellation" ? "invalid" : startedAt.toISOString() },
         ...(["stale_patch_erases_provider_evidence", "dispatch_claimed_stale_bootstrap",
-          "current_operator_cancellation_stale_bootstrap"].includes(scenario)
+          "current_operator_cancellation_stale_bootstrap", "locked_interrupted_without_work_flag_stale_bootstrap",
+          "locked_interrupted_with_provider_flag_stale_bootstrap"].includes(scenario)
           ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } }
+          : scenario === "locked_interrupted_later_settlement"
+            ? { executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true,
+              actionOutcomes: "settled", settledAt: startedAt.toISOString(), providerWorkStarted: false } }
           : scenario === "later_interrupted_settlement"
             ? { executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" } }
             : {}),
@@ -422,8 +433,18 @@ describe("durable case handoff queue admission", () => {
         if (scenario === "later_interrupted_settlement") expect(terminal?.resultJson).toMatchObject({
           executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" },
         });
+      } else if (scenario.startsWith("locked_interrupted_")) {
+        expect(terminal?.resultJson).toMatchObject({
+          executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" },
+          executionCancellation: { state: "acknowledged" },
+        });
+        if (scenario === "locked_interrupted_with_provider_flag_stale_bootstrap")
+          expect(terminal?.resultJson?.executionRecovery).toMatchObject({ providerWorkStarted: true });
+        if (scenario === "locked_interrupted_later_settlement")
+          expect(terminal?.resultJson?.executionRecovery).toMatchObject({ settledAt: startedAt.toISOString(), providerWorkStarted: true });
       } else expect(terminal?.resultJson).not.toHaveProperty("executionRecovery");
-      expect(await isCaseHandoffSourceReleased(db, { runId: sourceRunId, issueId: f.issueId })).toBe(false);
+      if (!scenario.startsWith("locked_interrupted_"))
+        expect(await isCaseHandoffSourceReleased(db, { runId: sourceRunId, issueId: f.issueId })).toBe(false);
     });
   it("does not launch an old same-agent receipt after a later phase without an assignment version change", async () => {
     const f = await fixture(), heartbeat = heartbeatService(db);

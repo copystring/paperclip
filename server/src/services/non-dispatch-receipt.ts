@@ -49,6 +49,8 @@ function runFingerprint(run: Run) {
 /** A receipt can only be created from a legacy run that has never been claimed. */
 export function isUnclaimedRun(run: Run): boolean {
   const cancellation = run.resultJson?.cancellation as Record<string, unknown> | undefined;
+  const recovery = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+  const hasInterruptedExecution = recovery?.kind === "interrupted";
   const initiator = cancellation?.initiator as Record<string, unknown> | undefined;
   const receipt = run.resultJson?.nonDispatchReceipt as Record<string, unknown> | undefined;
   const acceptedControlPlaneCancellation = cancellation?.source === "control_plane" &&
@@ -65,7 +67,7 @@ export function isUnclaimedRun(run: Run): boolean {
     receipt.providerWorkStarted === false &&
     ["dependency_gate", "scheduled_retry_gate", "stale_queued_run_gate"].includes(String(receipt.gate));
 
-  return run.runtimeMode === "legacy" &&
+  return !hasInterruptedExecution && run.runtimeMode === "legacy" &&
     typeof run.contextSnapshot?.issueId === "string" &&
     (!run.issueId || run.issueId === run.contextSnapshot.issueId) &&
     [

@@ -379,6 +379,26 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(nonDispatchReceipts.isUnclaimedRun(withUnknownStop)).toBe(false);
     expect(nonDispatchReceipts.makeNonDispatchReceipt(withUnknownStop, "issue_dependencies_blocked", "dependency_gate", task.statusVersion)).toBeNull();
 
+    const interruptedWork = { ...withUnknownStop, errorCode: "issue_reassigned", resultJson: {
+      ...withUnknownStop.resultJson,
+      cancellation: { source: "control_plane", expected: true, initiator: { type: "system" },
+        reason: "case handoff", recordedAt: new Date().toISOString() },
+      executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" },
+      executionCancellation: { state: "acknowledged" },
+      nonDispatchReceipt: { version: 1, runId, companyId, issueId: task.id, agentId,
+        reason: "issue_reassigned", providerWorkStarted: false, gate: "stale_queued_run_gate" },
+    } };
+    expect(nonDispatchReceipts.isUnclaimedRun(interruptedWork)).toBe(false);
+    expect(nonDispatchReceipts.makeNonDispatchReceipt(interruptedWork, "issue_reassigned", "stale_queued_run_gate", task.statusVersion)).toBeNull();
+    const interruptedWithoutAck = { ...interruptedWork,
+      resultJson: { ...interruptedWork.resultJson, executionCancellation: undefined } };
+    expect(nonDispatchReceipts.isUnclaimedRun(interruptedWithoutAck)).toBe(false);
+    expect(nonDispatchReceipts.makeNonDispatchReceipt(interruptedWithoutAck, "issue_reassigned", "stale_queued_run_gate", task.statusVersion)).toBeNull();
+    const unclaimedControl = { ...interruptedWork,
+      resultJson: { ...interruptedWork.resultJson, executionRecovery: undefined } };
+    expect(nonDispatchReceipts.isUnclaimedRun(unclaimedControl)).toBe(true);
+    expect(nonDispatchReceipts.makeNonDispatchReceipt(unclaimedControl, "issue_reassigned", "stale_queued_run_gate", task.statusVersion)).not.toBeNull();
+
     await db.update(heartbeatRuns).set({
       status: "cancelled",
       finishedAt: new Date(),
