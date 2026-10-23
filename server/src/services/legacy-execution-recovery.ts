@@ -1,5 +1,5 @@
 import { notifyExecutionRunWork } from "./execution-control-notifications.js";
-import { hasNonDispatchContradiction, isNonDispatchVerified, matchesNonDispatchSource } from "./non-dispatch-receipt.js";
+import { hasNonDispatchContradiction, isNonDispatchVerified, isUnclaimedRun, matchesNonDispatchSource } from "./non-dispatch-receipt.js";
 import { hasRequiredWorkspaceRecovery, preserveWorkspaceRestoreRecoveryMetadata, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "./workspace-restore-recovery-state.js";
 import { hasUnrestoredRemoteWorkspace, preserveLegacyWorkspaceRestoreSources, type LegacyWorkspaceRestoreSource } from "./legacy-workspace-restore-recovery.js";
 import { isPreDispatchReviewWaitVerified } from "./pre-dispatch-review-wait.js";
@@ -10,7 +10,7 @@ import { claimedAdapterType, hasConversationContinuationPolicy } from "./convers
 import { canonicalExecutionUuid } from "./execution-identity.js";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
-import { environmentLeases, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
+import { caseHandoffs, environmentLeases, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
 import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
@@ -107,6 +107,48 @@ export async function terminalizeLegacyExecution(input: {
     )).for("update");
     if (!current || (current.runtimeMode !== "legacy" && !(input.recordRestoreFailureOnly && current.runtimeMode === "native")) ||
         (!input.recordRestoreFailureOnly && !(input.fromStatuses ?? [run.status]).includes(current.status))) return null;
+    // A Stop may race queue dispatch. The pre-lock snapshot alone cannot prove
+    // that a queued run never acquired execution. Grant bootstrap evidence only
+    // when this transaction still owns the queued row and the exact pending
+    // case handoff that requested the cancellation, with no runtime or lease
+    // ownership having been acquired.
+    if (!input.recordRestoreFailureOnly && status === "cancelled" && run.status === "queued" &&
+        current.status === "queued" && current.runtimeMode === "legacy" && input.patch?.errorCode === "issue_reassigned") {
+      const result = { ...current.resultJson, ...patch?.resultJson };
+      const cancellation = result.cancellation as Record<string, unknown> | undefined;
+      const startupCancellation = result.startupCancellation as Record<string, unknown> | undefined;
+      const [handoff] = await tx.select({ id: caseHandoffs.id }).from(caseHandoffs).where(and(
+        eq(caseHandoffs.companyId, current.companyId),
+        eq(caseHandoffs.sourceRunId, current.id),
+        eq(caseHandoffs.issueId, issueId ?? ""),
+        eq(caseHandoffs.destinationKind, "agent"),
+        eq(caseHandoffs.state, "awaiting_release"),
+      )).limit(1);
+      const [activeLease] = await tx.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
+        eq(environmentLeases.companyId, current.companyId), eq(environmentLeases.heartbeatRunId, current.id),
+        or(isNull(environmentLeases.releasedAt), eq(environmentLeases.status, "pending_cleanup"),
+          eq(environmentLeases.cleanupStatus, "failed")),
+      )).limit(1);
+      const hasNoExecutionIdentity = [current.startedAt, current.runtimeModeResolvedAt, current.processStartedAt,
+        current.processPid, current.processGroupId, current.nativeIssueId, current.nativeSessionId,
+        current.sessionIdAfter, current.controllerBootId, current.controllerLeaseExpiresAt,
+        current.executionStage, current.runnerInstanceId, current.logRef].every(value => value === null);
+      const unclaimedWithoutStartupFence = isUnclaimedRun({
+        ...current,
+        resultJson: current.resultJson ? { ...current.resultJson, startupCancellation: undefined } : null,
+      });
+      if (issueId && handoff && handoff.id === result.caseHandoffId &&
+          !activeLease && hasNoExecutionIdentity &&
+          unclaimedWithoutStartupFence &&
+          result.caseHandoffYieldStop === true && result.reassignmentStopRequested === true &&
+          result.reassignmentStopConfirmed === true && startupCancellation?.errorCode === "issue_reassigned" &&
+          cancellation?.source === "control_plane" && cancellation.expected === true &&
+          !hasWorkspaceRestoreFailure(result) && !hasRequiredWorkspaceRecovery(result)) {
+        patch = { ...patch, resultJson: { ...result,
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+        } };
+      }
+    }
     const controllerStillOwnsSettlement = Boolean(
       !input.recordRestoreFailureOnly && current.controllerBootId &&
       current.controllerLeaseExpiresAt && current.controllerLeaseExpiresAt > new Date() &&

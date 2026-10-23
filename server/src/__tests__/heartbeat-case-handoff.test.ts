@@ -342,8 +342,11 @@ describe("durable case handoff queue admission", () => {
       nextAttemptAt: new Date(Date.now() + 60_000) }).where(eq(caseHandoffs.id, f.handoffId));
     await heartbeatService(db).requestCaseHandoffYield({ runId: sourceRunId, issueId: f.issueId, handoffId: f.handoffId });
     const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId));
-    expect(source).toMatchObject({ status: "cancelled", startedAt: null, runtimeModeResolvedAt: null,
-      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } });
+    expect(source).toMatchObject({ status: "cancelled", runtimeMode: "legacy", startedAt: null, runtimeModeResolvedAt: null,
+      processStartedAt: null, processPid: null, processGroupId: null, executionStage: null,
+      resultJson: { caseHandoffYieldStop: true, reassignmentStopRequested: true, reassignmentStopConfirmed: true,
+        startupCancellation: { errorCode: "issue_reassigned" }, cancellation: { source: "control_plane", expected: true },
+        executionRecovery: { kind: "bootstrap", providerWorkStarted: false }, caseHandoffId: f.handoffId } });
     expect(source.resultJson).not.toHaveProperty("caseHandoffExecutionReleased");
     expect(await isCaseHandoffSourceReleased(db, { runId: sourceRunId, issueId: f.issueId })).toBe(true);
     const [releasedSource] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId));

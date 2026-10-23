@@ -5,7 +5,7 @@ import { isCompletedOnboardingHandoffWake } from "../../../services/chat-complet
 import { instanceSettingsService } from "../../../services/instance-settings.js";
 import { currentConversationCommentCondition } from "../../../services/agent-conversations.js";
 import { getExecutionBlocker, hasPendingRunCleanup } from "../../../services/execution-blocker.js";
-import { and, asc, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { extractIssueReferenceIdentifiers, isUuidLike } from "@paperclipai/shared";
 import {
@@ -1217,7 +1217,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
               eq(agentWakeupRequests.status, DEFERRED_WAKE_STATUS),
               sql`${agentWakeupRequests.payload}->>'issueId' = ${issueRow.id}`,
               sql`${agentWakeupRequests.payload}->>'interruptedRunId' = ${run.id}`,
-              sql`${agentWakeupRequests.requestedAt} > ${run.finishedAt}`,
+              gt(agentWakeupRequests.requestedAt, run.finishedAt),
             )).orderBy(asc(agentWakeupRequests.requestedAt)).limit(1)
           : [];
         const confirmedAssignmentHandoffWakeId = assignmentHandoffWake?.id ?? null;
