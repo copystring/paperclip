@@ -779,9 +779,28 @@ class Deployer:
         self._apply_direct_path_policy(candidate, hooks_by_kind["direct-path-policy"])
         self._apply_review_hook(candidate, hooks_by_kind["review-tool-access"], manifest)
         probe = hooks_by_kind["tool-review-probe"]
-        self.command(["/usr/bin/node", "--experimental-vm-modules", probe["path"],
-                      str(candidate / "node_modules/@paperclipai/server/dist"), "patched"],
-                     check=True, capture_output=True, text=True, timeout=60)
+        self._run_review_probe(candidate, manifest, probe)
+
+    def _run_review_probe(self, candidate: Path, manifest: dict, probe: dict):
+        manifest_argument = probe.get("verifiedReleaseManifest", False)
+        if type(manifest_argument) is not bool:
+            raise DeployError("Probe manifest option must be a boolean")
+        command = ["/usr/bin/node", "--experimental-vm-modules", probe["path"],
+                   str(candidate / "node_modules/@paperclipai/server/dist"), "patched"]
+        if not manifest_argument:
+            self.command(command, check=True, capture_output=True, text=True, timeout=60)
+            return
+        if not self.c.get("requiredSourcePatches"):
+            raise DeployError("Manifest-aware probes require registered source patches")
+        self._verify_required_source_patches(manifest)
+        # Pass only the same manifest accepted by package/source verification.
+        # Keep it outside the payload inventory and remove it even on failure.
+        with tempfile.TemporaryDirectory(prefix="paperclip-verified-manifest-") as directory:
+            manifest_path = Path(directory) / "manifest.json"
+            manifest_path.write_bytes((self._canonical_json(manifest) + "\n").encode("utf-8"))
+            manifest_path.chmod(0o600)
+            self.command(command + [str(manifest_path)], check=True,
+                         capture_output=True, text=True, timeout=60)
 
     def _apply_instruction_policy(self, candidate: Path, hook: dict, marker: str, roles, updater_module):
         policy_path = Path(hook.get("policyPath", hook["path"]))

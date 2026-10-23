@@ -601,6 +601,54 @@ class CandidateTests(unittest.TestCase):
             self.assertTrue((user_dir / "important.json").exists())
 
 
+class ManifestAwareProbeTests(unittest.TestCase):
+    def test_legacy_probe_keeps_existing_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            seen = []
+            d = deployer(Path(directory), command=lambda args, **kw: seen.append(args))
+            d._run_review_probe(Path(directory), manifest(), {"path": "/probe.mjs"})
+            self.assertEqual(seen[0][-1], "patched")
+            self.assertEqual(len(seen[0]), 5)
+
+    def test_verified_manifest_is_exact_and_removed_after_success_or_failure(self):
+        for fails in (False, True):
+            with self.subTest(fails=fails), tempfile.TemporaryDirectory() as directory:
+                expected = manifest()
+                pin = {key: expected["patches"][0][key] for key in ("repository", "number", "head")}
+                paths = []
+                def command(args, **kwargs):
+                    temporary = Path(args[-1])
+                    paths.append(temporary)
+                    self.assertEqual(json.loads(temporary.read_text()), expected)
+                    self.assertNotIn(Path(directory), temporary.parents)
+                    self.assertEqual(args[-2], "patched")
+                    if fails:
+                        raise RuntimeError("probe failed")
+                d = deployer(Path(directory), command=command, requiredSourcePatches=[pin])
+                if fails:
+                    with self.assertRaisesRegex(RuntimeError, "probe failed"):
+                        d._run_review_probe(Path(directory), expected, {"path": "/probe.mjs", "verifiedReleaseManifest": True})
+                else:
+                    d._run_review_probe(Path(directory), expected, {"path": "/probe.mjs", "verifiedReleaseManifest": True})
+                self.assertEqual(len(paths), 1)
+                self.assertFalse(paths[0].exists())
+                self.assertFalse(paths[0].parent.exists())
+
+    def test_source_proof_and_explicit_boolean_are_required_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            seen = []
+            d = deployer(Path(directory), command=lambda *a, **kw: seen.append(a))
+            for value in ("true", 1, None):
+                with self.subTest(value=value), self.assertRaisesRegex(deploy.DeployError, "boolean"):
+                    d._run_review_probe(Path(directory), manifest(), {"path": "/probe.mjs", "verifiedReleaseManifest": value})
+            with self.assertRaisesRegex(deploy.DeployError, "registered source"):
+                d._run_review_probe(Path(directory), manifest(), {"path": "/probe.mjs", "verifiedReleaseManifest": True})
+            d.c["requiredSourcePatches"] = [{"repository": "copystring/paperclip", "number": 21, "head": "f" * 40}]
+            with self.assertRaises(deploy.DeployError):
+                d._run_review_probe(Path(directory), manifest(), {"path": "/probe.mjs", "verifiedReleaseManifest": True})
+            self.assertEqual(seen, [])
+
+
 class DrainTests(unittest.TestCase):
     def test_start_drain_accepts_real_post_response_and_confirms_get_readback(self):
         with tempfile.TemporaryDirectory() as tmp:
