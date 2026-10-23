@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { inspect } from 'node:util';
 import { existsSync } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
 
 const EXPECTED_OLD_VERSION = '2026.1017.0-canary.6';
 const EXPECTED_OLD_SRI = 'sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg==';
@@ -20,6 +21,9 @@ const EXPECTED_CANDIDATE_INVENTORY_COUNT = 375;
 const EXPECTED_CANDIDATE_INVENTORY_SHA256 = '89cd5c4305633ac9eeabbb04a9d0584adce53afe0b2d06a6f7dab983dfe34174';
 const EXPECTED_ADDED_SQL_COUNT = 21;
 const EXPECTED_DEFERRED_MIGRATIONS = ['0374_rare_wolfpack.sql', '0375_short_mercury.sql'];
+const EMBEDDED_POSTGRES_PLATFORM = '@embedded-postgres/linux-x64';
+const EMBEDDED_POSTGRES_PLATFORM_VERSION = '18.1.0-beta.16';
+const EMBEDDED_POSTGRES_PLATFORM_SRI = 'sha512-+GIabpHh7QV2AcYBuzyQC41AYczSFphxfHy4ccTPIPrp6OSthZXH+A9fymjQzOiDHg9+1UeYET00Aj7sScjXrg==';
 export const MIGRATION_INVENTORY_PREFIX = 'node_modules/@paperclipai/db/dist/migrations/';
 const REQUIRED_ASSERTIONS = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'restore-point-checkout-migrations', 'migration-inventory-extension'];
 
@@ -50,6 +54,67 @@ export function assertInventoryBinding(inventory, { expectedCount, expectedSha25
 }
 export function resolvePackageDependency(packageEntryPath, dependency) {
   return createRequire(packageEntryPath).resolve(dependency);
+}
+export function tarEntry(tarball, wantedPath) {
+  const archive = gunzipSync(tarball);
+  for (let offset = 0; offset + 512 <= archive.length;) {
+    const header = archive.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const name = header.subarray(0, 100).toString('utf8').split('\0', 1)[0];
+    const prefix = header.subarray(345, 500).toString('utf8').split('\0', 1)[0];
+    const entryPath = prefix ? `${prefix}/${name}` : name;
+    const sizeText = header.subarray(124, 136).toString('ascii').split('\0', 1)[0].trim();
+    if (!/^[0-7]+$/.test(sizeText)) throw new Error('Unsupported tar entry size while verifying platform package');
+    const size = Number.parseInt(sizeText, 8);
+    const start = offset + 512;
+    const end = start + size;
+    if (end > archive.length) throw new Error('Truncated platform package tarball');
+    if (entryPath === wantedPath) return archive.subarray(start, end);
+    offset = start + Math.ceil(size / 512) * 512;
+  }
+  throw new Error(`Verified platform tarball is missing ${wantedPath}`);
+}
+function isContained(child, parent) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+async function hydrateVerifiedPlatformPackage(dbEntryPath, installRoot, tarball, databaseUrl) {
+  const embeddedPostgresEntry = resolvePackageDependency(dbEntryPath, 'embedded-postgres');
+  const platformEntry = resolvePackageDependency(embeddedPostgresEntry, EMBEDDED_POSTGRES_PLATFORM);
+  const packageRoot = path.dirname(path.dirname(platformEntry));
+  const allowedRoot = await realpath(installRoot);
+  const resolvedRoot = await realpath(packageRoot);
+  const packageInfo = await lstat(packageRoot);
+  if (!packageInfo.isDirectory() || packageInfo.isSymbolicLink() || resolvedRoot !== packageRoot || !isContained(resolvedRoot, allowedRoot)) {
+    throw new Error('Refusing to run platform package script outside its verified private npm installation');
+  }
+  const metadataPath = path.join(packageRoot, 'package.json');
+  const scriptPath = path.join(packageRoot, 'scripts', 'hydrate-symlinks.js');
+  const symlinksPath = path.join(packageRoot, 'native', 'pg-symlinks.json');
+  for (const candidatePath of [metadataPath, platformEntry, scriptPath, symlinksPath]) {
+    const info = await lstat(candidatePath);
+    const resolved = await realpath(candidatePath);
+    if (!info.isFile() || info.isSymbolicLink() || resolved !== candidatePath || !isContained(resolved, resolvedRoot)) {
+      throw new Error('Refusing to run an uncontained or linked platform package script');
+    }
+  }
+  const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+  if (metadata.name !== EMBEDDED_POSTGRES_PLATFORM || metadata.version !== EMBEDDED_POSTGRES_PLATFORM_VERSION) {
+    throw new Error('Installed embedded PostgreSQL platform package identity did not match the reviewed SRI package');
+  }
+  if (!Buffer.from(await readFile(scriptPath)).equals(tarEntry(tarball, 'package/scripts/hydrate-symlinks.js')) ||
+      !Buffer.from(await readFile(symlinksPath)).equals(tarEntry(tarball, 'package/native/pg-symlinks.json'))) {
+    throw new Error('Installed platform hydration inputs did not match the SRI-verified npm tarball');
+  }
+  runNode([scriptPath], packageRoot, databaseUrl);
+  const links = JSON.parse(await readFile(symlinksPath, 'utf8'));
+  for (const link of links) {
+    const source = path.resolve(packageRoot, link.source);
+    const target = path.resolve(packageRoot, link.target);
+    if (!isContained(source, resolvedRoot) || !isContained(target, resolvedRoot)) throw new Error('Platform symlink manifest escapes its package root');
+    const targetInfo = await lstat(target);
+    if (!targetInfo.isSymbolicLink() || await realpath(target) !== await realpath(source)) throw new Error(`Platform dependency symlink was not hydrated: ${path.basename(target)}`);
+  }
 }
 export function formatFailure(error, stage = 'migration compatibility run') {
   const detail = error instanceof Error ? error.stack ?? error.message : inspect(error, { depth: 4, breakLength: 120 });
@@ -162,6 +227,16 @@ async function main() {
     const oldMigrations = path.join(oldInstall, 'node_modules/@paperclipai/db/dist/migrations');
     const candidateIndex = path.join(candidateInstall, 'node_modules/@paperclipai/db/dist/index.js');
     const candidateMigrations = path.join(candidateInstall, 'node_modules/@paperclipai/db/dist/migrations');
+    if (process.platform === 'linux') {
+      stage('verify and hydrate only the pinned Linux PostgreSQL package scripts');
+      const platformPack = JSON.parse(run('npm', ['pack', `${EMBEDDED_POSTGRES_PLATFORM}@${EMBEDDED_POSTGRES_PLATFORM_VERSION}`, '--json', '--pack-destination', temp], temp))[0];
+      if (platformPack.version !== EMBEDDED_POSTGRES_PLATFORM_VERSION || platformPack.integrity !== EMBEDDED_POSTGRES_PLATFORM_SRI) throw new Error('Linux PostgreSQL platform package did not match the reviewed npm SRI pin');
+      const platformTarball = path.join(temp, platformPack.filename);
+      verifySRI(await readFile(platformTarball), EMBEDDED_POSTGRES_PLATFORM_SRI);
+      const platformBytes = await readFile(platformTarball);
+      await hydrateVerifiedPlatformPackage(oldIndex, oldInstall, platformBytes, '');
+      await hydrateVerifiedPlatformPackage(candidateIndex, candidateInstall, platformBytes, '');
+    }
     const oldIdentity = await migrationIdentity(oldMigrations);
     const candidateIdentity = await migrationIdentity(candidateMigrations);
     const extension = assertMigrationExtension(oldIdentity.inventory, candidateIdentity.inventory, oldIdentity.journal, candidateIdentity.journal);

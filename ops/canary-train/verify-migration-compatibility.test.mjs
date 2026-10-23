@@ -5,7 +5,8 @@ import { spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assertInventoryBinding, assertMigrationExtension, assertMigrationExtensionShape, canonicalInventoryHash, makeReceipt, MIGRATION_INVENTORY_PREFIX, resolvePackageDependency, verifySRI } from './verify-migration-compatibility.mjs';
+import { gzipSync } from 'node:zlib';
+import { assertInventoryBinding, assertMigrationExtension, assertMigrationExtensionShape, canonicalInventoryHash, makeReceipt, MIGRATION_INVENTORY_PREFIX, resolvePackageDependency, tarEntry, verifySRI } from './verify-migration-compatibility.mjs';
 
 const oldSRI = 'sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg==';
 const candidateSRI = 'sha512-Ub4gzp005JhteAMeDsOxUXDjbSA7OUg+dqiQ1CGaqqxB+xZpJS+x5ke5N/GkqL3f/a+DOQMDp/ZJzNC6//Uo3Q==';
@@ -17,6 +18,18 @@ test('SRI verifier accepts the exact tarball and rejects altered bytes', () => {
   const sri = `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
   assert.equal(verifySRI(bytes, sri), sri.slice(7));
   assert.throws(() => verifySRI(Buffer.from('changed'), sri), /did not match/);
+});
+
+test('verified tar reader extracts the exact packaged hydration script path', () => {
+  const content = Buffer.from('export const safe = true;');
+  const header = Buffer.alloc(512);
+  header.write('package/scripts/hydrate-symlinks.js', 0, 'utf8');
+  header.write(`${content.length.toString(8).padStart(11, '0')}\0`, 124, 'ascii');
+  header[156] = '0'.charCodeAt(0);
+  const padding = Buffer.alloc((512 - (content.length % 512)) % 512);
+  const tarball = gzipSync(Buffer.concat([header, content, padding, Buffer.alloc(512)]));
+  assert.deepEqual(tarEntry(tarball, 'package/scripts/hydrate-symlinks.js'), content);
+  assert.throws(() => tarEntry(tarball, 'package/scripts/other.js'), /missing/);
 });
 
 test('receipt is bound to exact package, migration hashes, and passing evidence', () => {
