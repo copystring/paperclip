@@ -118,6 +118,10 @@ describe("native instruction payload measurement", () => {
         const instructions = setup.developerInstructions ?? setup.baseInstructions;
         expect(instructions).toContain(PAPERCLIP_EXECUTION_PROMPT);
         expect(instructions).toContain("You are an agent in a Paperclip company.");
+        expect(instructions).toContain("Repeat discovery after the shell or target changes.");
+        expect(instructions).toContain("do not spend a separate model round on preflight alone");
+        expect(instructions).toContain("Do not add an unrequested `read_only_only` or other capability or risk filter.");
+        expect(instructions).toContain("Never append a `curl -w` status marker or other diagnostic text to a JSON stream.");
         const deliveredTools = setup.dynamicTools as Array<{ name: string; description: string }>;
         expect(deliveredTools.filter(tool => tool.name === "paperclip_finish")).toEqual([
           expect.objectContaining({ description: PRP_COMPLETION_TOOL_DESCRIPTION }),
