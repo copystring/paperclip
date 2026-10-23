@@ -91,7 +91,10 @@ jobs:
           log=(pathlib.Path(os.environ['RUNNER_TEMP'])/'wire-before.log').read_text()
           assert 'delivers escape-heavy 500 KB pages through actual PRP without truncation' in log
           assert '800082' in log and 'runnerd authenticated' in log, 'Failure did not prove the expected real PRP wire overflow'
-          assert 'Escaped pages did not reach the provider' in log or 'PRP turn ended with status' in log or 'PRP emitted terminal' in log
+          assert '400014' in log and 'turn/started' in log
+          assert 'PRP saved-result test failed' in log, 'Missing primary failure evidence'
+          # Overflow can surface as a failed turn, a timeout, or a provider restart.
+          # The unchanged fixed run below must deliver both full digests and fit every wire response.
           PY
       - name: Apply generic wire serialization fix and require focused green tests
         working-directory: ${{ runner.temp }}/paperclip-source
