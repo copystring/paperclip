@@ -343,9 +343,13 @@ describe("durable case handoff queue admission", () => {
     await heartbeatService(db).requestCaseHandoffYield({ runId: sourceRunId, issueId: f.issueId, handoffId: f.handoffId });
     const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId));
     expect(source).toMatchObject({ status: "cancelled", startedAt: null, runtimeModeResolvedAt: null,
-      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
-        caseHandoffExecutionReleased: { runId: sourceRunId, issueId: f.issueId } } });
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } });
+    expect(source.resultJson).not.toHaveProperty("caseHandoffExecutionReleased");
     expect(await isCaseHandoffSourceReleased(db, { runId: sourceRunId, issueId: f.issueId })).toBe(true);
+    const [releasedSource] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId));
+    expect(releasedSource.resultJson).toMatchObject({
+      caseHandoffExecutionReleased: { schema: "paperclip.case-handoff-release.v1", runId: sourceRunId, issueId: f.issueId },
+    });
     const [handoff] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, f.handoffId));
     expect(handoff.state).toBe("awaiting_release");
     expect(handoff.nextAttemptAt.getTime()).toBeLessThanOrEqual(Date.now());

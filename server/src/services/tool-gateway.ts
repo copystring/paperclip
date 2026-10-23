@@ -6467,6 +6467,7 @@ export function createToolGatewayService(
       // deadline does not prove the remote connection is unhealthy, and the
       // provider may have applied a mutation before the response was lost.
       if (controller.signal.aborted) {
+        if (mcpSession) forgetMcpHttpSession(mcpSession);
         throw new ToolGatewayHttpError(
           504,
           `Remote MCP tool call exceeded its ${ms} ms caller deadline. The provider may still have processed the action; its outcome is unknown. Check its state before an explicit retry.`,

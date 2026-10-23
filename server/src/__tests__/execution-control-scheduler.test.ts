@@ -3,56 +3,88 @@ import { runInNewContext } from "node:vm";
 import { stripTypeScriptTypes } from "node:module";
 import { describe, expect, it, vi } from "vitest";
 
-// Exercise the actual startup wiring without booting the HTTP server or a database.
-const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-const start = source.indexOf("  const executionControlSweepsInFlight =");
-const end = source.indexOf("  const executionControlInterval =", start);
-if (start < 0 || end < start) throw new Error("Execution control startup wiring not found");
-const wiring = stripTypeScriptTypes(source.slice(start, end) + "\nglobalThis.sweep = sweepExecutionControl;");
+// Exercise the extracted worker registration without booting the HTTP server or a database.
+const source = readFileSync(new URL("../services/execution-control-work.ts", import.meta.url), "utf8");
+const start = source.indexOf("export function registerExecutionControlWork(");
+const end = source.indexOf("\nexport function executionControlSchedule(", start);
+if (start < 0 || end < start) throw new Error("Execution control worker registration not found");
+const wiring = stripTypeScriptTypes(source.slice(start, end).replace("export function", "function") +
+  "\nglobalThis.registerExecutionControlWork = registerExecutionControlWork;");
+const EXECUTION_RECONCILIATION_INTERVAL_MS = 60_000;
 
-describe("durable execution control startup wiring", () => {
-  for (const periodicEnabled of [true, false]) {
-    it(`delivers reconciled work and checks replacements with periodic heartbeats ${periodicEnabled ? "on" : "off"}`, async () => {
-      const wakeup = vi.fn();
-      const runtime = { wakeup };
-      const delivered = vi.fn(async () => {});
-      const replacements = vi.fn(async () => {});
-      const pending: Promise<unknown>[] = [];
-      const context = {
-        db: {}, heartbeat: periodicEnabled ? runtime : null, accountingHeartbeat: runtime,
-        isIdleTaskDrainActive: () => false, heartbeatSchedulerStopped: false, isWarmStandby: () => false,
-        trackHeartbeatSchedulerWork: (work: Promise<unknown>) => pending.push(work),
-        reconcileAbandonedExecutionControl: vi.fn(async () => {}),
-        reconcileSafeNativeReplacements: replacements,
-        verifyStoppedNativeSessionForReplacement: vi.fn(),
-        deliverReconciledExecutions: delivered,
-        deliverExecutionStatuses: vi.fn(async () => {}),
-        settleUnrecoverableExecutions: vi.fn(async () => {}),
-        localAiLoginService: () => ({ reapExpired: vi.fn(async () => {}) }),
-        logger: { error: vi.fn() }, sweep: () => {},
-      };
-      runInNewContext(wiring, context);
-      context.sweep();
-      context.sweep(); // A second tick must not overlap an in-flight queue.
-      await Promise.all(pending);
-      expect(delivered).toHaveBeenCalledExactlyOnceWith(context.db, wakeup);
-      expect(replacements).toHaveBeenCalledTimes(1);
-    });
-  }
-  it.each(["drain", "standby", "shutdown"])("does not dispatch during %s", async mode => {
-    const delivered = vi.fn();
+type Duty = { queue: string; run: () => Promise<unknown>; next: () => Promise<number | null> };
+type Worker = {
+  pausePassiveMaintenance: boolean;
+  run: () => Promise<void>;
+  hasPending: () => Promise<boolean>;
+  nextRunAt: () => number | null;
+};
+type Coordinator = {
+  register: (queue: string, worker: Worker) => { ready: Promise<void> };
+};
+type RegisterExecutionControlWork = (
+  coordinator: Coordinator,
+  duties: Duty[],
+  canRun?: () => boolean,
+) => { ready: Promise<void> };
+
+describe("durable execution control worker registration", () => {
+  it("does not overlap a duty and schedules its next deadline after settlement", async () => {
+    const registrations: Array<{ queue: string; worker: Worker }> = [];
+    const coordinator: Coordinator = {
+      register: (queue, worker) => {
+        registrations.push({ queue, worker });
+        return { ready: Promise.resolve() };
+      },
+    };
     const context = {
-      db: {}, heartbeat: null, accountingHeartbeat: { wakeup: vi.fn() },
-      isIdleTaskDrainActive: () => mode === "drain", heartbeatSchedulerStopped: mode === "shutdown",
-      isWarmStandby: () => mode === "standby", trackHeartbeatSchedulerWork: vi.fn(),
-      reconcileAbandonedExecutionControl: vi.fn(), reconcileSafeNativeReplacements: vi.fn(),
-      verifyStoppedNativeSessionForReplacement: vi.fn(), deliverReconciledExecutions: delivered,
-      deliverExecutionStatuses: vi.fn(), settleUnrecoverableExecutions: vi.fn(),
-      localAiLoginService: vi.fn(), logger: { error: vi.fn() }, sweep: () => {},
+      EXECUTION_RECONCILIATION_INTERVAL_MS,
+      registerExecutionControlWork: undefined as unknown as RegisterExecutionControlWork,
     };
     runInNewContext(wiring, context);
-    context.sweep();
-    expect(context.trackHeartbeatSchedulerWork).not.toHaveBeenCalled();
-    expect(delivered).not.toHaveBeenCalled();
+
+    let finishDuty!: () => void;
+    const duty = vi.fn(() => new Promise<void>(resolve => { finishDuty = resolve; }));
+    const deadline = Date.now() + 120_000;
+    const next = vi.fn(async () => deadline);
+    context.registerExecutionControlWork(coordinator, [
+      { queue: "execution-continuation", run: duty, next },
+    ]);
+    const worker = registrations[0]!.worker;
+    expect(worker.pausePassiveMaintenance).toBe(true);
+    const first = worker.run();
+    await worker.run(); // A second tick cannot overlap the in-flight duty.
+    expect(duty).toHaveBeenCalledTimes(1);
+    finishDuty();
+    await first;
+    expect(next).toHaveBeenCalledTimes(1);
+    await expect(worker.hasPending()).resolves.toBe(false);
+    expect(worker.nextRunAt()).toBeGreaterThanOrEqual(deadline);
+  });
+
+  it("does not dispatch when its scheduler gate is closed", async () => {
+    const registrations: Array<{ queue: string; worker: Worker }> = [];
+    const coordinator: Coordinator = {
+      register: (queue, worker) => {
+        registrations.push({ queue, worker });
+        return { ready: Promise.resolve() };
+      },
+    };
+    const context = {
+      EXECUTION_RECONCILIATION_INTERVAL_MS,
+      registerExecutionControlWork: undefined as unknown as RegisterExecutionControlWork,
+    };
+    runInNewContext(wiring, context);
+    const duty = vi.fn(async () => {});
+    const next = vi.fn(async () => null);
+    context.registerExecutionControlWork(
+      coordinator,
+      [{ queue: "execution-continuation", run: duty, next }],
+      () => false,
+    );
+    expect(registrations[0]!.worker.pausePassiveMaintenance).toBe(true);
+    await registrations[0]!.worker.run();
+    expect(duty).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
   });
 });

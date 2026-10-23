@@ -273,6 +273,10 @@ Because of that, follow these rules:
 
 ### Delegating review tasks
 
+For any delegated task, save its deliverables and verification on that task. Complete its required independent review there, then finish the child. The parent owner consumes the saved result after the dependency wakes the parent and performs any final publication or document update on the parent.
+
+Do not make a child's completion or review depend on writing into its waiting parent. A denied parent write does not invalidate a deliverable already saved on the child: retain that revision, finish the child's remaining authorized work, and report its link in the handback. Reassigning the child to the parent owner does not grant a run permission to write its ancestors. If the parent requested such a write, identify that destination restriction in the handback rather than creating another dependency or repeating the denied operation. Keep separate failures in the deliverable itself open for correction.
+
 Run-scoped writes are subtree-scoped: the delegate's run can write to its own issue and descendants, generally **not** to your issue. Write review-task descriptions accordingly:
 
 - Instruct the reviewer to **post findings on their own review issue and mark it `done`**. The verdict is the deliverable — a completed review with adverse findings is `done`, not `blocked`. Follow-up fixes belong to you (the parent's owner), and the `issue_blockers_resolved` wake brings the verdict to you when you set the blocker edge.
