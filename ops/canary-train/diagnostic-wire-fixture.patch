@@ -1,5 +1,5 @@
 diff --git a/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts b/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
-index bce284d30..78526c7e2 100644
+index bce284d30..f493fc9a7 100644
 --- a/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
 +++ b/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
 @@ -30,6 +30,10 @@ describe("saved assigned results through actual PRP", () => {
@@ -56,7 +56,15 @@ index bce284d30..78526c7e2 100644
          }
        }
      }
-@@ -121,16 +128,20 @@ for await (const line of createInterface({input:process.stdin})) {
+@@ -110,6 +117,7 @@ for await (const line of createInterface({input:process.stdin})) {
+       return response;
+     });
+     let timer: ReturnType<typeof setTimeout> | undefined;
++    let testFailure: unknown;
+     let verified = false;
+     const notifications: Array<{ method: string; type: unknown; status?: string }> = [];
+     try {
+@@ -121,17 +129,32 @@ for await (const line of createInterface({input:process.stdin})) {
            notifications.push({ method: notification.method, type: (notification.params.item as { type?: string })?.type,
              status: (notification.params.turn as { status?: string })?.status });
            if (notification.method === "item/completed" && (notification.params.item as { text?: string })?.text === "all-pages-verified") verified = true;
@@ -80,5 +88,18 @@ index bce284d30..78526c7e2 100644
 -      expect(sizes.some(size => size.wrapper > 700_000)).toBe(true);
 +      expect(sizes.every(size => size.wrapper <= RUNNER_TOOL_RESULT_MAX_BYTES)).toBe(true);
        expect(bundle.evidence().diagnostics).toContain("runnerd authenticated to the durable PRP control plane");
-     } finally { clearTimeout(timer); await bundle.transport.close(); }
+-    } finally { clearTimeout(timer); await bundle.transport.close(); }
++    } catch (error) {
++      testFailure = new Error(`PRP saved-result test failed: ${error instanceof Error ? error.message : String(error)}; bounded evidence: ${JSON.stringify(failureEvidence())}`, { cause: error });
++    } finally {
++      clearTimeout(timer);
++      try {
++        await bundle.transport.close();
++      } catch (cleanupError) {
++        if (testFailure !== undefined) throw new AggregateError([testFailure, cleanupError], "PRP test and transport cleanup both failed");
++        throw new Error(`PRP transport cleanup failed; bounded evidence: ${JSON.stringify(failureEvidence())}`, { cause: cleanupError });
++      }
++    }
++    if (testFailure !== undefined) throw testFailure;
    }, 30_000);
+ });

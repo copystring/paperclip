@@ -61,7 +61,7 @@ jobs:
           dest.parent.mkdir(parents=True,exist_ok=True)
           shutil.copyfile(binary,dest)
           dest.chmod(0o755)
-          for name,digest in [('diagnostic-wire-fixture.patch','1adbca0ea7b0489f4b218b4f8fdca74675309dd92af5b148df4927fae1d27f8c'),('diagnostic-wire-fix.patch','78c322e0bf3f46e6c5a6498c73f6fb3dcbc585bf9a4ccfcb580fbb2906873589')]:
+          for name,digest in [('diagnostic-wire-fixture.patch','c5788c25af7dcfe509deb6abc78149e4ab5951b9dec4d475f12df17db6919176'),('diagnostic-wire-fix.patch','78c322e0bf3f46e6c5a6498c73f6fb3dcbc585bf9a4ccfcb580fbb2906873589')]:
               patch=pathlib.Path(os.environ['GITHUB_WORKSPACE'])/'ops/canary-train'/name
               assert hashlib.sha256(patch.read_bytes()).hexdigest() == digest
           PY
@@ -80,9 +80,11 @@ jobs:
         env:
           PAPERCLIP_REQUIRE_RUNNER_API_INTEGRATION: '1'
         run: |
+          set +e
           set -uo pipefail
           pnpm --filter @paperclipai/server exec vitest run src/services/native-runtime/runner-tool-results-prp.integration.test.ts 2>&1 | tee "$RUNNER_TEMP/wire-before.log"
           status=${PIPESTATUS[0]}
+          set -e
           test "$status" -ne 0 || { echo 'Regression unexpectedly passed without the fix'; exit 1; }
           python3 - <<'PY'
           import os,pathlib
