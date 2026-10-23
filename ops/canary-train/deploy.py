@@ -1078,7 +1078,10 @@ class Deployer:
             "activePayloadPath": str(old_target),
             "candidatePayloadPath": str(candidate),
         }
-        context = {**expected, **self._production_probe_context(probe)}
+        active_receipt = previous.get("patchedRelease") or {}
+        context = {**expected, **self._production_probe_context(probe),
+                   "activeProtectedFiles": active_fingerprint,
+                   "activeProtectedRoots": active_receipt.get("protectedRoots") or self.c.get("activeRoots") or []}
         # The registered script owns its read-only production query and its
         # isolated migration/boot fixture. The deployer passes only this
         # hash-bound context; it never executes SQL from a release manifest.
