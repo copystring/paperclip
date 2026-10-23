@@ -411,7 +411,7 @@ async function main() {
     const preservedObserved = migratedFinalizations.get('observed-unleased');
     const preservedTerminal = migratedFinalizations.get('terminal-failure-unleased');
     const preservedNullState = migratedFinalizations.get('committed-without-recovery-state');
-    const historyPreserved = (row) => JSON.stringify(row?.recovery_history) === JSON.stringify(recoveryHistory);
+    const historyPreserved = (row) => isDeepStrictEqual(row?.recovery_history, recoveryHistory);
     const baselineTimestamp = Date.parse(baselineUpdatedAt);
     const nativeRecoveryMigrationPassed =
       clearedCommitted.phase === 'committed' && clearedCommitted.lease_owner === null &&

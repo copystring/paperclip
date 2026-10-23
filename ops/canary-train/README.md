@@ -1,5 +1,7 @@
 # Canary patch train build controller
 
+Controller pull requests also run the exact migration fixtures on a disposable Linux PostgreSQL database before merge. This read-only CI lane prepares the pinned public source and retains its receipt for one day. It has no publication or production access. The release workflow still repeats the source-bound migration check for its own immutable candidate.
+
 This controller assembles the official synchronized npm canary source with only the reviewed, manifest-pinned pull requests, builds it using the upstream release toolchain, and emits a hash-indexed runtime overlay. The build primitive only produces verified runtime files; the workflow publishes a green release through `publish.py`, and the instance consumer activates it after its local compatibility and idle checks.
 
 ## Commands
