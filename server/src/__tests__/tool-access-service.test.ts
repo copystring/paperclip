@@ -2690,14 +2690,14 @@ describeEmbeddedPostgres("tool access service", () => {
       const authorization = new URL(started.authorizationUrl);
       expect(authorization.searchParams.get("scope")?.split(" ")).toEqual(googleWorkspaceSelectedScopes(GOOGLE_WORKSPACE_DEFAULT_SELECTION));
       expect(authorization.searchParams.get("enable_granular_consent")).toBe("true");
-      const provider = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      const provider = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
         if (String(url) === "https://oauth2.googleapis.com/token") return Response.json({
           access_token: "fixture-workspace-access", refresh_token: "fixture-workspace-refresh", expires_in: 3600, token_type: "Bearer", scope,
         });
         expect(String(url)).toBe("https://docsmcp.googleapis.com/mcp/v1");
-        return mcpHttpResponse({ jsonrpc: "2.0", id: "paperclip-catalog-refresh", result: { tools: [
+        return mcpCatalogResponseForRequest(init, [
           { name: "read_doc", annotations: { readOnlyHint: true } }, { name: "update_doc" },
-        ] } });
+        ]);
       });
       const completing = service.completeOAuthCallback({ state: authorization.searchParams.get("state")!, code: "fixture-code", redirectUri, actor });
       if (scope?.endsWith("documents.readonly")) {
@@ -2727,15 +2727,15 @@ describeEmbeddedPostgres("tool access service", () => {
         connectionMethodKey: mode === "customer" ? "customer-workspace-oauth" : "paperclip-workspace",
         ...(mode === "customer" ? { oauthClient: { clientId: "workspace-client", clientSecret: "workspace-secret" } } : {}),
       };
-      vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
         if (String(url) === "https://oauth2.googleapis.com/token") return Response.json({
           access_token: "fixture-workspace-access", refresh_token: "fixture-workspace-refresh",
           expires_in: 3600, token_type: "Bearer", scope,
         });
         expect(String(url)).toBe("https://docsmcp.googleapis.com/mcp/v1");
-        return mcpHttpResponse({ jsonrpc: "2.0", id: "paperclip-catalog-refresh", result: {
-          tools: [{ name: "read_doc", annotations: { readOnlyHint: true } }],
-        } });
+        return mcpCatalogResponseForRequest(init, [
+          { name: "read_doc", annotations: { readOnlyHint: true } },
+        ]);
       });
       const connected = await service.connectGalleryApp(company.id, input, actor);
       await service.putConnectionInstalls(connected.connectionId, { installs: [] }, actor);
@@ -8449,10 +8449,10 @@ describeEmbeddedPostgres("tool access service", () => {
           return Response.json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "ok" }] } });
         }
         const names = host === "docsmcp.googleapis.com" ? ["read_doc", "update_doc"] : ["get_message"];
-        return mcpHttpResponse({ jsonrpc: "2.0", id: body.id, result: { tools: omitted.has(host) ? [] : names.map((name) => ({
+        return mcpCatalogResponseForRequest(init, omitted.has(host) ? [] : names.map((name) => ({
           name, annotations: { readOnlyHint: name !== "update_doc" },
           inputSchema: { type: "object", properties: {} },
-        })) } });
+        })));
       });
       const connected = await service.connectGalleryApp(company.id, {
         galleryKey: "google-workspace", grantKind: "organization",
@@ -10939,10 +10939,10 @@ describeEmbeddedPostgres("tool access service", () => {
     const connected = await service.connectGalleryApp(company.id, { galleryKey: "slack", name: "Concurrent sharing", grantKind: "user" }, actor);
     const connection = await service.getConnection(connected.connectionId, company.id);
     const redirectUri = "https://paperclip.example/api/tools/oauth/callback";
-    vi.spyOn(globalThis, "fetch").mockImplementation(async url => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       const href = String(url);
       if (href === "https://slack.com/api/oauth.v2.access") return mcpHttpResponse(oauthToken("fixture-access-token", "fixture-refresh-token"));
-      if (href === "https://mcp.slack.com/mcp") return mcpHttpResponse(catalogResponse([{ name: "search_messages", annotations: { readOnlyHint: true } }]));
+      if (href === "https://mcp.slack.com/mcp") return mcpCatalogResponseForRequest(init, [{ name: "search_messages", annotations: { readOnlyHint: true } }]);
       throw new Error(`unexpected fetch ${href}`);
     });
     const start = () => service.startOAuth(company.id, connected.connectionId, { redirectUri, actor, subjectUserId: userId });
@@ -11005,10 +11005,10 @@ describeEmbeddedPostgres("tool access service", () => {
     const connection = await service.getConnection(connected.connectionId, company.id);
     const redirectUri = "https://paperclip.example/api/tools/oauth/callback";
     let discoverNewTool = false;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async url => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       const href = String(url);
       if (href === "https://slack.com/api/oauth.v2.access") return mcpHttpResponse(oauthToken("fixture-access-token", "fixture-refresh-token"));
-      if (href === "https://mcp.slack.com/mcp") return mcpHttpResponse(catalogResponse([{ name: "search_messages", annotations: { readOnlyHint: true } }, ...(discoverNewTool ? [{ name: "new_search", annotations: { readOnlyHint: true } }] : [])]));
+      if (href === "https://mcp.slack.com/mcp") return mcpCatalogResponseForRequest(init, [{ name: "search_messages", annotations: { readOnlyHint: true } }, ...(discoverNewTool ? [{ name: "new_search", annotations: { readOnlyHint: true } }] : [])]);
       throw new Error(`unexpected fetch ${href}`);
     });
     const start = () => service.startOAuth(company.id, connected.connectionId, { redirectUri, actor, subjectUserId: userId });
