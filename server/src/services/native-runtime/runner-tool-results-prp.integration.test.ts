@@ -30,6 +30,10 @@ describe("saved assigned results through actual PRP", () => {
     const digest = createHash("sha256").update(expected).digest("hex");
     const inline = { content: "\\".repeat(200_000) };
     const inlineDigest = createHash("sha256").update(JSON.stringify(inline)).digest("hex");
+    const providerWireSize = (value: unknown) => Buffer.byteLength(JSON.stringify({ success: true,
+      contentItems: [{ type: "inputText", text: JSON.stringify(value) }] }));
+    expect(Buffer.byteLength(JSON.stringify(inline))).toBeLessThan(RUNNER_TOOL_RESULT_MAX_BYTES);
+    expect(providerWireSize(inline)).toBeGreaterThan(RUNNER_TOOL_RESULT_MAX_BYTES);
     const executeTool = vi.fn(async (call: { parameters: Record<string, unknown> }) => ({
       status: "completed" as const, result: call.parameters.variant === "inline" ? inline : original,
     }));
@@ -48,7 +52,7 @@ describe("saved assigned results through actual PRP", () => {
 import { createInterface } from 'node:readline';
 import { createHash } from 'node:crypto';
 const send = value => process.stdout.write(JSON.stringify(value)+'\\n');
-let step=0, artifactId, restored='', inlinePending=false;
+let step=0, artifactId, restored='', phase=0;
 const call = (tool,args) => { step++; send({id:'call-'+step,method:'item/tool/call',params:{threadId:'saved-thread',turnId:'saved-turn',itemId:'item-'+step,callId:'saved-call-'+step,tool,arguments:args}}); };
 for await (const line of createInterface({input:process.stdin})) {
   const m=JSON.parse(line);
@@ -56,20 +60,23 @@ for await (const line of createInterface({input:process.stdin})) {
     if (String(m.id).startsWith('call-')) {
       const envelope=JSON.parse(m.result.contentItems[0].text);
       const result=envelope.result ?? envelope;
-      if (inlinePending) {
-        if(result.artifact || createHash('sha256').update(JSON.stringify(result)).digest('hex')!=='${inlineDigest}') throw new Error('Inline result was not delivered intact');
-        send({method:'item/completed',params:{threadId:'saved-thread',turnId:'saved-turn',item:{id:'saved-answer',type:'agentMessage',text:'all-pages-verified'}}});
-        send({method:'turn/completed',params:{turn:{id:'saved-turn',status:'completed'}}});
-      }
-      else if (step===1) { artifactId=result.artifact.artifactId; call('read_tool_result',{artifactId,offsetBytes:0}); }
-      else {
+      if (result.artifact) {
+        if(!result.readWith || result.readWith.tool!=='read_tool_result' || result.readWith.arguments.offsetBytes!==0) throw new Error('Captured result omitted its first-page instruction');
+        artifactId=result.artifact.artifactId;
+        restored='';
+        call(result.readWith.tool,{...result.readWith.arguments});
+      } else {
         if(!result.ok || result.responseText.offsetBytes!==Buffer.byteLength(restored)) throw new Error('Invalid page receipt');
         restored+=result.data;
         if(result.responseText.nextOffsetBytes!==null) call('read_tool_result',{artifactId,offsetBytes:result.responseText.nextOffsetBytes});
         else {
-          if(createHash('sha256').update(restored).digest('hex')!=='${digest}') throw new Error('Provider received incomplete JSON');
-          inlinePending=true;
-          call('${assignedMcpTools.definitions()[0]!.name}',{variant:'inline'});
+          const expectedDigest=phase===0?'${digest}':'${inlineDigest}';
+          if(createHash('sha256').update(restored).digest('hex')!==expectedDigest) throw new Error('Provider received incomplete saved JSON');
+          if(phase===0) { phase=1; call('${assignedMcpTools.definitions()[0]!.name}',{variant:'inline'}); }
+          else {
+            send({method:'item/completed',params:{threadId:'saved-thread',turnId:'saved-turn',item:{id:'saved-answer',type:'agentMessage',text:'all-pages-verified'}}});
+            send({method:'turn/completed',params:{turn:{id:'saved-turn',status:'completed'}}});
+          }
         }
       }
     }
@@ -89,6 +96,19 @@ for await (const line of createInterface({input:process.stdin})) {
         normalizedSessionId: "saved-test-session", turnId: "saved-test-turn", itemId: "saved-test-item" },
     });
     const sizes: Array<{ result: number; wrapper: number }> = [];
+    const failureEvidence = () => {
+      const evidence = bundle.evidence();
+      return {
+        sizes: sizes.slice(-8),
+        notifications: notifications.slice(-12),
+        runnerExited: evidence.runnerExited,
+        runnerExitCode: evidence.runnerExitCode,
+        runnerSignal: evidence.runnerSignal,
+        // Diagnostics are useful to explain a native transport timeout, but
+        // cap both count and text length so failures cannot dump unbounded logs.
+        diagnostics: evidence.diagnostics.slice(-8).map((message) => message.slice(0, 300)),
+      };
+    };
     bundle.transport.setServerRequestHandler(async request => {
       const params = request.params;
       const result = await authority.execute({ tool: String(params.tool), arguments: params.arguments, callId: String(params.callId) });
@@ -97,6 +117,7 @@ for await (const line of createInterface({input:process.stdin})) {
       return response;
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let testFailure: unknown;
     let verified = false;
     const notifications: Array<{ method: string; type: unknown; status?: string }> = [];
     try {
@@ -108,17 +129,32 @@ for await (const line of createInterface({input:process.stdin})) {
           notifications.push({ method: notification.method, type: (notification.params.item as { type?: string })?.type,
             status: (notification.params.turn as { status?: string })?.status });
           if (notification.method === "item/completed" && (notification.params.item as { text?: string })?.text === "all-pages-verified") verified = true;
-          if (notification.method === "turn/completed") return;
+          if (notification.method === "turn/completed") {
+            const status = (notification.params.turn as { status?: string })?.status;
+            if (status !== "completed") throw new Error(`PRP turn ended with status ${status ?? "unknown"}: ${JSON.stringify(failureEvidence())}`);
+            return;
+          }
+          if (notification.method === "turn/failed" || notification.method === "item/failed") {
+            throw new Error(`PRP emitted terminal ${notification.method}: ${JSON.stringify(failureEvidence())}`);
+          }
         } })(),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Escaped pages did not reach the provider")), 15_000); }),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`Escaped pages did not reach the provider: ${JSON.stringify(failureEvidence())}`)), 15_000); }),
       ]);
-      expect(verified, JSON.stringify({ sizes, notifications, diagnostics: bundle.evidence().diagnostics })).toBe(true);
+      expect(verified, JSON.stringify(failureEvidence())).toBe(true);
       expect(executeTool.mock.calls.map(([call]) => call.parameters)).toEqual([{ variant: "large" }, { variant: "inline" }]);
-      expect(sizes.every(size => size.result <= RUNNER_TOOL_RESULT_MAX_BYTES)).toBe(true);
-      // The provider-facing text wrapper is decoded before the PRP command.
-      // Its larger JSON encoding must not be mistaken for the command's size.
-      expect(sizes.some(size => size.wrapper > 700_000)).toBe(true);
+      expect(sizes.every(size => size.wrapper <= RUNNER_TOOL_RESULT_MAX_BYTES)).toBe(true);
       expect(bundle.evidence().diagnostics).toContain("runnerd authenticated to the durable PRP control plane");
-    } finally { clearTimeout(timer); await bundle.transport.close(); }
+    } catch (error) {
+      testFailure = new Error(`PRP saved-result test failed: ${error instanceof Error ? error.message : String(error)}; bounded evidence: ${JSON.stringify(failureEvidence())}`, { cause: error });
+    } finally {
+      clearTimeout(timer);
+      try {
+        await bundle.transport.close();
+      } catch (cleanupError) {
+        if (testFailure !== undefined) throw new AggregateError([testFailure, cleanupError], "PRP test and transport cleanup both failed");
+        throw new Error(`PRP transport cleanup failed; bounded evidence: ${JSON.stringify(failureEvidence())}`, { cause: cleanupError });
+      }
+    }
+    if (testFailure !== undefined) throw testFailure;
   }, 30_000);
 });
