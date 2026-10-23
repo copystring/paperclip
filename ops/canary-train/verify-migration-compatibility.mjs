@@ -10,6 +10,9 @@ import net from 'node:net';
 
 const EXPECTED_OLD_VERSION = '2026.1017.0-canary.6';
 const EXPECTED_OLD_SRI = 'sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg==';
+const EXPECTED_OLD_INVENTORY_COUNT = 354;
+const EXPECTED_OLD_INVENTORY_SHA256 = '9cec6945b6dd1c38b80940e5246d500da8b5d506a4be68db20ab89136fc11ed9';
+const EXPECTED_ADDED_SQL_COUNT = 19;
 const USER = 'paperclip';
 const PASSWORD = 'paperclip';
 
@@ -21,12 +24,32 @@ export function verifySRI(bytes, sri) {
   if (actual !== m[1]) throw new Error('Old package SRI did not match the pinned package');
   return actual;
 }
-export function makeReceipt({ oldVersion, oldSRI, oldJournalHash, candidateJournalHash, candidateMigrationHash, assertions }) {
+export function makeReceipt({ oldVersion, oldSRI, oldJournalHash, oldMigrationInventoryHash, candidateJournalHash, candidateMigrationHash, assertions }) {
   if (oldVersion !== EXPECTED_OLD_VERSION || oldSRI !== EXPECTED_OLD_SRI) throw new Error('Unapproved old package identity');
-  if (!/^[a-f0-9]{64}$/.test(oldJournalHash) || !/^[a-f0-9]{64}$/.test(candidateJournalHash) || !/^[a-f0-9]{64}$/.test(candidateMigrationHash)) throw new Error('Receipt requires SHA-256 migration identities');
+  if (![oldJournalHash, oldMigrationInventoryHash, candidateJournalHash, candidateMigrationHash].every((h) => /^[a-f0-9]{64}$/.test(h))) throw new Error('Receipt requires SHA-256 migration identities');
   if (!Array.isArray(assertions) || assertions.length < 3 || assertions.some((a) => a.passed !== true)) throw new Error('Receipt can only attest successful invariants');
-  const body = { schema: 1, oldPackage: { name: '@paperclipai/db', version: oldVersion, integrity: oldSRI, journalSha256: oldJournalHash }, candidate: { journalSha256: candidateJournalHash, migrationsSha256: candidateMigrationHash }, assertions };
+  const body = { schema: 1, oldPackage: { name: '@paperclipai/db', version: oldVersion, integrity: oldSRI, migrationInventoryCount: EXPECTED_OLD_INVENTORY_COUNT, migrationInventorySha256: oldMigrationInventoryHash, journalSha256: oldJournalHash }, candidate: { migrationInventoryCount: EXPECTED_OLD_INVENTORY_COUNT + EXPECTED_ADDED_SQL_COUNT, migrationInventorySha256: candidateMigrationHash, journalSha256: candidateJournalHash }, assertions };
   return { ...body, receiptSha256: sha256(Buffer.from(JSON.stringify(body))) };
+}
+export function canonicalInventoryHash(inventory) {
+  const sorted = Object.fromEntries(Object.entries(inventory).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+  return sha256(Buffer.from(JSON.stringify(sorted)));
+}
+export function assertMigrationExtension(oldInventory, candidateInventory, oldJournal, candidateJournal) {
+  const oldFiles = Object.keys(oldInventory).sort();
+  const candidateFiles = Object.keys(candidateInventory).sort();
+  if (oldFiles.length !== EXPECTED_OLD_INVENTORY_COUNT || canonicalInventoryHash(oldInventory) !== EXPECTED_OLD_INVENTORY_SHA256) throw new Error('Old package migration inventory did not match the reviewed 0354 baseline');
+  for (const name of oldFiles) {
+    if (name === 'meta/_journal.json') continue;
+    if (candidateInventory[name] !== oldInventory[name]) throw new Error(`Candidate changed or removed baseline migration ${name}`);
+  }
+  const added = candidateFiles.filter((name) => !Object.hasOwn(oldInventory, name));
+  if (added.length !== EXPECTED_ADDED_SQL_COUNT || added.some((name) => !/^\d{4}_.+\.sql$/.test(name))) throw new Error('Candidate must add exactly the 19 reviewed SQL migrations');
+  if (candidateFiles.length !== EXPECTED_OLD_INVENTORY_COUNT + EXPECTED_ADDED_SQL_COUNT) throw new Error('Candidate migration inventory has unexpected files');
+  const priorEntries = oldJournal.entries;
+  if (!Array.isArray(priorEntries) || !Array.isArray(candidateJournal.entries) || candidateJournal.entries.length !== priorEntries.length + EXPECTED_ADDED_SQL_COUNT) throw new Error('Candidate migration journal length is not a 19-entry extension');
+  if (JSON.stringify(candidateJournal.entries.slice(0, priorEntries.length)) !== JSON.stringify(priorEntries)) throw new Error('Candidate changed the pinned migration journal prefix');
+  return { oldCount: oldFiles.length, candidateCount: candidateFiles.length, addedSql: added.length, oldInventorySha256: canonicalInventoryHash(oldInventory), candidateInventorySha256: canonicalInventoryHash(candidateInventory) };
 }
 
 function run(command, args, cwd) {
@@ -41,10 +64,12 @@ async function port() {
 }
 async function migrationIdentity(dir) {
   const journal = await readFile(path.join(dir, 'meta', '_journal.json'));
-  const files = (await (await import('node:fs/promises')).readdir(dir)).filter((n) => n.endsWith('.sql')).sort();
-  const h = createHash('sha256');
-  for (const name of files) { h.update(name); h.update('\0'); h.update(await readFile(path.join(dir, name))); h.update('\0'); }
-  return { journalHash: sha256(journal), migrationsHash: h.digest('hex') };
+  const fs = await import('node:fs/promises');
+  const names = await fs.readdir(dir);
+  const inventory = {};
+  for (const name of names.filter((n) => n.endsWith('.sql')).sort()) inventory[name] = sha256(await readFile(path.join(dir, name)));
+  inventory['meta/_journal.json'] = sha256(journal);
+  return { journalHash: sha256(journal), inventory, journal: JSON.parse(journal.toString('utf8')) };
 }
 async function main() {
   const [candidateRoot, receiptPath, oldVersion = EXPECTED_OLD_VERSION, oldSRI = EXPECTED_OLD_SRI] = process.argv.slice(2);
@@ -67,6 +92,7 @@ async function main() {
     const oldIndex = path.join(install, 'node_modules/@paperclipai/db/dist/index.js');
     const oldMigrations = path.join(install, 'node_modules/@paperclipai/db/dist/migrations');
     const oldIdentity = await migrationIdentity(oldMigrations);
+    const extension = assertMigrationExtension(oldIdentity.inventory, candidateIdentity.inventory, oldIdentity.journal, candidateIdentity.journal);
     const oldDb = await import(pathToFileURL(oldIndex));
     const candidateDb = await import(pathToFileURL(candidateIndex));
     const oldRequire = createRequire(path.join(install, 'package.json'));
@@ -85,6 +111,13 @@ async function main() {
     await client`insert into companies(id,name) values (${company},'compatibility fixture')`;
     await client`insert into agents(id,company_id,name) values (${agent},${company},'compatibility agent')`;
     await client`insert into agent_wakeup_requests(company_id,agent_id,source,idempotency_key,payload) values (${company},${agent},'manual','task-retry:compatibility-fixture',${client.json({ source: 'upgrade-fixture' })})`;
+    const plugin = '10000000-0000-4000-8000-000000000003';
+    const userDefinition = '10000000-0000-4000-8000-000000000004';
+    await client`insert into plugins(id,plugin_key,package_name,version,manifest_json) values (${plugin},'compat-fixture','@fixture/plugin','1.0.0',${client.json({ id: 'compat-fixture' })})`;
+    await client`insert into user_secret_definitions(id,company_id,key,name) values (${userDefinition},${company},'compat_user','Compatibility user secret')`;
+    await client`insert into company_secrets(id,company_id,scope,key,name) values ('10000000-0000-4000-8000-000000000005',${company},'company','compat_company','Compatibility company secret')`;
+    await client`insert into company_secrets(id,company_id,scope,owner_user_id,user_secret_definition_id,key,name) values ('10000000-0000-4000-8000-000000000006',${company},'user','compat-user',${userDefinition},'compat_user','Compatibility user secret')`;
+    await client`insert into company_secrets(id,company_id,scope,owner_agent_id,owner_plugin_id,key,name) values ('10000000-0000-4000-8000-000000000007',${company},'instance',${agent},${plugin},'compat_instance','Compatibility instance secret')`;
     await candidateDb.applyPendingMigrations(url);
     const state = await candidateDb.inspectMigrations(url);
     if (state.status !== 'upToDate') throw new Error(`Candidate migration state was ${state.status}`);
@@ -92,14 +125,17 @@ async function main() {
     if (fixture.length !== 1 || fixture[0].company_id !== company || fixture[0].agent_id !== agent || fixture[0].payload.source !== 'upgrade-fixture') throw new Error('Representative wakeup row did not survive candidate migrations');
     const unique = await client`select indexdef from pg_indexes where indexname='agent_wakeup_requests_task_retry_idempotency_uq'`;
     const projectOwner = await client`select column_name from information_schema.columns where table_name='company_secrets' and column_name='owner_project_id'`;
+    const secrets = await client`select scope,owner_user_id,user_secret_definition_id,owner_agent_id,owner_project_id,owner_plugin_id from company_secrets where id in ('10000000-0000-4000-8000-000000000005','10000000-0000-4000-8000-000000000006','10000000-0000-4000-8000-000000000007') order by scope`;
     const assertions = [
       { id: 'migration-engine-upgrade', passed: true, detail: 'old package schema upgraded using candidate migration engine' },
       { id: 'task-retry-row-preserved', passed: true, detail: 'company/agent/payload/idempotency data preserved' },
       { id: 'candidate-schema-current', passed: true, detail: 'candidate migration journal reports upToDate' },
       { id: 'migration-specific-invariants', passed: unique.length === 1 && projectOwner.length === 1, detail: 'retry uniqueness index and project-secret owner column present' },
+      { id: 'secret-scope-data-preserved', passed: secrets.length === 3 && secrets.some((s) => s.scope === 'company' && s.owner_user_id === null && s.user_secret_definition_id === null && s.owner_agent_id === null && s.owner_project_id === null && s.owner_plugin_id === null) && secrets.some((s) => s.scope === 'user' && s.owner_user_id === 'compat-user' && s.user_secret_definition_id === userDefinition && s.owner_agent_id === null && s.owner_project_id === null && s.owner_plugin_id === null) && secrets.some((s) => s.scope === 'instance' && s.owner_user_id === null && s.user_secret_definition_id === null && s.owner_agent_id === agent && s.owner_project_id === null && s.owner_plugin_id === plugin), detail: 'company, user, and agent-owned instance secret metadata survived with valid scope shapes' },
+      { id: 'migration-inventory-extension', passed: extension.addedSql === 19, detail: `exact ${extension.oldCount}-file baseline plus ${extension.addedSql} SQL migrations; no baseline SQL changed` },
     ];
     if (assertions.some((a) => !a.passed)) throw new Error('Candidate schema invariants failed');
-    const receipt = makeReceipt({ oldVersion, oldSRI, oldJournalHash: oldIdentity.journalHash, candidateJournalHash: candidateIdentity.journalHash, candidateMigrationHash: candidateIdentity.migrationsHash, assertions });
+    const receipt = makeReceipt({ oldVersion, oldSRI, oldJournalHash: oldIdentity.journalHash, oldMigrationInventoryHash: extension.oldInventorySha256, candidateJournalHash: candidateIdentity.journalHash, candidateMigrationHash: extension.candidateInventorySha256, assertions });
     await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx' });
     process.stdout.write(`${JSON.stringify(receipt)}\n`);
   } finally {
