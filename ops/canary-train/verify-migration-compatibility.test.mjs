@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { assertInventoryBinding, assertMigrationExtension, canonicalInventoryHash, makeReceipt, MIGRATION_INVENTORY_PREFIX, verifySRI } from './verify-migration-compatibility.mjs';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { assertInventoryBinding, assertMigrationExtension, canonicalInventoryHash, makeReceipt, MIGRATION_INVENTORY_PREFIX, resolvePackageDependency, verifySRI } from './verify-migration-compatibility.mjs';
 
 const oldSRI = 'sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg==';
 const hashes = { oldJournalHash: 'a'.repeat(64), oldMigrationInventoryHash: 'd'.repeat(64), candidateJournalHash: 'b'.repeat(64), candidateMigrationHash: 'c'.repeat(64) };
@@ -34,4 +37,23 @@ test('migration inventory hash is canonical and package path prefixes are part o
   assert.equal(assertInventoryBinding(inventory, { expectedCount: 354, expectedSha256: digest, pathPrefix: MIGRATION_INVENTORY_PREFIX }), true);
   assert.throws(() => assertInventoryBinding({ '0000_migration.sql': '0'.repeat(64), ...inventory }, { expectedCount: 355, expectedSha256: canonicalInventoryHash({ '0000_migration.sql': '0'.repeat(64), ...inventory }), pathPrefix: MIGRATION_INVENTORY_PREFIX }), /prefix, count, and hash/);
   assert.throws(() => assertMigrationExtension({ 'old.sql': 'a'.repeat(64) }, {}, { entries: [] }, { entries: [] }), /reviewed 0354 baseline/);
+});
+
+test('old package dependency resolution finds bundled embedded-postgres and hoisted postgres', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'paperclip-old-package-resolution-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const packageRoot = path.join(root, 'node_modules', '@paperclipai', 'db');
+  const entry = path.join(packageRoot, 'dist', 'index.js');
+  const bundled = path.join(packageRoot, 'node_modules', 'embedded-postgres');
+  const hoisted = path.join(root, 'node_modules', 'postgres');
+  await mkdir(path.dirname(entry), { recursive: true });
+  await mkdir(bundled, { recursive: true });
+  await mkdir(hoisted, { recursive: true });
+  await writeFile(entry, '');
+  await writeFile(path.join(bundled, 'package.json'), JSON.stringify({ name: 'embedded-postgres', main: 'index.cjs' }));
+  await writeFile(path.join(bundled, 'index.cjs'), 'module.exports = {};');
+  await writeFile(path.join(hoisted, 'package.json'), JSON.stringify({ name: 'postgres', main: 'index.cjs' }));
+  await writeFile(path.join(hoisted, 'index.cjs'), 'module.exports = {};');
+  assert.equal(resolvePackageDependency(entry, 'embedded-postgres'), path.join(bundled, 'index.cjs'));
+  assert.equal(resolvePackageDependency(entry, 'postgres'), path.join(hoisted, 'index.cjs'));
 });

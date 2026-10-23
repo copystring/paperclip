@@ -42,6 +42,9 @@ export function assertInventoryBinding(inventory, { expectedCount, expectedSha25
   if (files.length !== expectedCount || files.some((name) => !name.startsWith(pathPrefix)) || canonicalInventoryHash(inventory) !== expectedSha256) throw new Error('Migration inventory does not match its bound prefix, count, and hash');
   return true;
 }
+export function resolvePackageDependency(packageEntryPath, dependency) {
+  return createRequire(packageEntryPath).resolve(dependency);
+}
 export function assertMigrationExtension(oldInventory, candidateInventory, oldJournal, candidateJournal) {
   try {
     assertInventoryBinding(oldInventory, { expectedCount: EXPECTED_OLD_INVENTORY_COUNT, expectedSha256: EXPECTED_OLD_INVENTORY_SHA256, pathPrefix: MIGRATION_INVENTORY_PREFIX });
@@ -107,8 +110,7 @@ async function main() {
     const extension = assertMigrationExtension(oldIdentity.inventory, candidateIdentity.inventory, oldIdentity.journal, candidateIdentity.journal);
     const oldDb = await import(pathToFileURL(oldIndex));
     const candidateDb = await import(pathToFileURL(candidateIndex));
-    const oldRequire = createRequire(path.join(install, 'package.json'));
-    const EmbeddedPostgres = (await import(pathToFileURL(oldRequire.resolve('embedded-postgres')))).default;
+    const EmbeddedPostgres = (await import(pathToFileURL(resolvePackageDependency(oldIndex, 'embedded-postgres')))).default;
     const dbDir = path.join(temp, 'pg'); const pgPort = await port();
     pg = new EmbeddedPostgres({ databaseDir: dbDir, user: USER, password: PASSWORD, port: pgPort, persistent: true, initdbFlags: ['--encoding=UTF8', '--locale=C', '--lc-messages=C'] });
     await pg.initialise(); await pg.start();
@@ -116,7 +118,7 @@ async function main() {
     await oldDb.ensurePostgresDatabase(adminUrl, 'paperclip');
     const url = `postgres://${USER}:${PASSWORD}@127.0.0.1:${pgPort}/paperclip`;
     await oldDb.applyPendingMigrations(url);
-    const { default: postgres } = await import(pathToFileURL(oldRequire.resolve('postgres')));
+    const { default: postgres } = await import(pathToFileURL(resolvePackageDependency(oldIndex, 'postgres')));
     client = postgres(url, { max: 1 });
     const company = '10000000-0000-4000-8000-000000000001';
     const agent = '10000000-0000-4000-8000-000000000002';
