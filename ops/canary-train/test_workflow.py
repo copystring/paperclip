@@ -10,6 +10,21 @@ WORKFLOW = ROOT / ".github/workflows/canary-patched.yml"
 
 
 class DependencyCacheWorkflowTests(unittest.TestCase):
+    def test_pull_requests_prove_disposable_migration_fixtures_without_release_jobs(self):
+        job = self.text.split('  migration-fixture-check:\n', 1)[1].split('  assemble:\n', 1)[0]
+        self.assertIn('needs: controller-tests', job)
+        self.assertIn("github.repository == 'copystring/paperclip' && github.event_name == 'pull_request'", job)
+        self.assertIn('runs-on: ubuntu-24.04', job)
+        self.assertIn('persist-credentials: false', job)
+        self.assertIn('build.py prepare', job)
+        self.assertIn('verify-migration-compatibility.mjs', job)
+        self.assertIn('migration-output/provenance.json', job)
+        self.assertIn('retention-days: 1', job)
+        self.assertIn('overwrite: true', job)
+        self.assertNotIn('publish.py', job)
+        self.assertNotIn('contents: write', job)
+        self.assertNotIn('actions/cache/', job)
+
     def test_daily_build_and_instance_timer_have_no_interval_trigger(self):
         self.assertEqual(self.text.count("- cron:"), 1)
         self.assertIn("- cron: '23 3 * * *'", self.text)

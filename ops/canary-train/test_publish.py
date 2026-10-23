@@ -21,7 +21,7 @@ class PublicationTests(unittest.TestCase):
         import hashlib
         inventory = {
             f"node_modules/@paperclipai/db/dist/migrations/{index:04d}_migration.sql": hashlib.sha256(str(index).encode()).hexdigest()
-            for index in range(374)
+            for index in range(375)
         }
         inventory["node_modules/@paperclipai/db/dist/migrations/meta/_journal.json"] = hashlib.sha256(b"journal").hexdigest()
         candidate_hash = hashlib.sha256(json.dumps(dict(sorted(inventory.items())), separators=(",", ":"), sort_keys=True).encode()).hexdigest()
@@ -41,7 +41,7 @@ class PublicationTests(unittest.TestCase):
                 "baselinePackage": {"version": publish.MIGRATION_OLD_VERSION, "integrity": publish.MIGRATION_OLD_SRI},
                 "candidatePackage": {"version": candidate_version, "integrity": candidate_integrity},
                 "baselineFileCount": 354,
-                "candidateFileCount": 375,
+                "candidateFileCount": 376,
                 "upgradeProof": {"passed": True, "runId": 42, "runAttempt": 3, "controllerCommit": "c" * 40, "sourceCommit": "a" * 40, "patchCommit": "b" * 40, "assertions": assertions},
             },
         }
@@ -53,6 +53,10 @@ class PublicationTests(unittest.TestCase):
             changed["migrationCompatibilityReceipt"]["upgradeProof"]["runAttempt"] = 2
             with self.assertRaisesRegex(RuntimeError, "not bound to this exact build"):
                 publish.validate_migration_compatibility(changed, "c" * 40, 42, 3)
+            missing_assertion = json.loads(json.dumps(manifest))
+            missing_assertion["migrationCompatibilityReceipt"]["upgradeProof"]["assertions"].remove("committed-native-recovery-state-migration")
+            with self.assertRaisesRegex(RuntimeError, "missing or duplicate invariant assertions"):
+                publish.validate_migration_compatibility(missing_assertion, "c" * 40, 42, 3)
             changed_inventory = json.loads(json.dumps(manifest))
             changed_inventory["migrations"][0]["sha256"] = "f" * 64
             with self.assertRaisesRegex(RuntimeError, "differs from the tested upgrade receipt"):

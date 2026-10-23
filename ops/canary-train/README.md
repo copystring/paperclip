@@ -1,5 +1,7 @@
 # Canary patch train build controller
 
+Controller pull requests also run the exact migration fixtures on a disposable Linux PostgreSQL database before merge. This CI lane has read-only repository access, prepares the pinned public source, and retains its receipt for one day. It has no publication or production access. The release workflow still repeats the source-bound migration check for its own immutable candidate.
+
 This controller assembles the official synchronized npm canary source with only the reviewed, manifest-pinned pull requests, builds it using the upstream release toolchain, and emits a hash-indexed runtime overlay. The build primitive only produces verified runtime files; the workflow publishes a green release through `publish.py`, and the instance consumer activates it after its local compatibility and idle checks.
 
 ## Commands
@@ -88,6 +90,11 @@ Changed migration inventories remain blocked by default. A local
 inventory hashes and a nonempty `requiredAssertions` list. The release must
 contain a matching `migrationCompatibilityReceipt` from its verified successful
 workflow, including the installed baseline package version and npm integrity.
+The current reviewed transition also requires the isolated fixture assertion
+`committed-native-recovery-state-migration`, which verifies that migration
+0376 clears recovery fields only on committed, unleased rows with recovery
+state, while preserving leases, other phases, null-state rows, timestamps,
+and recovery history.
 The receipt is bound to the workflow run, attempt, controller, source and patched
 commit. Approval alone cannot substitute for that evidence.
 

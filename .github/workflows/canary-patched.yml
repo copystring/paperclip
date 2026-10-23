@@ -35,6 +35,42 @@ jobs:
       - run: node --test ops/canary-train/verify-migration-compatibility.test.mjs ops/canary-train/test_migration_precondition_probe.mjs
       - run: node --test .github/scripts/check-pr-test-coverage.test.mjs
 
+  migration-fixture-check:
+    needs: controller-tests
+    if: github.repository == 'copystring/paperclip' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Prepare source for disposable migration fixtures
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 ops/canary-train/build.py prepare
+          --manifest "$GITHUB_WORKSPACE/ops/canary-train/patches.json"
+          --workspace "$RUNNER_TEMP/migration-source"
+          --output "$RUNNER_TEMP/migration-output"
+      - name: Verify migration fixtures before merge
+        run: |
+          mkdir -p "$RUNNER_TEMP/migration-fixture-receipt"
+          node ops/canary-train/verify-migration-compatibility.mjs \
+            "$RUNNER_TEMP/migration-fixture-receipt/receipt.json" \
+            "$RUNNER_TEMP/migration-source" \
+            "$RUNNER_TEMP/migration-output/provenance.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: canary-pr-migration-compatibility
+          path: ${{ runner.temp }}/migration-fixture-receipt/receipt.json
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
   assemble:
     needs: controller-tests
     if: github.repository == 'copystring/paperclip' && github.event_name != 'pull_request'

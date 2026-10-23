@@ -11,8 +11,8 @@ import { assertInventoryBinding, assertMigrationExtension, assertMigrationExtens
 const oldSRI = 'sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg==';
 const candidateSRI = 'sha512-Ub4gzp005JhteAMeDsOxUXDjbSA7OUg+dqiQ1CGaqqxB+xZpJS+x5ke5N/GkqL3f/a+DOQMDp/ZJzNC6//Uo3Q==';
 const candidateVersion = '2026.1024.0-canary.14';
-const hashes = { oldJournalHash: 'a'.repeat(64), oldMigrationInventoryHash: 'd'.repeat(64), candidateJournalHash: 'b'.repeat(64), candidateMigrationHash: 'c'.repeat(64), sourceMigrationHash: 'c'.repeat(64), sourceMigrationCount: 375, sourceCommit: 'a'.repeat(40), patchCommit: 'f'.repeat(40), patchTree: 'e'.repeat(40) };
-const assertionIds = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'restore-point-checkout-migrations', 'migration-inventory-extension'];
+const hashes = { oldJournalHash: 'a'.repeat(64), oldMigrationInventoryHash: 'd'.repeat(64), candidateJournalHash: 'b'.repeat(64), candidateMigrationHash: 'c'.repeat(64), sourceMigrationHash: 'c'.repeat(64), sourceMigrationCount: 376, sourceCommit: 'a'.repeat(40), patchCommit: 'f'.repeat(40), patchTree: 'e'.repeat(40) };
+const assertionIds = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'restore-point-checkout-migrations', 'committed-native-recovery-state-migration', 'migration-inventory-extension'];
 
 test('SRI verifier accepts the exact tarball and rejects altered bytes', () => {
   const bytes = Buffer.from('fixture');
@@ -170,7 +170,7 @@ test('migration inventory hash is canonical and package path prefixes are part o
   assert.throws(() => assertMigrationExtension({ 'old.sql': 'a'.repeat(64) }, {}, { entries: [] }, { entries: [] }), /reviewed 0354 baseline/);
 });
 
-test('exact reviewed candidate shape allows only the pinned 21-SQL extension', () => {
+test('exact reviewed candidate shape allows only the pinned 22-SQL extension', () => {
   const oldInventory = {};
   const oldEntries = [];
   for (let i = 0; i < 353; i += 1) {
@@ -181,7 +181,7 @@ test('exact reviewed candidate shape allows only the pinned 21-SQL extension', (
   oldInventory[`${MIGRATION_INVENTORY_PREFIX}meta/_journal.json`] = 'f'.repeat(64);
   const candidateInventory = { ...oldInventory };
   const candidateEntries = [...oldEntries];
-  for (let i = 0; i < 21; i += 1) {
+  for (let i = 0; i < 22; i += 1) {
     const tag = String(353 + i).padStart(4, '0');
     candidateInventory[`${MIGRATION_INVENTORY_PREFIX}${tag}_reviewed.sql`] = (i + 1).toString(16).padStart(64, '0');
     candidateEntries.push({ idx: 353 + i, tag, when: 353 + i, breakpoints: true });
@@ -189,11 +189,11 @@ test('exact reviewed candidate shape allows only the pinned 21-SQL extension', (
   const candidateJournal = { entries: candidateEntries };
   candidateInventory[`${MIGRATION_INVENTORY_PREFIX}meta/_journal.json`] = 'e'.repeat(64);
   const candidateSha256 = canonicalInventoryHash(candidateInventory);
-  const result = assertMigrationExtensionShape(oldInventory, candidateInventory, { entries: oldEntries }, candidateJournal, { addedSqlCount: 21, candidateCount: 375, candidateSha256 });
-  assert.equal(result.addedSql, 21);
-  assert.throws(() => assertMigrationExtensionShape(oldInventory, candidateInventory, { entries: oldEntries }, candidateJournal, { addedSqlCount: 19, candidateCount: 375, candidateSha256 }), /add exactly 19 SQL migrations/);
+  const result = assertMigrationExtensionShape(oldInventory, candidateInventory, { entries: oldEntries }, candidateJournal, { addedSqlCount: 22, candidateCount: 376, candidateSha256 });
+  assert.equal(result.addedSql, 22);
+  assert.throws(() => assertMigrationExtensionShape(oldInventory, candidateInventory, { entries: oldEntries }, candidateJournal, { addedSqlCount: 21, candidateCount: 376, candidateSha256 }), /add exactly 21 SQL migrations/);
   const changed = { ...candidateInventory, [`${MIGRATION_INVENTORY_PREFIX}0354_reviewed.sql`]: 'f'.repeat(64) };
-  assert.throws(() => assertMigrationExtensionShape(oldInventory, changed, { entries: oldEntries }, candidateJournal, { addedSqlCount: 21, candidateCount: 375, candidateSha256 }), /exact reviewed package hash/);
+  assert.throws(() => assertMigrationExtensionShape(oldInventory, changed, { entries: oldEntries }, candidateJournal, { addedSqlCount: 22, candidateCount: 376, candidateSha256 }), /exact reviewed package hash/);
 });
 
 test('old package dependency resolution finds bundled embedded-postgres and hoisted postgres', async (t) => {
