@@ -69,4 +69,7 @@ jobs:
           pnpm --dir packages/paperclip-runner run build:rust
       - name: Run only the failing actual PRP boundary
         working-directory: ${{ runner.temp }}/paperclip-source
-        run: pnpm exec vitest run --project @paperclipai/server server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
+        run: |
+          pnpm run preflight:workspace-links
+          pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+          pnpm exec vitest run --project @paperclipai/server server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
