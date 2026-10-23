@@ -1,5 +1,5 @@
 import { notifyExecutionRunWork } from "./execution-control-notifications.js";
-import { hasNonDispatchContradiction, isNonDispatchVerified, matchesNonDispatchSource } from "./non-dispatch-receipt.js";
+import { hasNonDispatchContradiction, isNonDispatchVerified, isUnclaimedRun, matchesNonDispatchSource } from "./non-dispatch-receipt.js";
 import { hasRequiredWorkspaceRecovery, preserveWorkspaceRestoreRecoveryMetadata, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "./workspace-restore-recovery-state.js";
 import { hasUnrestoredRemoteWorkspace, preserveLegacyWorkspaceRestoreSources, type LegacyWorkspaceRestoreSource } from "./legacy-workspace-restore-recovery.js";
 import { isPreDispatchReviewWaitVerified } from "./pre-dispatch-review-wait.js";
@@ -10,7 +10,7 @@ import { claimedAdapterType, hasConversationContinuationPolicy } from "./convers
 import { canonicalExecutionUuid } from "./execution-identity.js";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
-import { environmentLeases, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
+import { caseHandoffs, environmentLeases, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
 import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
@@ -107,6 +107,88 @@ export async function terminalizeLegacyExecution(input: {
     )).for("update");
     if (!current || (current.runtimeMode !== "legacy" && !(input.recordRestoreFailureOnly && current.runtimeMode === "native")) ||
         (!input.recordRestoreFailureOnly && !(input.fromStatuses ?? [run.status]).includes(current.status))) return null;
+    // A Stop may race queue dispatch. The pre-lock snapshot alone cannot prove
+    // that a queued run never acquired execution. Grant bootstrap evidence only
+    // when this transaction still owns the queued row and the exact pending
+    // case handoff that requested the cancellation, with no runtime or lease
+    // ownership having been acquired.
+    const currentResultJson = current.resultJson as Record<string, unknown> | null;
+    const patchedResultJson = patch?.resultJson as Record<string, unknown> | null | undefined;
+    const hasCaseHandoffIntent = [currentResultJson, patchedResultJson].some(value =>
+      typeof value?.caseHandoffId === "string" || value?.caseHandoffYieldStop === true);
+    const queuedHandoffBootstrapCandidate = !input.recordRestoreFailureOnly && Boolean(issueId) && status === "cancelled" &&
+      run.status === "queued" && input.patch?.errorCode === "issue_reassigned" && hasCaseHandoffIntent;
+    let verifiedQueuedHandoffBootstrap = false;
+    if (queuedHandoffBootstrapCandidate && issueId &&
+        current.status === "queued" && current.runtimeMode === "legacy") {
+      const result = { ...current.resultJson, ...patch?.resultJson };
+      const cancellation = result.cancellation as Record<string, unknown> | undefined;
+      const startupCancellation = result.startupCancellation as Record<string, unknown> | undefined;
+      const caseHandoffId = typeof result.caseHandoffId === "string"
+        ? canonicalExecutionUuid(sql`${result.caseHandoffId}`)
+        : null;
+      const [handoff] = caseHandoffId
+        ? await tx.select({ id: caseHandoffs.id }).from(caseHandoffs).where(and(
+            eq(caseHandoffs.companyId, current.companyId),
+            eq(caseHandoffs.sourceRunId, current.id),
+            eq(caseHandoffs.issueId, issueId),
+            eq(caseHandoffs.id, caseHandoffId),
+            eq(caseHandoffs.destinationKind, "agent"),
+            eq(caseHandoffs.state, "awaiting_release"),
+          )).limit(1)
+        : [];
+      const [activeLease] = await tx.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
+        eq(environmentLeases.companyId, current.companyId), eq(environmentLeases.heartbeatRunId, current.id),
+        or(isNull(environmentLeases.releasedAt), eq(environmentLeases.status, "pending_cleanup"),
+          eq(environmentLeases.cleanupStatus, "failed")),
+      )).limit(1);
+      const hasNoExecutionIdentity = [current.startedAt, current.runtimeModeResolvedAt, current.processStartedAt,
+        current.processPid, current.processGroupId, current.nativeIssueId, current.nativeSessionId,
+        current.sessionIdAfter, current.controllerBootId, current.controllerLeaseExpiresAt,
+        current.executionStage, current.runnerInstanceId, current.logRef].every(value => value === null);
+      const isValidControlPlaneCancellation = (value: unknown) => {
+        const candidate = value as Record<string, unknown> | undefined;
+        const initiator = candidate?.initiator as Record<string, unknown> | undefined;
+        const recordedAt = typeof candidate?.recordedAt === "string" ? Date.parse(candidate.recordedAt) : Number.NaN;
+        return candidate?.source === "control_plane" && candidate.expected === true &&
+          initiator?.type === "system" && typeof candidate.reason === "string" &&
+          candidate.reason.trim().length > 0 && Number.isFinite(recordedAt);
+      };
+      const currentCancellation = current.resultJson?.cancellation;
+      const currentStartupCancellation = current.resultJson?.startupCancellation as Record<string, unknown> | undefined;
+      const mergedStartupCancellation = result.startupCancellation as Record<string, unknown> | undefined;
+      const validControlPlaneCancellation = isValidControlPlaneCancellation(cancellation) &&
+        (!currentCancellation || isValidControlPlaneCancellation(currentCancellation)) &&
+        (!currentStartupCancellation || currentStartupCancellation.errorCode === "issue_reassigned") &&
+        mergedStartupCancellation?.errorCode === "issue_reassigned";
+      const hasNoProviderWork = (resultJson: typeof current.resultJson) => isUnclaimedRun({
+        ...current,
+        resultJson: { ...(resultJson ?? {}), startupCancellation: undefined, cancellation: undefined },
+      });
+      const unclaimedCurrent = hasNoProviderWork(current.resultJson);
+      const unclaimedMerged = hasNoProviderWork(result);
+      if (handoff && handoff.id === result.caseHandoffId &&
+          !activeLease && hasNoExecutionIdentity &&
+          unclaimedCurrent && unclaimedMerged && validControlPlaneCancellation &&
+          result.caseHandoffYieldStop === true && result.reassignmentStopRequested === true &&
+          result.reassignmentStopConfirmed === true && startupCancellation?.errorCode === "issue_reassigned" &&
+          cancellation?.source === "control_plane" && cancellation.expected === true &&
+          !hasWorkspaceRestoreFailure(result) && !hasRequiredWorkspaceRecovery(result)) {
+        patch = { ...patch, resultJson: { ...result,
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+        } };
+        verifiedQueuedHandoffBootstrap = true;
+      }
+    }
+    const suppliedExecutionRecovery = (patch?.resultJson as Record<string, unknown> | null | undefined)?.executionRecovery as
+      Record<string, unknown> | undefined;
+    if (queuedHandoffBootstrapCandidate && !verifiedQueuedHandoffBootstrap &&
+        suppliedExecutionRecovery?.kind === "bootstrap" && suppliedExecutionRecovery.providerWorkStarted === false &&
+        patch?.resultJson) {
+      const resultJson = { ...(patch.resultJson as Record<string, unknown>) };
+      delete resultJson.executionRecovery;
+      patch = { ...patch, resultJson };
+    }
     const controllerStillOwnsSettlement = Boolean(
       !input.recordRestoreFailureOnly && current.controllerBootId &&
       current.controllerLeaseExpiresAt && current.controllerLeaseExpiresAt > new Date() &&
@@ -119,6 +201,21 @@ export async function terminalizeLegacyExecution(input: {
         !matchesNonDispatchSource(current, receipt) ||
         !task || (receipt as Record<string, unknown>).issueStatusVersion !== task.statusVersion ||
         await hasNonDispatchContradiction(tx as unknown as Db, current))) return null;
+    if (queuedHandoffBootstrapCandidate && patch?.resultJson !== undefined) {
+      const resultJson = { ...(patch.resultJson ?? current.resultJson ?? {}) };
+      if (current.resultJson?.cancellation) resultJson.cancellation = current.resultJson.cancellation;
+      const lockedStartupCancellation = current.resultJson?.startupCancellation as Record<string, unknown> | undefined;
+      if (lockedStartupCancellation && lockedStartupCancellation.errorCode !== "issue_reassigned")
+        resultJson.startupCancellation = lockedStartupCancellation;
+      patch = { ...patch, resultJson };
+    }
+    const lockedExecutionRecovery = current.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+    const patchedExecutionRecovery = patch?.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+    if (patch?.resultJson !== undefined && lockedExecutionRecovery?.providerWorkStarted === true &&
+        patchedExecutionRecovery?.providerWorkStarted !== true) {
+      patch = { ...patch, resultJson: { ...(patch.resultJson ?? current.resultJson ?? {}),
+        executionRecovery: { ...lockedExecutionRecovery, ...(patchedExecutionRecovery ?? {}), providerWorkStarted: true } } };
+    }
     if (patch?.resultJson !== undefined) patch = { ...patch,
       resultJson: preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,
         input.recordRestoreFailureOnly ? { ...current.resultJson, ...patch.resultJson } : patch.resultJson),
