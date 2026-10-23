@@ -228,6 +228,8 @@ import {
   hasVisibleMonitorSurface,
 } from "../components/IssueMonitorBanner";
 import { IssueScheduledRetryCard } from "../components/IssueScheduledRetryCard";
+import { useRetryNowMutation } from "../hooks/useRetryNowMutation";
+import { waitingSurfaceCheckNowAction } from "@/lib/issue-monitor";
 import { ExternallyConnectedTaskBanner } from "../components/chat/ExternallyConnectedTaskBanner";
 import {
   IssueProperties,
@@ -4748,6 +4750,18 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     },
   });
 
+  // The waiting surface also renders for a scheduled retry with no monitor;
+  // there "Check now" must promote the retry, not trigger a monitor check.
+  const retryScheduledNow = useRetryNowMutation(issueId);
+  const waitingSurfaceIsScheduledRetry =
+    waitingSurfaceCheckNowAction(issue) === "promote-scheduled-retry";
+  const checkWaitingSurfaceNow = waitingSurfaceIsScheduledRetry
+    ? () => retryScheduledNow.mutate()
+    : () => checkIssueMonitorNow.mutate();
+  const checkingWaitingSurfaceNow = waitingSurfaceIsScheduledRetry
+    ? retryScheduledNow.isPending
+    : checkIssueMonitorNow.isPending;
+
   const approvalDecision = useMutation({
     mutationFn: async ({
       approvalId,
@@ -7675,8 +7689,8 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
         issue={issue}
         workProducts={workProducts}
         checkError={checkIssueMonitorNow.error?.message}
-        onCheckNow={() => checkIssueMonitorNow.mutate()}
-        checkingNow={checkIssueMonitorNow.isPending}
+        onCheckNow={checkWaitingSurfaceNow}
+        checkingNow={checkingWaitingSurfaceNow}
       />
 
       {taskChatShellEnabled ? null : (
@@ -8250,8 +8264,8 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                         issue={issue}
                         workProducts={workProducts}
                         checkError={checkIssueMonitorNow.error?.message}
-                        onCheckNow={() => checkIssueMonitorNow.mutate()}
-                        checkingNow={checkIssueMonitorNow.isPending}
+                        onCheckNow={checkWaitingSurfaceNow}
+                        checkingNow={checkingWaitingSurfaceNow}
                       />
                     ) : null
                   }
