@@ -107,6 +107,9 @@ Automated: [paused assignee relevance](../../tests/e2e/completed-task-paused-ass
 uses a real disposable server and paused process agent, with no inference, to
 check both task interfaces. Done and cancelled tasks hide the paused-agent
 warning; reopening restores it. The agent stays paused and no run starts.
+Automated: [task chat](../../ui/src/components/TaskChatThread.test.tsx) verifies that active recovery actions are visible in the current chat interface and use the shared recovery controls. Closed tasks suppress historical recovery, and native execution reconciliation retains its separate guarded path.
+
+Manual: Open a blocked task with an active operator recovery action in the current chat interface. Verify that the recovery explanation and permitted actions appear, that resolving through the existing control persists the requested transition, and that the subsequent run follows the execution policy. A successful run summary alone is not a review decision.
 
 Manual: For a disposable task owned by a legacy agent, have its current run
 assign the task to a human with status In review. Verify that assignment and

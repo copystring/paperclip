@@ -2979,6 +2979,127 @@ describe("agent issue mutation checkout ownership", () => {
     });
   });
 
+  describe("workflow self-handoff", () => {
+    const run = {
+      id: ownerRunId,
+      companyId,
+      agentId: ownerAgentId,
+      runtimeMode: "legacy",
+      status: "running",
+      contextSnapshot: { issueId },
+    };
+    const policy = {
+      stages: [{
+        id: "88888888-8888-4888-8888-888888888888",
+        type: "review",
+        participants: [{ type: "agent", agentId: peerAgentId }],
+      }],
+    };
+    const activeIssue = makeIssue({
+      status: "in_progress",
+      executionRunId: ownerRunId,
+      checkoutRunId: ownerRunId,
+    });
+    const workflowApp = (actor: Record<string, unknown>) => createApp(actor,
+      createRunContextDb({ issueId }, ownerAgentId, ownerRunId, [], true));
+
+    beforeEach(() => {
+      mockIssueService.getById.mockResolvedValue(activeIssue);
+      mockHeartbeatService.getRun.mockResolvedValue(run);
+      mockHeartbeatService.cancelRun.mockResolvedValue({ ...run, status: "cancelled" });
+    });
+
+    it("keeps the exact agent_jwt owner run alive for a validated review-stage handoff", async () => {
+      const res = await request(workflowApp({ ...ownerActor(), source: "agent_jwt" }))
+        .patch(`/api/issues/${issueId}`).send({ status: "in_review", executionPolicy: policy });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({
+        status: "in_review",
+        assigneeAgentId: peerAgentId,
+        actorRunId: ownerRunId,
+        actorRunHandoffId: ownerRunId,
+        executionState: expect.objectContaining({
+          status: "pending",
+          currentParticipant: expect.objectContaining({ type: "agent", agentId: peerAgentId }),
+        }),
+      }), expect.anything());
+    });
+
+    it("keeps the exact reviewer run alive when requesting changes back to its implementer", async () => {
+      const reviewIssue = makeIssue({
+        status: "in_review",
+        assigneeAgentId: peerAgentId,
+        executionRunId: ownerRunId,
+        checkoutRunId: ownerRunId,
+        executionPolicy: policy,
+        executionState: {
+          status: "pending",
+          currentStageId: policy.stages[0].id,
+          currentStageIndex: 0,
+          currentStageType: "review",
+          currentParticipant: { type: "agent", agentId: peerAgentId },
+          returnAssignee: { type: "agent", agentId: ownerAgentId },
+          completedStageIds: [],
+          lastDecisionId: null,
+          lastDecisionOutcome: null,
+          reviewRequest: null,
+          monitor: null,
+        },
+      });
+      const reviewerRun = { ...run, agentId: peerAgentId };
+      mockIssueService.getById.mockResolvedValue(reviewIssue);
+      mockHeartbeatService.getRun.mockResolvedValue(reviewerRun);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...reviewIssue,
+        ...patch,
+      }));
+      const reviewerApp = createApp({
+        type: "agent",
+        agentId: peerAgentId,
+        companyId,
+        source: "agent_jwt",
+        runId: ownerRunId,
+      }, createRunContextDb({ issueId }, [{
+        ...reviewerRun,
+        agentCompanyId: companyId,
+      }]));
+
+      const res = await request(reviewerApp).patch(`/api/issues/${issueId}`)
+        .send({ status: "in_progress", comment: "Needs another pass" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({
+        status: "in_progress",
+        assigneeAgentId: ownerAgentId,
+        actorRunId: ownerRunId,
+        actorRunHandoffId: ownerRunId,
+        executionState: expect.objectContaining({
+          status: "changes_requested",
+          returnAssignee: expect.objectContaining({ type: "agent", agentId: ownerAgentId }),
+        }),
+      }), expect.anything());
+    });
+
+    it.each([
+      ["agent_key", { ...ownerActor(), source: "agent_key" }],
+      ["board", boardActor()],
+      ["another run", { ...ownerActor(), source: "agent_jwt", runId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }],
+    ])("retains the ordinary stop path for %s", async (_label, actor) => {
+      const res = await request(workflowApp(actor))
+        .patch(`/api/issues/${issueId}`).send({ status: "in_review", executionPolicy: policy });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(ownerRunId,
+        "Cancelled before issue reassignment", expect.objectContaining({ errorCode: "issue_reassigned" }));
+      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.not.objectContaining({
+        actorRunHandoffId: ownerRunId,
+      }), expect.anything());
+    });
+  });
+
   describe("task watchdog scope grants", () => {
     const watchdogRunId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab";
     const watchdogReportIssueId = "cccccccc-cccc-4ccc-8ccc-cccccccccccd";

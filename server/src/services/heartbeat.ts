@@ -550,6 +550,7 @@ export { isNonAssigneeWorkspaceBusyRetry };
 // Routes and the scheduler construct separate heartbeatService instances, but
 // they must agree on in-process adapter executions when reaping stale runs.
 const activeRunExecutions = new Set<string>();
+const deferredIssueExecutionReleases = new Map<string, { suppressImmediateRecovery?: boolean }>();
 // A legacy process adapter's signal exit can race the operator cancellation CAS while
 // its owned process group is still being joined. Keep that exit from becoming
 // a successful result (or a competing failure) before Stop settles. This is an
@@ -1417,6 +1418,14 @@ export function heartbeatService(
   }
 
   function releaseIssueExecutionAndPromote(...args: Parameters<typeof runControl.releaseIssueExecutionAndPromote>) {
+    const [run, options] = args;
+    if (activeRunExecutions.has(run.id) && !options?.deferredPostCommitEffects) {
+      const previous = deferredIssueExecutionReleases.get(run.id);
+      deferredIssueExecutionReleases.set(run.id, {
+        suppressImmediateRecovery: Boolean(previous?.suppressImmediateRecovery || options?.suppressImmediateRecovery),
+      });
+      return Promise.resolve();
+    }
     return runControl.releaseIssueExecutionAndPromote(...args);
   }
 
@@ -3858,7 +3867,7 @@ export function heartbeatService(
           });
         }
         await db.update(heartbeatRuns).set({
-          executionStage: sql`case when ${heartbeatRuns.status} = 'cancelled' then 'settled' else ${heartbeatRuns.executionStage} end`,
+          executionStage: "settled",
           controllerLeaseExpiresAt: null,
         }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.runtimeMode, "legacy"),
           eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
@@ -3895,12 +3904,16 @@ export function heartbeatService(
       }
       // Terminalization precedes lease and adapter cleanup. Only now is the
       // owner gone; retry pending input for ordinary completions as well as Stop.
+      let issueExecutionReleasedAfterCleanup = false;
       if (latestRun?.runtimeMode === "legacy" && ["failed", "timed_out"].includes(latestRun.status) &&
           latestRun.contextSnapshot?.explicitUserContinuation) {
         // Re-run the same queue-first recovery decision after cleanup. Its
         // earlier retry request could not authorize work while this executor
         // still held its controller or environment lease.
-        await releaseIssueExecutionAndPromote(latestRun).catch(err => {
+        await releaseIssueExecutionAndPromote(latestRun).then(() => {
+          issueExecutionReleasedAfterCleanup = true;
+          deferredIssueExecutionReleases.delete(run.id);
+        }).catch(err => {
           logger.error({ err, runId: run.id }, "failed to settle explicit continuation after cleanup");
         });
       }
@@ -3910,10 +3923,25 @@ export function heartbeatService(
           eq(agentWakeupRequests.status, "deferred_issue_execution"),
           sql`${agentWakeupRequests.payload}->>'issueId' = ${String(latestRun.contextSnapshot?.issueId)}`,
         )).limit(1);
-        if (pending) await (pending.payload?.queuedCommentInterrupt
-          ? resumeQueuedCommentInterrupt(run.companyId, pending.id)
-          : releaseIssueExecutionAndPromote(latestRun, { suppressImmediateRecovery: true })).catch(err => {
-          logger.error({ err, runId: run.id }, "failed to promote legacy comment queue after cleanup");
+        if (pending) {
+          await (pending.payload?.queuedCommentInterrupt
+            ? resumeQueuedCommentInterrupt(run.companyId, pending.id)
+            : releaseIssueExecutionAndPromote(latestRun, { suppressImmediateRecovery: true })).then(() => {
+            issueExecutionReleasedAfterCleanup = true;
+            deferredIssueExecutionReleases.delete(run.id);
+          }).catch(err => {
+            logger.error({ err, runId: run.id }, "failed to promote legacy comment queue after cleanup");
+          });
+        }
+      }
+      if (latestRun?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(latestRun.status) &&
+          !issueExecutionReleasedAfterCleanup) {
+        const deferredReleaseOptions = deferredIssueExecutionReleases.get(run.id);
+        await releaseIssueExecutionAndPromote(latestRun, deferredReleaseOptions).then(() => {
+          deferredIssueExecutionReleases.delete(run.id);
+        }).catch(err => {
+          deferredIssueExecutionReleases.delete(run.id);
+          logger.error({ err, runId: run.id }, "failed to release issue execution after legacy cleanup");
         });
       }
       if (

@@ -806,6 +806,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           resultJson: persistedResultJson,
           interactionOwnsResponse: Boolean(issueId && readAcceptedTaskContinuationSummary(persistedResultJson) &&
             await hasChatRunOwnedProviderInteraction(db, { companyId: livenessRun.companyId, issueId, runId: livenessRun.id })),
+          runSucceeded: livenessRun.status === "succeeded",
           conversationTurnFinished: isConversation(issueContext) && livenessRun.status === "succeeded"
             && persistedResultJson?.finalizationReasonCode === "conversation_turn_finished",
           existingComment: existingRunComment,

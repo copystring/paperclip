@@ -52,6 +52,7 @@ import {
   readPaperclipRuntimeSkillEntries,
   readPaperclipIssueWorkModeFromContext,
   resolveLegacyPaperclipDesiredSkillNames,
+  PAPERCLIP_OPERATIONAL_SKILL_KEY,
 } from "@paperclipai/adapter-utils/server-utils";
 import { isOpenCodeUnknownSessionError, parseOpenCodeJsonl, createOpenCodeJsonlParser } from "./parse.js";
 import {
@@ -63,8 +64,8 @@ import {
 import { removeMaintainerOnlySkillSymlinks } from "@paperclipai/adapter-utils/server-utils";
 import { apiKeyBillingType } from "@paperclipai/adapter-utils/api-billing-type";
 import { prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
-import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { prepareManagedModelImageInput } from "./model-input.js";
+import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { resolveOpenCodeSkillsHome } from "./skills.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -211,6 +212,59 @@ async function ensureOpenCodeSkillsInjected(
   }
 }
 
+async function resolveVerifiedOperationalSkillDir(input: {
+  sourceDir: string;
+  installedDir: string;
+}): Promise<string> {
+  try {
+    const [sourceRealPath, installedRealPath] = await Promise.all([
+      fs.realpath(input.sourceDir),
+      fs.realpath(input.installedDir),
+    ]);
+    if (sourceRealPath !== installedRealPath) return "";
+    const skillFilePath = path.join(installedRealPath, "SKILL.md");
+    const skillFile = await fs.stat(skillFilePath);
+    if (!skillFile.isFile()) return "";
+    await fs.readFile(skillFilePath, "utf8");
+    return input.installedDir;
+  } catch {
+    return "";
+  }
+}
+
+export async function verifyRemoteOperationalSkillDir(input: {
+  runId: string;
+  target: NonNullable<AdapterExecutionContext["executionTarget"]>;
+  skillDir: string;
+  copyResult: { exitCode: number | null; timedOut: boolean };
+  cwd: string;
+  env: Record<string, string>;
+  timeoutSec: number;
+  graceSec: number;
+  onLog: AdapterExecutionContext["onLog"];
+}): Promise<string> {
+  if (!input.skillDir || input.copyResult.exitCode !== 0 || input.copyResult.timedOut) return "";
+  const skillFilePath = path.posix.join(input.skillDir, "SKILL.md");
+  const quotedSkillFilePath = "'" + skillFilePath.replace(/'/g, "'\\''") + "'";
+  try {
+    const verificationResult = await runAdapterExecutionTargetShellCommand(
+      input.runId,
+      input.target,
+      `test -f ${quotedSkillFilePath} && test -r ${quotedSkillFilePath}`,
+      {
+        cwd: input.cwd,
+        env: input.env,
+        timeoutSec: input.timeoutSec,
+        graceSec: input.graceSec,
+        onLog: input.onLog,
+      },
+    );
+    return verificationResult.exitCode === 0 && !verificationResult.timedOut ? input.skillDir : "";
+  } catch {
+    return "";
+  }
+}
+
 async function buildOpenCodeSkillsDir(config: Record<string, unknown>): Promise<string> {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-skills-"));
   const target = path.join(tmp, "skills");
@@ -264,13 +318,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
   const openCodeSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredOpenCodeSkillNames = resolveLegacyPaperclipDesiredSkillNames(config, openCodeSkillEntries);
+  const operationalPaperclipSkill = openCodeSkillEntries.find(
+    (entry) => entry.key.trim().toLowerCase() === PAPERCLIP_OPERATIONAL_SKILL_KEY,
+  );
+  const canLoadOperationalPaperclipSkill = Boolean(
+    operationalPaperclipSkill &&
+    desiredOpenCodeSkillNames.includes(operationalPaperclipSkill.key) &&
+    !isPaperclipSkillSourceMissing(operationalPaperclipSkill),
+  );
+  let operationalPaperclipSkillDir = "";
   if (!executionTargetIsRemote) {
+    const skillsHome = resolveOpenCodeSkillsHome(config);
     await ensureOpenCodeSkillsInjected(
       onLog,
       openCodeSkillEntries,
       desiredOpenCodeSkillNames,
-      resolveOpenCodeSkillsHome(config),
+      skillsHome,
     );
+    if (canLoadOperationalPaperclipSkill && operationalPaperclipSkill) {
+      operationalPaperclipSkillDir = await resolveVerifiedOperationalSkillDir({
+        sourceDir: operationalPaperclipSkill.source,
+        installedDir: path.join(skillsHome, operationalPaperclipSkill.runtimeName),
+      });
+    }
   }
 
   const envConfig = parseObject(config.env);
@@ -331,13 +401,36 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
+  const deferredCheckGuidance = env.PAPERCLIP_API_URL && env.PAPERCLIP_API_KEY && env.PAPERCLIP_TASK_ID
+    ? [
+        "Paperclip durable deferred-check contract:",
+        "Continue useful work now whenever it does not depend on the pending external result. A detached shell process, PID, log file, or promise to check later is not a durable Paperclip continuation.",
+        "Only when a specific asynchronous external check is still pending and no useful independent work remains, schedule one future, one-shot issue monitor for this task. Name the exact process or log to inspect and the expected success/failure condition in its notes. Do not schedule repetitive polling or an unbounded retry loop.",
+        "Use the existing run-scoped API environment without printing or copying its credential: normalize PAPERCLIP_API_URL by removing a trailing slash and then a trailing /api; send Authorization: Bearer $PAPERCLIP_API_KEY and X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID.",
+        "When scheduling a deferred check, first GET /api/issues/$PAPERCLIP_TASK_ID and retain the complete executionPolicy value (including null). Then PATCH /api/issues/$PAPERCLIP_TASK_ID with a policy-only JSON body whose expectedExecutionPolicy is exactly that snapshot and whose executionPolicy preserves every existing field while adding or replacing monitor. Preserve existing monitor limits and recoveryPolicy; set nextCheckAt to a future ISO-8601 timestamp and notes to the concrete check and expected condition. Scheduling a monitor must not change task status, assignee, reviewer, or approval state; completed work uses the separate complete-task operation below.",
+        "Read the issue back and verify the persisted monitor nextCheckAt and notes before ending this run. Only then report that the task is yielded for that check. The monitor is one-shot: re-arm it only if the check proves another future check is needed, respecting its existing timeout and attempt limits.",
+        "A repeated identical remote PowerShell tool call may return its prior receipt instead of running again. Treat that as a replay, inspect its receipt and current remote state, and do not blindly retry a command with side effects after a timeout. For a fresh observation, use a harmless read-only check that reports the current time; never add a nonce or change arguments to force a possibly mutating command to run again.",
+      ].join("\n")
+    : "";
   const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({
     env,
     config,
+    runtimeMcp: ctx.runtimeMcp?.getServers(),
     targetIsRemote: executionTargetIsRemote,
-    runtimeMcpServers: ctx.runtimeMcp?.getServers() ?? [],
   });
-  const localRuntimeConfigHome = preparedRuntimeConfig.runtimeConfigHome ?? "";
+  const taskToolsGuidance = !executionTargetIsRemote && preparedRuntimeConfig.taskToolsPath
+    && env.PAPERCLIP_API_URL && env.PAPERCLIP_API_KEY && env.PAPERCLIP_TASK_ID
+    ? [
+        "Paperclip prepared task tools (use these instead of reconstructing API JSON):",
+        `Run ${JSON.stringify(process.execPath)} ${JSON.stringify(preparedRuntimeConfig.taskToolsPath)} with one of the following commands. Credentials are taken from the existing run environment, never command arguments.`,
+        "read-document --issue-id ID --key KEY: fetches the complete authorized document body into a private UTF-8 snapshot and returns its revision, hash, first bounded body page, nextOffset and complete. Continue with read-snapshot --file FILE --sha256 HASH --offset NEXT until complete=true. This avoids JSON/display truncation; a first page alone is not a complete read.",
+        "write-document --key KEY --title TITLE --file FILE: saves a UTF-8 Markdown file as a document on the current assigned task, using the existing revision for a conflict-safe PUT, then verifies exact content and revision through GET. Use this for the result report instead of improvising curl, shell heredocs or searching for a document-writing MCP tool. Retain the confirmed revisionId. Missing write tools in MCP discovery does not mean the prepared API-backed write operation is unavailable.",
+        "complete-task --report-key KEY --report-revision REVISION: requests completion bound to the confirmed report and reads the actual task back. If no report exists, complete-task --summary-file FILE first saves that UTF-8 summary as a run-scoped result document with confirmed readback. The completion comment is generated from the verified report reference, never from an old summary's status claims. With an existing report, no summary file is needed. outcome=done with taskDone=true confirms completion; outcome=handed_off with taskDone=false confirms only the native review/approval handoff. Do not claim approval or schedule an executor monitor while another reviewer owns that handoff. No automatic retries occur after errors or uncertain writes; inspect current state first.",
+        "set-monitor --at ISO_TIME --timeout-at ISO_TIME --max-attempts N --notes TEXT: schedules one monitor on the current eligible task, preserving other execution-policy fields and tighter existing budgets, then confirms by readback. It never changes status or automatically retries. After a conflict or uncertain transport outcome inspect current state before any further write. If no useful independent work remains, use this durable path and end the run instead of sleeping or polling.",
+        "These helpers do not validate result claims or grant additional authority. Trace success criteria to the authorized task or primary source. Compute/check derived values with an actual tool invocation; an earlier agent document or a succeeded run is not independent proof.",
+      ].join("\n") : "";
+  const localRuntimeConfigHome =
+    preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
   try {
     const runtimeEnv = Object.fromEntries(
       Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
@@ -366,17 +459,27 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       timeoutSec,
     });
     const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(command, executionTarget, cwd, runtimeEnv);
-    let loggedEnv = buildInvocationEnvForLogs(preparedRuntimeConfig.env, {
+    const loggableRuntimeEnv = { ...preparedRuntimeConfig.env };
+    // These JSON env values can contain provider API keys nested below otherwise
+    // innocuous variable names. Never copy them into invocation metadata.
+    delete loggableRuntimeEnv.OPENCODE_CONFIG_CONTENT;
+    delete loggableRuntimeEnv.PAPERCLIP_OPENCODE_PROVIDERS;
+    delete loggableRuntimeEnv.OPENCODE_AUTH_CONTENT;
+    let loggedEnv = buildInvocationEnvForLogs(loggableRuntimeEnv, {
       runtimeEnv,
       includeRuntimeKeys: ["HOME"],
       resolvedCommand,
     });
     if (!executionTargetIsRemote) {
       await prepareManagedModelImageInput({
-        runId, target: executionTarget, cwd, env: preparedRuntimeConfig.env,
-        model, managed: Boolean(config.managedAiConnection), localEnvironment: runtimeEnv,
+        runId,
+        target: executionTarget,
+        cwd,
+        env: preparedRuntimeConfig.env,
+        model,
+        managed: Boolean(config.managedAiConnection),
+        localEnvironment: runtimeEnv,
       });
-      Object.assign(runtimeEnv, preparedRuntimeConfig.env);
       await ensureOpenCodeModelConfiguredAndAvailable({
         model,
         command,
@@ -469,16 +572,36 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           });
       if (remoteHomeDir && preparedExecutionTargetRuntime.assetDirs.skills) {
         const remoteSkillsDir = path.posix.join(remoteHomeDir, ".claude", "skills");
-        await runAdapterExecutionTargetShellCommand(
+        const copyResult = await runAdapterExecutionTargetShellCommand(
           runId,
           executionTarget,
           `mkdir -p ${JSON.stringify(path.posix.dirname(remoteSkillsDir))} && rm -rf ${JSON.stringify(remoteSkillsDir)} && cp -a ${JSON.stringify(preparedExecutionTargetRuntime.assetDirs.skills)} ${JSON.stringify(remoteSkillsDir)}`,
           { cwd, env: preparedRuntimeConfig.env, timeoutSec, graceSec, onLog },
         );
+        const remoteOperationalSkillDir = operationalPaperclipSkill
+          ? path.posix.join(remoteSkillsDir, operationalPaperclipSkill.runtimeName)
+          : "";
+        if (canLoadOperationalPaperclipSkill && remoteOperationalSkillDir) {
+          operationalPaperclipSkillDir = await verifyRemoteOperationalSkillDir({
+            runId,
+            target: executionTarget,
+            skillDir: remoteOperationalSkillDir,
+            copyResult,
+            cwd,
+            env: preparedRuntimeConfig.env,
+            timeoutSec,
+            graceSec,
+            onLog,
+          });
+        }
       }
       await prepareManagedModelImageInput({
-        runId, target: overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd),
-        cwd, env: preparedRuntimeConfig.env, model, managed: Boolean(config.managedAiConnection),
+        runId,
+        target: overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd),
+        cwd,
+        env: preparedRuntimeConfig.env,
+        model,
+        managed: Boolean(config.managedAiConnection),
       });
       await ensureRemoteOpenCodeModelConfiguredAndAvailable({
         runId,
@@ -506,7 +629,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
       if (paperclipBridge) {
         Object.assign(preparedRuntimeConfig.env, paperclipBridge.env);
-        loggedEnv = buildInvocationEnvForLogs(preparedRuntimeConfig.env, {
+        const sanitizedRuntimeEnv = { ...preparedRuntimeConfig.env };
+        delete sanitizedRuntimeEnv.OPENCODE_CONFIG_CONTENT;
+        delete sanitizedRuntimeEnv.PAPERCLIP_OPENCODE_PROVIDERS;
+        delete sanitizedRuntimeEnv.OPENCODE_AUTH_CONTENT;
+        loggedEnv = buildInvocationEnvForLogs(sanitizedRuntimeEnv, {
           runtimeEnv: Object.fromEntries(
             Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
               (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -517,6 +644,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         });
       }
     }
+
+    const artifactHandoffGuidance =
+      preparedRuntimeConfig.env.PAPERCLIP_API_URL &&
+      preparedRuntimeConfig.env.PAPERCLIP_API_KEY &&
+      preparedRuntimeConfig.env.PAPERCLIP_TASK_ID &&
+      operationalPaperclipSkillDir
+        ? [
+            "Paperclip artifact handoff for this non-native OpenCode run:",
+            "When the task requires an inspectable file deliverable, use the existing run-scoped Paperclip API authority through the operational Paperclip skill. The absence of an MCP tool named for uploading files does not mean this authorized path is unavailable.",
+            `The loaded operational skill directory is ${operationalPaperclipSkillDir}. Resolve its scripts/paperclip-upload-artifact.sh helper and references/artifacts.md relative to that directory, not the task workspace or cwd/scripts. Use the helper and verify the resulting attachment or work product through Paperclip readback; consult the reference if the helper is missing, fails, or its result is ambiguous, and report the concrete operation/error before claiming a capability blocker.`,
+            "Do not print or copy credentials. This adapter does not support the native-only register_deliverable tool. Follow the existing status, review, approval, stop, and budget requirements; this guidance grants no additional authority.",
+          ].join("\n")
+        : "";
 
     const runtimeSessionParams = parseObject(runtime.sessionParams);
     const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
@@ -602,6 +742,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
       const basePrompt = joinPromptSections([
         instructionsPrefix,
+        deferredCheckGuidance,
+        artifactHandoffGuidance,
+        taskToolsGuidance,
         renderedBootstrapPrompt,
         wakePrompt,
         taskContextNote,
@@ -769,9 +912,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const parsedError = typeof attempt.parsed.errorMessage === "string" ? attempt.parsed.errorMessage.trim() : "";
       const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
       const rawExitCode = attempt.proc.exitCode;
-      const synthesizedExitCode = parsedError && (rawExitCode ?? 0) === 0 ? 1 : rawExitCode;
+      const emptyCompletion = rawExitCode === 0 && !attempt.proc.signal && !parsedError
+        && !attempt.parsed.summary.trim() && !attempt.parsed.hasCompletedToolAction;
+      const synthesizedExitCode = (parsedError || emptyCompletion) && (rawExitCode ?? 0) === 0 ? 1 : rawExitCode;
       const fallbackErrorMessage =
         parsedError ||
+        (emptyCompletion ? "OpenCode completed without an assistant response or completed tool action" : "") ||
         stderrLine ||
         `OpenCode exited with code ${synthesizedExitCode ?? -1}`;
       const modelId = model || null;
@@ -785,9 +931,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         usageBasis: "per_run",
         errorMessage: (synthesizedExitCode ?? 0) === 0 ? null : fallbackErrorMessage,
         // Forward the transport-level error code from the run-disposition seam.
-        // A lost duplex control channel surfaces the typed `duplex_channel_lost`
-        // code; every other result carries no code here.
-        errorCode: attempt.proc.errorCode ?? null,
+        // Preserve transport failures; otherwise identify empty completions
+        // separately so recovery never mistakes a silent provider for success.
+        errorCode: attempt.proc.errorCode ?? (emptyCompletion ? "opencode_empty_response" : null),
         usage: attempt.parsed.usageReported ? attempt.parsed.usage : undefined,
         sessionId: resolvedSessionId,
         sessionParams: resolvedSessionParams,
