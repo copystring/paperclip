@@ -519,7 +519,7 @@ class CandidateTests(unittest.TestCase):
                 d._migration_diff(old, candidate, item)
 
     def test_migration_probe_requires_hash_bound_runtime_and_readonly_proofs(self):
-        for alteration in (None, "binding", "live", "old-boot", "candidate-boot"):
+        for alteration in (None, "binding", "production-binding", "live", "old-boot", "candidate-boot"):
             with self.subTest(alteration=alteration), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 probe = root / "probe.mjs"
@@ -542,6 +542,7 @@ class CandidateTests(unittest.TestCase):
                                "candidateInventorySha256": context["candidateInventorySha256"],
                                "activeFingerprintSha256": context["activeFingerprintSha256"],
                                "candidateManifestSha256": context["candidateManifestSha256"],
+                               "productionIdentitySha256": context["productionIdentitySha256"],
                                "livePreconditions": {"passed": True},
                                "oldApplicationBootProof": {"passed": True,
                                    "databaseInventorySha256": context["candidateInventorySha256"]},
@@ -549,6 +550,8 @@ class CandidateTests(unittest.TestCase):
                                    "databaseInventorySha256": context["candidateInventorySha256"]}}
                     if alteration == "binding":
                         receipt["activeFingerprintSha256"] = "0" * 64
+                    elif alteration == "production-binding":
+                        receipt["productionIdentitySha256"] = "0" * 64
                     elif alteration == "live":
                         receipt["livePreconditions"]["passed"] = False
                     elif alteration == "old-boot":
@@ -1123,6 +1126,30 @@ class ActivationTests(unittest.TestCase):
             self.assertEqual(json.loads((cli / "install.json").read_text()), previous)
             self.assertEqual(calls, [])
             self.assertEqual(released, ["owned"])
+
+    def test_production_identity_change_after_probe_defers_without_cutover(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli, old, candidate, current, previous = self.make_install(root)
+            calls = []
+            d = self.configured(root, lambda *a, **k: calls.append(a))
+            diff = d._migration_diff(old, candidate)
+            # Compatibility validation has its own real-inventory tests. This
+            # fixture isolates the last production identity CAS before cutover.
+            diff.update(added=["reviewed-new-migration"], compatibility={
+                "status": "needsRuntimeCompatibility", "manifestSha256": "bound"})
+            d._migration_diff = lambda *a: diff
+            d._verify_owned_candidate = lambda *a: None
+            d.c["hooks"] = [{"kind": deploy.MIGRATION_PROBE_KIND}]
+            before = {"productionServerPid": 42}
+            d._run_migration_precondition_probe = lambda *a: {
+                "productionIdentitySha256": d._manifest_identity(before)}
+            d._production_probe_context = lambda *a: {"productionServerPid": 43}
+            with self.assertRaisesRegex(deploy.DeployError, "Production configuration or process changed"):
+                d.activate(candidate, self.manifest(), diff, "token")
+            self.assertEqual(current.resolve(), old.resolve())
+            self.assertEqual(json.loads((cli / "install.json").read_text()), previous)
+            self.assertEqual(calls, [])
 
     def test_restart_rejection_restores_and_restarts_previous_install(self):
         with tempfile.TemporaryDirectory() as tmp:

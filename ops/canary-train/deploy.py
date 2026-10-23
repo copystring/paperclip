@@ -1079,7 +1079,9 @@ class Deployer:
             "candidatePayloadPath": str(candidate),
         }
         active_receipt = previous.get("patchedRelease") or {}
-        context = {**expected, **self._production_probe_context(probe),
+        production_context = self._production_probe_context(probe)
+        expected["productionIdentitySha256"] = self._manifest_identity(production_context)
+        context = {**expected, **production_context,
                    "activeProtectedFiles": active_fingerprint,
                    "activeProtectedRoots": active_receipt.get("protectedRoots") or self.c.get("activeRoots") or []}
         # The registered script owns its read-only production query and its
@@ -1121,6 +1123,14 @@ class Deployer:
             if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(self.home.resolve()):
                 raise DeployError("Migration probe production configuration is outside the registered home")
             paths[key] = str(path.resolve())
+            def identity():
+                info = path.stat()
+                return [str(value) for value in (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_mode)]
+            before = identity()
+            digest = hash_file(path)
+            if identity() != before:
+                raise DeployError("Migration probe production configuration changed while reading")
+            paths[key + "Identity"] = {"stat": before, "sha256": digest}
         service = self.c.get("serviceName", "paperclip")
         if not isinstance(service, str) or not re.fullmatch(r"[A-Za-z0-9_.@-]+", service):
             raise DeployError("Migration probe service identity is invalid")
@@ -1347,6 +1357,7 @@ class Deployer:
         owner = None
         cutover_attempted = False
         restart_attempted = False
+        migration_probe_receipt = None
         try:
             has_migration_changes = any(migration_diff.get(key) for key in ("added", "changed", "removed"))
             if has_migration_changes:
@@ -1380,7 +1391,7 @@ class Deployer:
             self._verify_runner_release_assets(candidate, manifest)
             if has_migration_changes:
                 self._verify_owned_candidate(candidate, manifest)
-                self._run_migration_precondition_probe(old_target, candidate, manifest, migration_diff, previous)
+                migration_probe_receipt = self._run_migration_precondition_probe(old_target, candidate, manifest, migration_diff, previous)
                 self._verify_owned_candidate(candidate, manifest)
             # The probe runs immediately before cutover. Repeat the active and
             # candidate inventory CAS after it to close any concurrent-change
@@ -1392,6 +1403,11 @@ class Deployer:
                     _file_inventory(candidate, MIGRATION_ROOT.rstrip("/")) != migration_diff.get("inventory")):
                 raise DeployError("Migration inventory changed during precondition check")
             self.verify_owned_drain(token, owner)
+            if migration_probe_receipt is not None:
+                probe = next(hook for hook in self.c["hooks"] if hook.get("kind") == MIGRATION_PROBE_KIND)
+                if (self._manifest_identity(self._production_probe_context(probe)) !=
+                        migration_probe_receipt.get("productionIdentitySha256")):
+                    raise DeployError("Production configuration or process changed during migration precondition check")
             # The symlink and install receipt are two coordinated pieces of
             # state; mark cutover before either is mutated so partial writes
             # are always repaired on failure.
