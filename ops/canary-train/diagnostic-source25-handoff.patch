@@ -132,7 +132,7 @@ index 675f46d1e..11d734d96 100644
            : [];
          const confirmedAssignmentHandoffWakeId = assignmentHandoffWake?.id ?? null;
 diff --git a/server/src/services/legacy-execution-recovery.ts b/server/src/services/legacy-execution-recovery.ts
-index cec15ef9b..e583390d4 100644
+index cec15ef9b..128e627c7 100644
 --- a/server/src/services/legacy-execution-recovery.ts
 +++ b/server/src/services/legacy-execution-recovery.ts
 @@ -1,5 +1,5 @@
@@ -257,7 +257,7 @@ index cec15ef9b..e583390d4 100644
 +    if (patch?.resultJson !== undefined && lockedExecutionRecovery?.providerWorkStarted === true &&
 +        patchedExecutionRecovery?.providerWorkStarted !== true) {
 +      patch = { ...patch, resultJson: { ...(patch.resultJson ?? current.resultJson ?? {}),
-+        executionRecovery: { ...lockedExecutionRecovery, ...(patchedExecutionRecovery ?? {}), providerWorkStarted: true } };
++        executionRecovery: { ...lockedExecutionRecovery, ...(patchedExecutionRecovery ?? {}), providerWorkStarted: true } } };
 +    }
      if (patch?.resultJson !== undefined) patch = { ...patch,
        resultJson: preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,
