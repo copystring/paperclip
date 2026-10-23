@@ -548,6 +548,10 @@ export { isNonAssigneeWorkspaceBusyRetry };
 // Routes and the scheduler construct separate heartbeatService instances, but
 // they must agree on in-process adapter executions when reaping stale runs.
 const activeRunExecutions = new Set<string>();
+// Tracks the final settlement tail after adapter and lease cleanup. The live
+// owner can be gone while issue release, delivery, or queue promotion remains.
+const settlingRunExecutions = new Set<string>();
+const deferredIssueExecutionReleases = new Map<string, { suppressImmediateRecovery?: boolean }>();
 // A legacy process adapter's signal exit can race the operator cancellation CAS while
 // its owned process group is still being joined. Keep that exit from becoming
 // a successful result (or a competing failure) before Stop settles. This is an
@@ -1412,8 +1416,22 @@ export function heartbeatService(
     return runControl.cancelBudgetScopeWork(...args);
   }
 
-  function releaseIssueExecutionAndPromote(...args: Parameters<typeof runControl.releaseIssueExecutionAndPromote>) {
-    return runControl.releaseIssueExecutionAndPromote(...args);
+  async function releaseIssueExecutionAndPromote(...args: Parameters<typeof runControl.releaseIssueExecutionAndPromote>) {
+    const [run, options] = args;
+    const activeRun = !options?.deferredPostCommitEffects && activeRunExecutions.has(run.id)
+      ? await getRun(run.id)
+      : null;
+    // The deferred replay below belongs to legacy process/lease cleanup. Native
+    // completion owns durable finalization and has no matching post-cleanup
+    // replay, so a native release must not be deferred here.
+    if (activeRunExecutions.has(run.id) && activeRun?.runtimeMode === "legacy" && !options?.deferredPostCommitEffects) {
+      const previous = deferredIssueExecutionReleases.get(run.id);
+      deferredIssueExecutionReleases.set(run.id, {
+        suppressImmediateRecovery: Boolean(previous?.suppressImmediateRecovery || options?.suppressImmediateRecovery),
+      });
+      return;
+    }
+    await runControl.releaseIssueExecutionAndPromote(...args);
   }
 
   function releaseEnvironmentLeasesForRun(...args: Parameters<typeof runControl.releaseEnvironmentLeasesForRun>) {
@@ -3654,272 +3672,296 @@ export function heartbeatService(
         });
       }
     } finally {
-      let caseHandoffCleanupSettled = false;
-      await instructionWorkingCopy?.nativeInstructionReservation?.release().catch(error => logger.warn({ runId: run.id, err: error }, "Managed warm session preparation cleanup failed"));
-      if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
-      let latestRun = await getRun(run.id).catch(() => null);
       try {
-        if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
-          await writeExecutionControl(db, DELIVERY_QUEUES.executionFinalization, tx => tx
-            .update(heartbeatRuns)
-            .set({ executionControlDeadlineAt: null })
-            .where(eq(heartbeatRuns.id, run.id)));
-        }
-        nativeOwnershipHeld =
-          nativeOwnershipHeld ||
-          Boolean(latestRun && isNativeRunnerOwnershipHeld(latestRun));
-        // Trace capture is debug-only and must settle independently of every
-        // provider outcome. Adapter/setup failures used to skip the success-path
-        // finalizer, leaving metadata permanently stuck at `capturing` even when
-        // runnerd had already closed (or never managed to write) its sidecar.
-        // Same-run native resumes retain the open capture until the resumed
-        // execution reaches a true terminal boundary.
-        if (
-          providerTraceCapture &&
-          !providerTraceFinalized &&
-          !nativeSessionResumeScheduled
-        ) {
-          try {
-            await traceStore.finalize(run.id, run.companyId);
-            providerTraceFinalized = true;
-          } catch (traceFinalizeError) {
-            logger.warn(
-              { err: traceFinalizeError, runId: run.id },
-              "provider trace finalization failed during heartbeat teardown",
+        let caseHandoffCleanupSettled = false;
+        await instructionWorkingCopy?.nativeInstructionReservation?.release().catch(error => logger.warn({ runId: run.id, err: error }, "Managed warm session preparation cleanup failed"));
+        if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
+        let latestRun = await getRun(run.id).catch(() => null);
+        try {
+          if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
+            await writeExecutionControl(db, DELIVERY_QUEUES.executionFinalization, tx => tx
+              .update(heartbeatRuns)
+              .set({ executionControlDeadlineAt: null })
+              .where(eq(heartbeatRuns.id, run.id)));
+          }
+          nativeOwnershipHeld =
+            nativeOwnershipHeld ||
+            Boolean(latestRun && isNativeRunnerOwnershipHeld(latestRun));
+          // Trace capture is debug-only and must settle independently of every
+          // provider outcome. Adapter/setup failures used to skip the success-path
+          // finalizer, leaving metadata permanently stuck at `capturing` even when
+          // runnerd had already closed (or never managed to write) its sidecar.
+          // Same-run native resumes retain the open capture until the resumed
+          // execution reaches a true terminal boundary.
+          if (
+            providerTraceCapture &&
+            !providerTraceFinalized &&
+            !nativeSessionResumeScheduled
+          ) {
+            try {
+              await traceStore.finalize(run.id, run.companyId);
+              providerTraceFinalized = true;
+            } catch (traceFinalizeError) {
+              logger.warn(
+                { err: traceFinalizeError, runId: run.id },
+                "provider trace finalization failed during heartbeat teardown",
+              );
+            }
+          }
+          // Close the invariant "environment lease released implies the run is
+          // terminal". When the teardown reaches this point with the run still
+          // running or queued, force a terminal status before the lease is
+          // released, so the UI never shows a finished task as "Live".
+          if (
+            latestRun &&
+            !nativeSessionResumeScheduled &&
+            !nativeWorkspaceFinalizeScheduled &&
+            !nativeOwnershipHeld
+          ) {
+            latestRun = await terminalizeRunOnLeaseRelease(latestRun).catch(
+              (terminalizeErr) => {
+                logger.error(
+                  { err: terminalizeErr, runId: run.id },
+                  "failed to terminalize run before environment lease release",
+                );
+                return latestRun;
+              },
             );
           }
-        }
-        // Close the invariant "environment lease released implies the run is
-        // terminal". When the teardown reaches this point with the run still
-        // running or queued, force a terminal status before the lease is
-        // released, so the UI never shows a finished task as "Live".
-        if (
-          latestRun &&
-          !nativeSessionResumeScheduled &&
-          !nativeWorkspaceFinalizeScheduled &&
-          !nativeOwnershipHeld
-        ) {
-          latestRun = await terminalizeRunOnLeaseRelease(latestRun).catch(
-            (terminalizeErr) => {
-              logger.error(
-                { err: terminalizeErr, runId: run.id },
-                "failed to terminalize run before environment lease release",
-              );
-              return latestRun;
-            },
-          );
-        }
-        // Warm retention is earned only by a fully successful turn. A failed,
-        // cancelled, or timed-out run stops the reusable sandbox so the next
-        // acquisition must revalidate and explicitly resume it.
-        nativeOwnershipHeld =
-          nativeOwnershipHeld ||
-          Boolean(latestRun && isNativeRunnerOwnershipHeld(latestRun));
-        providerResourceDispositionForRun =
-          providerResourceDispositionForTerminalRun(
-            providerResourceDispositionForRun,
-            latestRun?.status,
-          );
-        if (
-          !nativeSessionResumeScheduled &&
-          !nativeWorkspaceFinalizeScheduled &&
-          !nativeOwnershipHeld
-        ) {
-          // Keep launchers during same-run recovery. At a terminal boundary all
-          // operations have settled; clean before the remote lease can be stopped.
+          // Warm retention is earned only by a fully successful turn. A failed,
+          // cancelled, or timed-out run stops the reusable sandbox so the next
+          // acquisition must revalidate and explicitly resume it.
+          nativeOwnershipHeld =
+            nativeOwnershipHeld ||
+            Boolean(latestRun && isNativeRunnerOwnershipHeld(latestRun));
+          providerResourceDispositionForRun =
+            providerResourceDispositionForTerminalRun(
+              providerResourceDispositionForRun,
+              latestRun?.status,
+            );
           if (
-            githubLauncherLocation &&
+            !nativeSessionResumeScheduled &&
+            !nativeWorkspaceFinalizeScheduled &&
+            !nativeOwnershipHeld
+          ) {
+            // Keep launchers during same-run recovery. At a terminal boundary all
+            // operations have settled; clean before the remote lease can be stopped.
+            if (
+              githubLauncherLocation &&
+              latestRun &&
+              isHeartbeatRunTerminalStatus(latestRun.status)
+            ) {
+              await cleanupGitHubOperationLaunchers(githubLauncherLocation).catch(
+                (err) => {
+                  logger.warn(
+                    { err, runId: run.id },
+                    "failed to clean managed GitHub launchers",
+                  );
+                },
+              );
+            }
+            // A retained or unverified process stays above this release boundary.
+            // If no stopped-copy capture occurred, preserve an explicit loss report.
+            await instructionWorkingCopy?.releaseWarmInstructionPreparation?.();
+            const uncapturedInstructions = await instructionCopies.reportUnavailable(run.companyId, run.id);
+            if (uncapturedInstructions?.state === "unavailable") {
+              await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
+                message: "Instruction edits could not be recovered before environment release. No instruction save is claimed.",
+                payload: { state: "unavailable", code: uncapturedInstructions.errorCode } });
+            }
+            await withAdapterExecutionPhase(executionPhaseContext, "instruction_cleanup", releaseInstructionCopy);
+            await withAdapterExecutionPhase(executionPhaseContext, "lease_release", () => releaseEnvironmentLeasesForRun({
+              runId: run.id,
+              companyId: run.companyId,
+              agentId: run.agentId,
+              status: latestRun?.status,
+              failureReason: latestRun?.error ?? undefined,
+              providerResourceDisposition: providerResourceDispositionForRun,
+              nativeLifecycleTelemetry: nativeLifecycleTelemetryForRun,
+            }));
+            await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
+            caseHandoffCleanupSettled = true;
+          }
+          if (
+            runScratch &&
             latestRun &&
             isHeartbeatRunTerminalStatus(latestRun.status)
           ) {
-            await cleanupGitHubOperationLaunchers(githubLauncherLocation).catch(
-              (err) => {
-                logger.warn(
-                  { err, runId: run.id },
-                  "failed to clean managed GitHub launchers",
-                );
-              },
-            );
-          }
-          // A retained or unverified process stays above this release boundary.
-          // If no stopped-copy capture occurred, preserve an explicit loss report.
-          await instructionWorkingCopy?.releaseWarmInstructionPreparation?.();
-          const uncapturedInstructions = await instructionCopies.reportUnavailable(run.companyId, run.id);
-          if (uncapturedInstructions?.state === "unavailable") {
-            await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
-              message: "Instruction edits could not be recovered before environment release. No instruction save is claimed.",
-              payload: { state: "unavailable", code: uncapturedInstructions.errorCode } });
-          }
-          await withAdapterExecutionPhase(executionPhaseContext, "instruction_cleanup", releaseInstructionCopy);
-          await withAdapterExecutionPhase(executionPhaseContext, "lease_release", () => releaseEnvironmentLeasesForRun({
-            runId: run.id,
-            companyId: run.companyId,
-            agentId: run.agentId,
-            status: latestRun?.status,
-            failureReason: latestRun?.error ?? undefined,
-            providerResourceDisposition: providerResourceDispositionForRun,
-            nativeLifecycleTelemetry: nativeLifecycleTelemetryForRun,
-          }));
-          await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
-          caseHandoffCleanupSettled = true;
-        }
-        if (
-          runScratch &&
-          latestRun &&
-          isHeartbeatRunTerminalStatus(latestRun.status)
-        ) {
-          const scratchForCleanup = runScratch;
-          let scratchCleanup: Awaited<
-            ReturnType<typeof cleanupHeartbeatRunScratch>
-          > | null = null;
-          try {
-            scratchCleanup = await cleanupHeartbeatRunScratch({
-              scratch: scratchForCleanup,
-              processGroupId: latestRun.processGroupId,
-              isProcessGroupAlive,
-              beforeRemove: caseHandoffCleanupSettled && latestRun.runtimeMode === "legacy"
-                ? () => recordLegacyCaseHandoffCleanupVerified(db, { runId: run.id, controllerBootId: legacyControllerBootId, scratch: scratchForCleanup })
-                : undefined,
-            });
-          } catch (scratchCleanupError) {
-            caseHandoffCleanupSettled = false;
-            logger.warn(
-              {
-                err: scratchCleanupError,
-                runId: run.id,
-                scratchDir: scratchForCleanup.dir,
-              },
-              "failed to clean heartbeat run scratch directory",
-            );
-            await appendRunEvent(latestRun, {
-              eventType: "error",
-              stream: "system",
-              level: "warn",
-              message: "run scratch cleanup failed",
-              payload: {
-                dir: scratchForCleanup.dir,
-                error:
-                  scratchCleanupError instanceof Error
-                    ? scratchCleanupError.message
-                    : String(scratchCleanupError),
-              },
-            }).catch(() => undefined);
-          }
-          if (scratchCleanup) {
-            // Scratch cleanup verifies the owned process group, including
-            // grandchildren. The main adapter's exit is not this proof.
-            if (!scratchCleanup.removed) caseHandoffCleanupSettled = false;
-            await appendRunEvent(latestRun, {
-              eventType: "lifecycle",
-              stream: "system",
-              level: scratchCleanup.removed ? "info" : "warn",
-              message: scratchCleanup.removed
-                ? "run scratch cleaned"
-                : `run scratch cleanup skipped: ${scratchCleanup.reason}`,
-              payload: scratchCleanup,
-            }).catch((scratchCleanupEventError) => {
+            const scratchForCleanup = runScratch;
+            let scratchCleanup: Awaited<
+              ReturnType<typeof cleanupHeartbeatRunScratch>
+            > | null = null;
+            try {
+              scratchCleanup = await cleanupHeartbeatRunScratch({
+                scratch: scratchForCleanup,
+                processGroupId: latestRun.processGroupId,
+                isProcessGroupAlive,
+                beforeRemove: caseHandoffCleanupSettled && latestRun.runtimeMode === "legacy"
+                  ? () => recordLegacyCaseHandoffCleanupVerified(db, { runId: run.id, controllerBootId: legacyControllerBootId, scratch: scratchForCleanup })
+                  : undefined,
+              });
+            } catch (scratchCleanupError) {
+              caseHandoffCleanupSettled = false;
               logger.warn(
                 {
-                  err: scratchCleanupEventError,
+                  err: scratchCleanupError,
                   runId: run.id,
                   scratchDir: scratchForCleanup.dir,
                 },
-                "failed to record heartbeat run scratch cleanup event",
+                "failed to clean heartbeat run scratch directory",
               );
+              await appendRunEvent(latestRun, {
+                eventType: "error",
+                stream: "system",
+                level: "warn",
+                message: "run scratch cleanup failed",
+                payload: {
+                  dir: scratchForCleanup.dir,
+                  error:
+                    scratchCleanupError instanceof Error
+                      ? scratchCleanupError.message
+                      : String(scratchCleanupError),
+                },
+              }).catch(() => undefined);
+            }
+            if (scratchCleanup) {
+              // Scratch cleanup verifies the owned process group, including
+              // grandchildren. The main adapter's exit is not this proof.
+              if (!scratchCleanup.removed) caseHandoffCleanupSettled = false;
+              await appendRunEvent(latestRun, {
+                eventType: "lifecycle",
+                stream: "system",
+                level: scratchCleanup.removed ? "info" : "warn",
+                message: scratchCleanup.removed
+                  ? "run scratch cleaned"
+                  : `run scratch cleanup skipped: ${scratchCleanup.reason}`,
+                payload: scratchCleanup,
+              }).catch((scratchCleanupEventError) => {
+                logger.warn(
+                  {
+                    err: scratchCleanupEventError,
+                    runId: run.id,
+                    scratchDir: scratchForCleanup.dir,
+                  },
+                  "failed to record heartbeat run scratch cleanup event",
+                );
+              });
+            }
+          }
+          if (latestRun?.status === "interrupted" && latestRun.errorCode === "server_shutdown_interrupted") {
+            latestRun = await settleInterruptedNativeBootstrap(db, { run: latestRun,
+              providerDispatchStarted: legacyAdapterEntered || nativeDispatchStarted || nativeOwnershipHeld,
+            }) ?? latestRun;
+          }
+          if (latestRun?.status === "cancelled" && !nativeDispatchStarted && !nativeOwnershipHeld &&
+              (latestRun.runtimeMode === "native" ||
+                parseObject(latestRun.resultJson?.startupCancellation).beforeNativeSelection === true)) {
+            // This executor has finished preparation and lease cleanup without
+            // handing off to native execution. Keep a durable receipt for admission
+            // after a restart; cleanup receipts are independently rechecked there.
+            await db.update(heartbeatRuns).set({
+              resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
+                ${JSON.stringify({ startupPreparationSettledAt: new Date().toISOString() })}::jsonb`,
+            }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
+          }
+          await db.update(heartbeatRuns).set({
+            executionStage: "settled",
+            controllerLeaseExpiresAt: null,
+          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.runtimeMode, "legacy"),
+            eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+            inArray(heartbeatRuns.status, ["succeeded", "failed", "cancelled", "timed_out", "interrupted"])));
+
+          latestRun = await getRun(run.id).catch(() => null);
+          if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status) && !isNativeRunnerOwnershipHeld(latestRun)) {
+            await appendRunEvent(run, { eventType: "lifecycle", stream: "system", level: "info", message: "task.run.measured",
+              payload: { phase: "task.run.measured", durationMs: Date.now() - (latestRun.startedAt ?? latestRun.createdAt).getTime(),
+                outcome: latestRun.status, durableSettlement: true } }).catch(error => logger.warn({ runId: run.id, error }, "Could not record terminal run duration"));
+          }
+        } finally {
+          controllerLease.stop();
+          settlingRunExecutions.add(run.id);
+          activeRunExecutions.delete(run.id);
+          // A failed owned Stop remains visible until this exact executor settles,
+          // including a graceful exit result arriving after the cancellation error.
+          // It is never retained beyond the active execution's cleanup.
+          failedProcessRunCancellations.delete(run.id);
+          executionControl.finish();
+          if (adapterExecutionControls.get(run.id) === executionControl) {
+            adapterExecutionControls.delete(run.id);
+          }
+        }
+        if (latestRun) await reconcileMuseNativeTerminalRun(db, latestRun);
+        // Scratch preparation is optional. Its removal cannot be the only proof
+        // that a local legacy adapter's closed-stdio descendants stopped.
+        if (caseHandoffCleanupSettled && latestRun?.runtimeMode === "legacy" && legacyLocalAdapterEntered) {
+          caseHandoffCleanupSettled = hasStoppedLocalProcessTree(latestRun);
+        }
+        if (caseHandoffCleanupSettled && latestRun && !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled &&
+            !nativeOwnershipHeld && isHeartbeatRunTerminalStatus(latestRun.status)) {
+          const handoff = await pendingCaseHandoffForRun(db, run.id);
+          if (handoff) await recordCaseHandoffExecutionReleased(db, run.id, handoff.issueId);
+        }
+        // Terminalization precedes lease and adapter cleanup. Only now is the
+        // owner gone; retry pending input for ordinary completions as well as Stop.
+        let issueExecutionReleasedAfterCleanup = false;
+        if (latestRun?.runtimeMode === "legacy" && ["failed", "timed_out"].includes(latestRun.status) &&
+            latestRun.contextSnapshot?.explicitUserContinuation) {
+          // Re-run the same queue-first recovery decision after cleanup. Its
+          // earlier retry request could not authorize work while this executor
+          // still held its controller or environment lease.
+          await releaseIssueExecutionAndPromote(latestRun).then(() => {
+            issueExecutionReleasedAfterCleanup = true;
+            deferredIssueExecutionReleases.delete(run.id);
+          }).catch(err => {
+            logger.error({ err, runId: run.id }, "failed to settle explicit continuation after cleanup");
+          });
+        }
+        if (latestRun?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(latestRun.status)) {
+          const [pending] = await db.select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload }).from(agentWakeupRequests).where(and(
+            eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.agentId, run.agentId),
+            eq(agentWakeupRequests.status, "deferred_issue_execution"),
+            sql`${agentWakeupRequests.payload}->>'issueId' = ${String(latestRun.contextSnapshot?.issueId)}`,
+          )).limit(1);
+          if (pending) {
+            await (pending.payload?.queuedCommentInterrupt
+              ? resumeQueuedCommentInterrupt(run.companyId, pending.id)
+              : releaseIssueExecutionAndPromote(latestRun, { suppressImmediateRecovery: true })).then(() => {
+              issueExecutionReleasedAfterCleanup = true;
+              deferredIssueExecutionReleases.delete(run.id);
+            }).catch(err => {
+              logger.error({ err, runId: run.id }, "failed to promote legacy comment queue after cleanup");
             });
           }
         }
-        if (latestRun?.status === "interrupted" && latestRun.errorCode === "server_shutdown_interrupted") {
-          latestRun = await settleInterruptedNativeBootstrap(db, { run: latestRun,
-            providerDispatchStarted: legacyAdapterEntered || nativeDispatchStarted || nativeOwnershipHeld,
-          }) ?? latestRun;
+        if (latestRun?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(latestRun.status) &&
+            !issueExecutionReleasedAfterCleanup) {
+          const deferredReleaseOptions = deferredIssueExecutionReleases.get(run.id);
+          await releaseIssueExecutionAndPromote(latestRun, deferredReleaseOptions).then(() => {
+            deferredIssueExecutionReleases.delete(run.id);
+          }).catch(err => {
+            deferredIssueExecutionReleases.delete(run.id);
+            logger.error({ err, runId: run.id }, "failed to release issue execution after legacy cleanup");
+          });
         }
-        if (latestRun?.status === "cancelled" && !nativeDispatchStarted && !nativeOwnershipHeld &&
-            (latestRun.runtimeMode === "native" ||
-              parseObject(latestRun.resultJson?.startupCancellation).beforeNativeSelection === true)) {
-          // This executor has finished preparation and lease cleanup without
-          // handing off to native execution. Keep a durable receipt for admission
-          // after a restart; cleanup receipts are independently rechecked there.
-          await db.update(heartbeatRuns).set({
-            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
-              ${JSON.stringify({ startupPreparationSettledAt: new Date().toISOString() })}::jsonb`,
-          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
-        }
-        await db.update(heartbeatRuns).set({
-          executionStage: sql`case when ${heartbeatRuns.status} = 'cancelled' then 'settled' else ${heartbeatRuns.executionStage} end`,
-          controllerLeaseExpiresAt: null,
-        }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.runtimeMode, "legacy"),
-          eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
-          inArray(heartbeatRuns.status, ["succeeded", "failed", "cancelled", "timed_out", "interrupted"])));
-
-        latestRun = await getRun(run.id).catch(() => null);
-        if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status) && !isNativeRunnerOwnershipHeld(latestRun)) {
-          await appendRunEvent(run, { eventType: "lifecycle", stream: "system", level: "info", message: "task.run.measured",
-            payload: { phase: "task.run.measured", durationMs: Date.now() - (latestRun.startedAt ?? latestRun.createdAt).getTime(),
-              outcome: latestRun.status, durableSettlement: true } }).catch(error => logger.warn({ runId: run.id, error }, "Could not record terminal run duration"));
+        if (
+          !nativeSessionResumeScheduled &&
+          !nativeWorkspaceFinalizeScheduled &&
+          !shutdownInProgress
+        ) {
+          if (latestRun) await resumeRemoteStopComments(latestRun).catch(err => {
+            logger.warn({ err, runId: run.id }, "failed to resume user messages after remote Stop");
+          });
+          if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
+            await toolActionDeliveryService(db, { wakeup: trackWakeup })
+              .deliverForRun({ companyId: run.companyId, runId: run.id })
+              .catch(err => {
+                logger.warn({ err, runId: run.id }, "failed to deliver settled tool reviews after execution cleanup");
+              });
+          }
+          await startNextQueuedRunForAgent(run.agentId);
         }
       } finally {
-        controllerLease.stop();
-        activeRunExecutions.delete(run.id);
-        // A failed owned Stop remains visible until this exact executor settles,
-        // including a graceful exit result arriving after the cancellation error.
-        // It is never retained beyond the active execution's cleanup.
-        failedProcessRunCancellations.delete(run.id);
-        executionControl.finish();
-        if (adapterExecutionControls.get(run.id) === executionControl) {
-          adapterExecutionControls.delete(run.id);
-        }
-      }
-      if (latestRun) await reconcileMuseNativeTerminalRun(db, latestRun);
-      // Scratch preparation is optional. Its removal cannot be the only proof
-      // that a local legacy adapter's closed-stdio descendants stopped.
-      if (caseHandoffCleanupSettled && latestRun?.runtimeMode === "legacy" && legacyLocalAdapterEntered) {
-        caseHandoffCleanupSettled = hasStoppedLocalProcessTree(latestRun);
-      }
-      if (caseHandoffCleanupSettled && latestRun && !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled &&
-          !nativeOwnershipHeld && isHeartbeatRunTerminalStatus(latestRun.status)) {
-        const handoff = await pendingCaseHandoffForRun(db, run.id);
-        if (handoff) await recordCaseHandoffExecutionReleased(db, run.id, handoff.issueId);
-      }
-      // Terminalization precedes lease and adapter cleanup. Only now is the
-      // owner gone; retry pending input for ordinary completions as well as Stop.
-      if (latestRun?.runtimeMode === "legacy" && ["failed", "timed_out"].includes(latestRun.status) &&
-          latestRun.contextSnapshot?.explicitUserContinuation) {
-        // Re-run the same queue-first recovery decision after cleanup. Its
-        // earlier retry request could not authorize work while this executor
-        // still held its controller or environment lease.
-        await releaseIssueExecutionAndPromote(latestRun).catch(err => {
-          logger.error({ err, runId: run.id }, "failed to settle explicit continuation after cleanup");
-        });
-      }
-      if (latestRun?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(latestRun.status)) {
-        const [pending] = await db.select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload }).from(agentWakeupRequests).where(and(
-          eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.agentId, run.agentId),
-          eq(agentWakeupRequests.status, "deferred_issue_execution"),
-          sql`${agentWakeupRequests.payload}->>'issueId' = ${String(latestRun.contextSnapshot?.issueId)}`,
-        )).limit(1);
-        if (pending) await (pending.payload?.queuedCommentInterrupt
-          ? resumeQueuedCommentInterrupt(run.companyId, pending.id)
-          : releaseIssueExecutionAndPromote(latestRun, { suppressImmediateRecovery: true })).catch(err => {
-          logger.error({ err, runId: run.id }, "failed to promote legacy comment queue after cleanup");
-        });
-      }
-      if (
-        !nativeSessionResumeScheduled &&
-        !nativeWorkspaceFinalizeScheduled &&
-        !shutdownInProgress
-      ) {
-        if (latestRun) await resumeRemoteStopComments(latestRun).catch(err => {
-          logger.warn({ err, runId: run.id }, "failed to resume user messages after remote Stop");
-        });
-        if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
-          await toolActionDeliveryService(db, { wakeup: trackWakeup })
-            .deliverForRun({ companyId: run.companyId, runId: run.id })
-            .catch(err => {
-              logger.warn({ err, runId: run.id }, "failed to deliver settled tool reviews after execution cleanup");
-            });
-        }
-        await startNextQueuedRunForAgent(run.agentId);
+        settlingRunExecutions.delete(run.id);
       }
     }
   }
@@ -3956,7 +3998,7 @@ export function heartbeatService(
       const intervalMs = options.intervalMs ?? 25;
       const deadline = Date.now() + timeoutMs;
 
-      while (liveRunExecutions.has(runId)) {
+      while (liveRunExecutions.has(runId) || settlingRunExecutions.has(runId)) {
         if (Date.now() >= deadline) {
           throw new Error(
             `Timed out waiting for heartbeat run ${runId} execution to drain`,

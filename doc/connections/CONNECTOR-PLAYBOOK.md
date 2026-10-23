@@ -435,15 +435,20 @@ connection, grant, catalog, profile, policy, and run state; resolves the needed
 secret version; projects only the reviewed headers/arguments; calls the
 provider; and writes redacted audit evidence.
 
-For a reviewed remote MCP method that accepts discovery before initialization
-but requires an initialized session for calls, set
-`defaults.mcpSessionRequired: true`. Tavily uses this compatibility preference.
-Setup persists it for new connections; discovery and execution also resolve the
-curated method default for retained connections without the config flag. The
-existing session cache stays scoped to the connection, grant, actor, endpoint,
-and effective credential headers. Other methods retain their existing discovery fallback
-and direct-call behavior. Initialize before dispatch; never retry `tools/call`
-automatically after a provider error, since the first call may have mutated data.
+Remote HTTP catalog discovery sends `initialize`, then
+`notifications/initialized`, before `tools/list`. It reuses negotiated protocol
+headers from the session cache, which separates connections, actors, endpoints,
+and effective credential headers. A credential refresh negotiates a session
+for the new credentials before discovery continues. Stateless servers also use
+the handshake; they do not have to return a session ID.
+
+A successful handshake records `mcpSessionRequired: true` so later tool calls
+also initialize before dispatch. A curated method can still set this default
+for calls made before discovery. If a catalog request with a negotiated session
+ID returns HTTP 404, discovery discards only that identity's expired session and
+repeats the handshake and read once. A failed initialize or a 404 without a
+session ID does not trigger this retry. Never retry `tools/call` automatically
+after a provider error, since the first call may have mutated data.
 
 ## Secret Storage And Lifecycle
 

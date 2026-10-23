@@ -152,7 +152,7 @@ import {
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
 } from "../execution-workspace-policy.js";
 import { readContinuationAttempt } from "../recovery/index.js";
-import { allowsIssueInteractionWake, wakeChatConversationsConflict } from "../../modules/run-dispatch/index.js";
+import { allowsIssueInteractionWake, isResolvedInteractionContinuationWakeContext, wakeChatConversationsConflict } from "../../modules/run-dispatch/index.js";
 import { withAgentStartLock } from "../agent-start-lock.js";
 import {
   evaluateAgentInvokability,
@@ -1240,6 +1240,26 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         executionLockedAt: claimedAt,
         updatedAt: claimedAt,
       }).where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)));
+      // A resolved interaction resumes a review task. Claiming the continuation
+      // transfers the task back to active work, and that visible status change
+      // must be committed with the run/issue execution lock so observers never
+      // see an active continuation still parked in review.
+      if (isResolvedInteractionContinuationWakeContext(claimedRun.contextSnapshot)) {
+        await tx.update(issues).set({
+          status: "in_progress",
+          statusVersion: sql`${issues.statusVersion} + 1`,
+          startedAt: claimedAt,
+          updatedAt: claimedAt,
+        }).where(and(
+          eq(issues.id, issueId), eq(issues.companyId, run.companyId),
+          eq(issues.assigneeAgentId, agent.id), eq(issues.executionRunId, claimedRun.id),
+          eq(issues.status, "in_review"),
+          sql`(
+            coalesce(${issues.executionState}->>'status', '') <> 'pending' OR
+            coalesce(${issues.executionState}->>'currentStageType', '') NOT IN ('review', 'approval')
+          )`,
+        ));
+      }
     }
     const nativeReviewContext = readNativeReviewAssignmentContext(context);
     const queuedCommentIds = queuedCommentIdsFromRunContext(context);
@@ -3357,6 +3377,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             }
             if (durableRequest || wakeCommentId ||
                 hasInteractionContinuationWakeContext(enrichedContextSnapshot) ||
+                (enrichedContextSnapshot.source === "issue.execution_stage" &&
+                  ["execution_review_requested", "execution_approval_requested", "execution_changes_requested"]
+                    .includes(readNonEmptyString(enrichedContextSnapshot.wakeReason) ?? "") &&
+                  Boolean(readNonEmptyString(parseObject(enrichedContextSnapshot.executionStage).stageId))) ||
                 readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId)) {
               await tx.insert(agentWakeupRequests).values({
                 ...durableReceiptFields,

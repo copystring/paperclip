@@ -147,6 +147,49 @@ function createFakeRecovery(): RecoveryEscalationPort {
 }
 
 describe("releaseIssueExecution", () => {
+  it.each([
+    { currentAttempt: false, expectedOutcome: "released" },
+    { currentAttempt: true, expectedOutcome: "blocked" },
+  ])("uses the current review decision boundary before recovery classification (%s)", async ({ currentAttempt, expectedOutcome }) => {
+    const decisionId = "decision-1";
+    const issue = {
+      ...ISSUE,
+      status: "in_review",
+      assigneeAgentId: null,
+      executionState: {
+        status: "pending",
+        currentParticipant: { type: "agent", agentId: RUN.agentId },
+        lastDecisionId: decisionId,
+      },
+    };
+    const run = {
+      ...RUN,
+      status: "cancelled",
+      contextSnapshot: {
+        wakeReason: "execution_review_requested",
+        retryReason: "execution_review_participant_recovery",
+      },
+    };
+    const transaction = createFakeTransaction({
+      isRunInCurrentExecutionReviewAttempt: vi.fn(async () => currentAttempt),
+    });
+    const release = createReleaseIssueExecution({
+      issueLock: createFakeIssueLock(createFakeHost(), transaction, issue, run),
+      recovery: createFakeRecovery(),
+    });
+
+    const result = await release({ companyId: RUN.companyId, runId: RUN.id, now: new Date() });
+
+    expect(result.outcome.kind).toBe(expectedOutcome);
+    expect(transaction.isRunInCurrentExecutionReviewAttempt).toHaveBeenCalledWith({
+      companyId: issue.companyId,
+      issueId: issue.id,
+      runId: run.id,
+      decisionId,
+    });
+    expect(transaction.queueReviewParticipantRecoveryRun).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])("preserves a paused head without blocking an eligible follower (%s)", async withFollower => {
     const paused = wakeCandidate({ id: "paused-wake", wakeReason: "issue_comment_mentioned", queuedCommentIds: ["paused-comment"] });
     const ready = wakeCandidate({ id: "ready-wake", agentId: "ready-agent", queuedCommentIds: ["ready-comment"] });

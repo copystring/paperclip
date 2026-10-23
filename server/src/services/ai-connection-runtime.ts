@@ -14,6 +14,7 @@ import {
   type AiConnectionBinding,
 } from "@paperclipai/shared";
 import { managedProviderRouting } from "./ai-provider-routing.js";
+import { managedModelVision } from "./ai-model-input-capabilities.js";
 import { aiConnectionService } from "./ai-connections.js";
 import { subscriptionService } from "./subscriptions.js";
 import { refreshSubscriptionConnection } from "./subscription-refresh.js";
@@ -364,7 +365,11 @@ export async function prepareManagedAiRuntime(
         security: { auth: { selectedType: "gemini-api-key" } },
       }), { mode: 0o600 });
     }
-    const projected = routing ? managedProviderRouting(routing, harness, value, typeof input.config.model === "string" ? input.config.model : "") : undefined;
+    const routedModel = typeof input.config.model === "string" ? input.config.model : "";
+    const imageInput = routing && harness === "opencode_local"
+      ? await managedModelVision(routing, value, routedModel)
+      : undefined;
+    const projected = routing ? managedProviderRouting(routing, harness, value, routedModel, imageInput) : undefined;
     if (projected) {
       const customHeaders = env.ANTHROPIC_CUSTOM_HEADERS ?? process.env.ANTHROPIC_CUSTOM_HEADERS;
       Object.assign(env, projected.env);

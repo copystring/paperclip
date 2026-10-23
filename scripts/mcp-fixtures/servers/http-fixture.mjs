@@ -52,6 +52,22 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/mcp") {
       const body = await readJson(req);
       const params = body.params && typeof body.params === "object" ? body.params : {};
+      if (body.method === "initialize") {
+        sendJson(res, 200, {
+          jsonrpc: "2.0",
+          id: body.id ?? null,
+          result: {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "paperclip-smoke-lab-http-fixture", version: "1.0.0" },
+          },
+        });
+        return;
+      }
+      if (body.method === "notifications/initialized") {
+        res.writeHead(202).end();
+        return;
+      }
       if (body.method === "tools/list") {
         sendJson(res, 200, {
           jsonrpc: "2.0",

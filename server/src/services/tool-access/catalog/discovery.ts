@@ -13,13 +13,13 @@ import { BROWSER_USE_TOOLS } from "@paperclipai/shared";
 import { browserUseClient, isBrowserUseConnection } from "../../browser-use-client.js";
 import { COGNEE_STDIO_TEMPLATE, cogneeCloudUrl } from "../../cognee-connection.js";
 import { isMemoryConnectorId } from "@paperclipai/shared";
-import { and, eq } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { connectionGrants, toolConnections } from "@paperclipai/db";
-import { GOOGLE_WORKSPACE_CONNECTOR_PROFILES, getConnectableAppDefinition } from "@paperclipai/shared";
+import { GOOGLE_WORKSPACE_CONNECTOR_PROFILES } from "@paperclipai/shared";
 import { badRequest, HttpError, unprocessable } from "../../../errors.js";
 import { isSlackMcpAccessDisabledResponse } from "../../slack-mcp-error.js";
-import { initializeMcpHttpSession, McpHttpInitializationError, getMcpHttpSession, forgetMcpHttpSessions, readMcpHttpResponse, mcpHttpRequestHeaders } from "../../mcp-http.js";
+import { requestMcpHttpToolsList, McpHttpInitializationError, readMcpHttpResponse, mcpHttpRequestHeaders } from "../../mcp-http.js";
 import { secretService } from "../../secrets.js";
 import { agentmailApi } from "../../agentmail-api.js";
 import { createRailwayClient, discoverRailwayWorkspace, isRailwayConnection, normalizeRailwayToolName, RAILWAY_TOOLS, RAILWAY_TOOL_PREFIX, RailwayError } from "../../railway.js";
@@ -119,81 +119,24 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
       return sendRemote({ method: "POST", headers: mcpHttpRequestHeaders(requestHeaders),
         body: JSON.stringify({ jsonrpc: "2.0", id: listRequestId, method: "tools/list", params: cursor ? { cursor } : {} }) });
     };
-    const connectionConfig = asRecord(connection.config);
-    const sourceTemplateKey = typeof connectionConfig?.sourceTemplateKey === "string"
-      ? connectionConfig.sourceTemplateKey
-      : null;
-    const connectionMethodKey = typeof connectionConfig?.connectionMethodKey === "string"
-      ? connectionConfig.connectionMethodKey
-      : null;
-    const curatedMethodRequiresMcpSession = Boolean(
-      sourceTemplateKey && connectionMethodKey &&
-      getConnectableAppDefinition(sourceTemplateKey)?.methods.some((method) =>
-        method.key === connectionMethodKey && method.defaults?.mcpSessionRequired === true
-      ),
-    );
-    let usedInitializedSession = connectionConfig?.mcpSessionRequired === true || curatedMethodRequiresMcpSession;
-    let response: Response;
-    if (usedInitializedSession) {
+    let usedInitializedSession = false;
+    const discoverTools = async () => {
       try {
-        sessionHeaders = await getMcpHttpSession({ send: sendRemote, headers,
+        const result = await requestMcpHttpToolsList({
+          send: sendRemote,
+          headers,
           scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${endpoint}`,
-          requestId: listRequestId });
-        response = await sendToolsList(sessionHeaders);
+          requestId: listRequestId,
+        });
+        sessionHeaders = result.headers;
+        usedInitializedSession = true;
+        return result.response;
       } catch (error) {
         if (!(error instanceof McpHttpInitializationError) || !error.response) throw error;
-        response = error.response;
+        return error.response;
       }
-    } else {
-      response = await sendToolsList(headers);
-      // `tools/list` is read-only, so a 400 can safely be retried after the MCP
-      // initialize handshake. Stateful servers such as Supabase require the
-      // returned Mcp-Session-Id on every non-initialization request.
-      if (response.status === 400) {
-        try {
-          const sessionHeaders = await initializeMcpHttpSession({
-            send: sendRemote,
-            headers,
-            requestId: "paperclip-catalog-refresh",
-          });
-          response = await sendToolsList(sessionHeaders);
-          usedInitializedSession = response.ok;
-        } catch {
-          // Preserve the original HTTP failure below when this was not an MCP
-          // session requirement after all.
-        }
-      }
-    }
-    if (response.status === 404 && new Headers(sessionHeaders).has("mcp-session-id")) {
-      // MCP uses 404 for an expired server session. Discovery is read-only, so
-      // discard the stale session and retry it once with a new handshake.
-      forgetMcpHttpSessions(connection.id);
-      await response.body?.cancel().catch(() => undefined);
-      sessionHeaders = await getMcpHttpSession({ send: sendRemote, headers,
-        scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${endpoint}`,
-        requestId: listRequestId });
-      response = await sendToolsList(sessionHeaders);
-      if (response.status === 404) forgetMcpHttpSessions(connection.id);
-    }
-    if (
-      usedInitializedSession &&
-      connectionConfig?.mcpSessionRequired !== true
-    ) {
-      const nextConfig = { ...connection.config, mcpSessionRequired: true };
-      await db
-        .update(toolConnections)
-        .set({
-          config: nextConfig,
-          transportConfig: nextConfig,
-          updatedAt: now(),
-        })
-        .where(
-          and(
-            eq(toolConnections.id, connection.id),
-            eq(toolConnections.companyId, connection.companyId),
-          ),
-        );
-    }
+    };
+    let response = await discoverTools();
     if (isInsufficientConnectionScope(response)) {
       await response.body?.cancel().catch(() => undefined);
       throw unprocessable(INSUFFICIENT_CONNECTION_SCOPE_MESSAGE, { code: "oauth_insufficient_scope", connectionId: connection.id });
@@ -202,6 +145,7 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
       response.status === 401 &&
       connection.credentialSource === "vercel_connect"
     ) {
+      await response.body?.cancel().catch(() => undefined);
       const grant = await vercelGrantForConnection(connection, actor);
       const credential = vercelCredentialFor(connection);
       const request = vercelTokenRequest({
@@ -218,20 +162,21 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
           forceRefresh: true,
         })),
       };
-      response = await sendToolsList(headers);
+      response = await discoverTools();
     }
     if (
       response.status === 401 &&
       connection.authKind === "oauth" &&
       connection.credentialSource === "paperclip_vault"
     ) {
+      await response.body?.cancel().catch(() => undefined);
       headers = {
         ...projectedConnectionHeaders(connection),
         ...(await resolveCredentialHeaders(connection, actor, {
           forceRefresh: true,
         })),
       };
-      response = await sendToolsList(headers);
+      response = await discoverTools();
       if (
         response.status === 401 &&
         isPaperclipCloudConnectorStrategy(oauthConfig(connection).strategy)
@@ -249,6 +194,25 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
             );
         }
       }
+    }
+    if (usedInitializedSession) {
+      await db
+        .update(toolConnections)
+        .set({
+          config: sql`${toolConnections.config} || '{"mcpSessionRequired":true}'::jsonb`,
+          transportConfig: sql`${toolConnections.transportConfig} || '{"mcpSessionRequired":true}'::jsonb`,
+          updatedAt: now(),
+        })
+        .where(
+          and(
+            eq(toolConnections.id, connection.id),
+            eq(toolConnections.companyId, connection.companyId),
+            or(
+              sql`${toolConnections.config}->'mcpSessionRequired' IS DISTINCT FROM 'true'::jsonb`,
+              sql`${toolConnections.transportConfig}->'mcpSessionRequired' IS DISTINCT FROM 'true'::jsonb`,
+            ),
+          ),
+        );
     }
     if (!response.ok) {
       if ((response.status === 401 || response.status === 403)

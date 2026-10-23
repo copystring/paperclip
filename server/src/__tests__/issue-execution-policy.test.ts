@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy, parseIssueExecutionState, stripMonitorFromExecutionPolicy } from "../services/issue-execution-policy.ts";
+import { applyIssueExecutionPolicyTransition, buildExecutionStageWakeContext, normalizeIssueExecutionPolicy, parseIssueExecutionState, stripMonitorFromExecutionPolicy } from "../services/issue-execution-policy.ts";
 import type { IssueExecutionPolicy, IssueExecutionState } from "@paperclipai/shared";
 import { buildExecutionPolicy } from "../../../ui/src/lib/issue-execution-policy.ts";
 
@@ -198,6 +198,66 @@ describe("parseIssueExecutionState", () => {
     });
     expect(state).not.toBeNull();
     expect(state!.status).toBe("pending");
+  });
+});
+
+describe("execution stage wake context", () => {
+  it("uses the same stage and participant contract for normal and recovery review wakes", () => {
+    const state: IssueExecutionState = {
+      status: "pending",
+      currentStageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      currentStageIndex: 0,
+      currentStageType: "review",
+      currentParticipant: { type: "agent", agentId: qaAgentId, userId: null },
+      returnAssignee: { type: "agent", agentId: coderAgentId, userId: null },
+      reviewRequest: null,
+      completedStageIds: [],
+      lastDecisionId: null,
+      lastDecisionOutcome: null,
+    };
+    const normal = buildExecutionStageWakeContext({ state, wakeRole: "reviewer" });
+    const recoveryInstruction =
+      "The previous reviewer run ended without a saved decision for this pending stage.";
+    const recovery = buildExecutionStageWakeContext({
+      state,
+      wakeRole: "reviewer",
+      recoveryInstruction,
+    });
+
+    expect(normal).toEqual({
+      wakeRole: "reviewer",
+      stageId: state.currentStageId,
+      stageType: "review",
+      currentParticipant: state.currentParticipant,
+      returnAssignee: state.returnAssignee,
+      reviewRequest: null,
+      lastDecisionOutcome: null,
+      allowedActions: ["approve", "request_changes"],
+    });
+    expect(recovery).toEqual({ ...normal, recoveryInstruction });
+  });
+
+  it("keeps approval wakes typed as approver actions", () => {
+    const context = buildExecutionStageWakeContext({
+      state: {
+        status: "pending",
+        currentStageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        currentStageIndex: 0,
+        currentStageType: "approval",
+        currentParticipant: { type: "user", agentId: null, userId: ctoUserId },
+        returnAssignee: { type: "agent", agentId: coderAgentId, userId: null },
+        reviewRequest: null,
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+      wakeRole: "approver",
+    });
+    expect(context).toMatchObject({
+      wakeRole: "approver",
+      stageType: "approval",
+      allowedActions: ["approve", "request_changes"],
+    });
   });
 });
 

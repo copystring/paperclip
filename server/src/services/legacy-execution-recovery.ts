@@ -107,6 +107,11 @@ export async function terminalizeLegacyExecution(input: {
     )).for("update");
     if (!current || (current.runtimeMode !== "legacy" && !(input.recordRestoreFailureOnly && current.runtimeMode === "native")) ||
         (!input.recordRestoreFailureOnly && !(input.fromStatuses ?? [run.status]).includes(current.status))) return null;
+    const controllerStillOwnsSettlement = Boolean(
+      !input.recordRestoreFailureOnly && current.controllerBootId &&
+      current.controllerLeaseExpiresAt && current.controllerLeaseExpiresAt > new Date() &&
+      current.status === "running" && status !== "running",
+    );
     // Validate the receipt under the same issue → run locks used by claimers,
     // before mutating run, issue, wake, or recovery state.
     const receipt = patch?.resultJson?.nonDispatchReceipt;
@@ -124,6 +129,7 @@ export async function terminalizeLegacyExecution(input: {
       .set({
         status: input.recordRestoreFailureOnly ? current.status : status,
         ...patch,
+        ...(controllerStillOwnsSettlement ? { executionStage: "settling" } : {}),
         executionStatusDeliveryId: randomUUID(),
         updatedAt: new Date(),
       })

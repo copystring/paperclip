@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { sql } from "drizzle-orm";
 import {
@@ -13,6 +13,7 @@ import {
   environments,
   executionWorkspaces,
   goals,
+  heartbeatRunEvents,
   heartbeatRuns,
   instanceSettings,
   issueComments,
@@ -39,6 +40,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { instanceSettingsService } from "../services/instance-settings.ts";
+import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
 import {
   clampIssueListLimit,
   deriveIssueCommentRunLogAttribution,
@@ -186,6 +188,53 @@ describeEmbeddedPostgres("issueService run attachment artifacts", () => {
         originalFilename: "screenshot.png",
       },
     });
+  }, 20_000);
+});
+
+describeEmbeddedPostgres("issueService checkout preserves review phase", () => {
+  const tempDbs: Array<Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>> = [];
+  afterAll(async () => { await Promise.all(tempDbs.map((tempDb) => tempDb.cleanup())); });
+
+  it("keeps in_review and startedAt during initial checkout", async () => {
+    const tempDb = await startEmbeddedPostgresTestDatabase("paperclip-checkout-review-phase-");
+    tempDbs.push(tempDb);
+    const db = createDb(tempDb.connectionString);
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    const startedAt = new Date("2026-10-01T10:00:00.000Z");
+    await db.insert(companies).values({ id: companyId, name: "Paperclip", issuePrefix: "RVP", requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Reviewer", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "running", invocationSource: "manual", startedAt: new Date() });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Review phase", status: "in_review", priority: "medium", startedAt });
+
+    const svc = issueService(db);
+    await svc.checkout(issueId, agentId, ["in_review"], runId);
+    await expect(svc.checkout(issueId, agentId, ["in_review"], runId)).resolves.toMatchObject({ status: "in_review" });
+    const row = await db.select({ status: issues.status, startedAt: issues.startedAt }).from(issues).where(eq(issues.id, issueId)).then(rows => rows[0]);
+    expect(row).toEqual({ status: "in_review", startedAt });
+  }, 20_000);
+
+  it("keeps in_review and startedAt when adopting a stale execution lock", async () => {
+    const tempDb = await startEmbeddedPostgresTestDatabase("paperclip-adopt-review-phase-");
+    tempDbs.push(tempDb);
+    const db = createDb(tempDb.connectionString);
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const staleRunId = randomUUID();
+    const nextRunId = randomUUID();
+    const startedAt = new Date("2026-10-01T10:00:00.000Z");
+    await db.insert(companies).values({ id: companyId, name: "Paperclip", issuePrefix: "RVA", requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Reviewer", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.insert(heartbeatRuns).values({ id: staleRunId, companyId, agentId, status: "failed", invocationSource: "manual", finishedAt: new Date() });
+    await db.insert(heartbeatRuns).values({ id: nextRunId, companyId, agentId, status: "running", invocationSource: "manual", startedAt: new Date() });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Review phase stale lock", status: "in_review", priority: "medium", assigneeAgentId: agentId, executionRunId: staleRunId, startedAt });
+
+    await issueService(db).checkout(issueId, agentId, ["in_review"], nextRunId);
+    const row = await db.select({ status: issues.status, startedAt: issues.startedAt, checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId }).from(issues).where(eq(issues.id, issueId)).then(rows => rows[0]);
+    expect(row).toEqual({ status: "in_review", startedAt, checkoutRunId: nextRunId, executionRunId: nextRunId });
   }, 20_000);
 });
 
@@ -2983,6 +3032,32 @@ describeEmbeddedPostgres("issueService.findOpenAncestorCreatedByAgent", () => {
 
     const other = await svc.findOpenAncestorCreatedByAgent(midId, randomUUID());
     expect(other).toBeNull();
+  });
+
+  it("scopes task ancestor context to the caller company", async () => {
+    const { companyId, rootId } = await seedChain();
+    const otherCompanyId = randomUUID();
+    await db.insert(companies).values({
+      id: otherCompanyId,
+      name: "Other company",
+      issuePrefix: `O${otherCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    const childId = randomUUID();
+    await db.insert(issues).values({
+      id: childId,
+      companyId: otherCompanyId,
+      title: "Cross-company fixture",
+      status: "in_progress",
+      priority: "medium",
+      issueNumber: 1,
+      identifier: "OTHER-1",
+      parentId: rootId,
+    });
+
+    expect((await svc.getAncestors(childId))[0]?.id).toBe(rootId);
+    expect(await svc.getAncestors(childId, otherCompanyId)).toEqual([]);
+    expect(await svc.getAncestors(childId, companyId)).toEqual([]);
   });
 
   it("ignores closed ancestors created by the agent", async () => {
@@ -6538,6 +6613,7 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
@@ -6688,6 +6764,144 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
     });
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId)))
       .toHaveLength(0);
+  });
+
+  it("revokes service-path writes from a legacy run after an agent handoff", async () => {
+    const seeded = await seedOwnershipIssue({ checkoutStatus: "failed" });
+    const original = await svc.getById(seeded.issueId);
+    const reviewerAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: reviewerAgentId,
+      companyId: original!.companyId,
+      name: "Reviewer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.update(heartbeatRuns).set({
+      contextSnapshot: { issueId: seeded.issueId },
+    }).where(eq(heartbeatRuns.id, seeded.actorRunId));
+    await db.update(issues).set({
+      executionRunId: seeded.actorRunId,
+      checkoutRunId: seeded.actorRunId,
+      executionLockedAt: new Date(),
+      executionAgentNameKey: "assignee",
+    }).where(eq(issues.id, seeded.issueId));
+
+    await svc.update(seeded.issueId, {
+      assigneeAgentId: reviewerAgentId,
+      assigneeUserId: null,
+      status: "in_review",
+      executionState: { status: "pending", currentParticipant: { type: "agent", agentId: reviewerAgentId } },
+      actorAgentId: seeded.actorAgentId,
+      actorRunId: seeded.actorRunId,
+      actorRunHandoffId: seeded.actorRunId,
+    });
+    expect(await svc.getById(seeded.issueId)).toMatchObject({
+      executionRunId: seeded.actorRunId,
+      checkoutRunId: seeded.actorRunId,
+    });
+
+    await expect(svc.update(seeded.issueId, {
+      title: "Late outgoing edit",
+      actorAgentId: seeded.actorAgentId,
+      actorRunId: seeded.actorRunId,
+    })).rejects.toMatchObject({ status: 403, details: { code: "issue_handed_off" } });
+    expect(await svc.getById(seeded.issueId)).toMatchObject({
+      title: "Checkout owner recovery",
+      status: "in_review",
+      assigneeAgentId: reviewerAgentId,
+    });
+  });
+
+  it("durably revokes the current run on a board handoff without blocking a fresh run", async () => {
+    const seeded = await seedOwnershipIssue({ checkoutStatus: "running" });
+    const original = await svc.getById(seeded.issueId);
+    const reviewerAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: reviewerAgentId,
+      companyId: original!.companyId,
+      name: "Board handoff reviewer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.update(heartbeatRuns).set({
+      // The issue's execution/checkout pointers prove this run's association
+      // even when its lagging context snapshot has already lost issueId.
+      contextSnapshot: { preservedContext: "keep-me" },
+    }).where(eq(heartbeatRuns.id, seeded.staleRunId));
+
+    await svc.update(seeded.issueId, {
+      assigneeAgentId: reviewerAgentId,
+      assigneeUserId: null,
+      actorUserId: "local-board",
+    });
+    const [revokedRun] = await db.select().from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, seeded.staleRunId));
+    expect(revokedRun!.contextSnapshot).toMatchObject({ preservedContext: "keep-me" });
+    const [revocationEvent] = await db.select().from(heartbeatRunEvents).where(and(
+      eq(heartbeatRunEvents.companyId, original!.companyId),
+      eq(heartbeatRunEvents.runId, seeded.staleRunId),
+      eq(heartbeatRunEvents.agentId, seeded.assigneeAgentId),
+      eq(heartbeatRunEvents.eventType, "issue.legacy_run_ownership_revoked"),
+    ));
+    expect(revocationEvent?.payload).toMatchObject({
+      issueId: seeded.issueId,
+      ownerAgentId: seeded.assigneeAgentId,
+    });
+    await expect(assertLegacyRunTaskOwnership(db, {
+      id: seeded.staleRunId,
+      companyId: original!.companyId,
+      runtimeMode: "legacy",
+      agentId: seeded.assigneeAgentId,
+    }, {
+      id: randomUUID(),
+      companyId: original!.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      assigneeUserId: null,
+    })).resolves.toBeUndefined();
+
+    // A delayed writer can replace the entire context with its stale in-memory
+    // copy. The event is independent of that snapshot and remains authoritative.
+    await db.update(heartbeatRuns).set({
+      contextSnapshot: { issueId: seeded.issueId, preservedContext: "stale-snapshot" },
+    }).where(eq(heartbeatRuns.id, seeded.staleRunId));
+
+    // Returning the assignment to the original agent must not restore a run
+    // whose write authority was revoked by the earlier board handoff.
+    await svc.update(seeded.issueId, {
+      assigneeAgentId: seeded.assigneeAgentId,
+      assigneeUserId: null,
+      actorUserId: "local-board",
+    });
+    await expect(svc.update(seeded.issueId, {
+      title: "Stale run after reassignment back",
+      actorAgentId: seeded.assigneeAgentId,
+      actorRunId: seeded.staleRunId,
+    })).rejects.toMatchObject({ status: 403, details: { code: "issue_handed_off" } });
+
+    const freshRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: freshRunId,
+      companyId: original!.companyId,
+      agentId: seeded.assigneeAgentId,
+      status: "running",
+      invocationSource: "manual",
+      startedAt: new Date(),
+      contextSnapshot: { issueId: seeded.issueId },
+    });
+    await expect(svc.update(seeded.issueId, {
+      title: "Fresh run can write",
+      actorAgentId: seeded.assigneeAgentId,
+      actorRunId: freshRunId,
+    })).resolves.toMatchObject({ title: "Fresh run can write" });
   });
 
   it("lets the current assignee adopt a stale terminal checkout owner", async () => {

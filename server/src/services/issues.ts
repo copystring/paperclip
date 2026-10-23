@@ -17,10 +17,15 @@ import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notificatio
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
-import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
+import {
+  assertLegacyRunTaskOwnership,
+  LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT,
+} from "../legacy-run-task-ownership.js";
+import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
 import { documentService } from "./documents.js";
+import { UNREVIEWED_AGENT_REPORT_PREFIX, withIssueCommentReviewContext } from "./issue-comment-review-context.js";
 import { parseTaskSearch, taskSearchCtes, taskSearchScore } from "./task-search.js";
 import { createdFromIssueCondition } from "./issue-creation-origin.js";
 import { executionProjectionsForRuns } from "./execution-projection.js";
@@ -222,6 +227,72 @@ import { buildIssueChanges } from "./issue-change-receipt.js";
 import { ensurePersonalPrivateProject } from "./projects.js";
 import { projectSafeChatPublication } from "./chat-publication-projection.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
+
+async function revokeLegacyRunsOnIssueHandoff(
+  tx: any,
+  input: {
+    issue: typeof issues.$inferSelect;
+    nextAssigneeAgentId: string | null;
+    nextAssigneeUserId: string | null;
+    actorAgentId: string | null | undefined;
+    actorRunId: string | null | undefined;
+  },
+) {
+  const { issue } = input;
+  const assignmentChanged =
+    issue.assigneeAgentId !== input.nextAssigneeAgentId ||
+    issue.assigneeUserId !== input.nextAssigneeUserId;
+  if (!assignmentChanged || !issue.assigneeAgentId) return;
+
+  const issueBoundRunIds = new Set(
+    [issue.executionRunId, issue.checkoutRunId].filter((runId): runId is string => Boolean(runId)),
+  );
+  const runIds = new Set(issueBoundRunIds);
+  if (input.actorAgentId === issue.assigneeAgentId && input.actorRunId) {
+    runIds.add(input.actorRunId);
+  }
+  if (runIds.size === 0) return;
+
+  const runs = await tx
+    .select({
+      id: heartbeatRuns.id,
+      companyId: heartbeatRuns.companyId,
+      agentId: heartbeatRuns.agentId,
+      runtimeMode: heartbeatRuns.runtimeMode,
+      contextSnapshot: heartbeatRuns.contextSnapshot,
+    })
+    .from(heartbeatRuns)
+    .where(and(
+      eq(heartbeatRuns.companyId, issue.companyId),
+      inArray(heartbeatRuns.id, [...runIds]),
+    ))
+    .for("update");
+
+  for (const run of runs) {
+    const context = run.contextSnapshot;
+    if (
+      run.runtimeMode !== "legacy" ||
+      run.agentId !== issue.assigneeAgentId ||
+      (!issueBoundRunIds.has(run.id) && (
+        !context || typeof context !== "object" || Array.isArray(context) ||
+        (context as Record<string, unknown>).issueId !== issue.id
+      ))
+    ) continue;
+    await appendHeartbeatRunEvent(tx as Db, {
+      companyId: issue.companyId,
+      runId: run.id,
+      agentId: run.agentId,
+      eventType: LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT,
+      stream: "system",
+      level: "info",
+      message: "Issue ownership was transferred; this run can no longer change the issue.",
+      payload: {
+        issueId: issue.id,
+        ownerAgentId: run.agentId,
+      },
+    });
+  }
+}
 
 const ALL_ISSUE_STATUSES = [
   "backlog",
@@ -7570,6 +7641,7 @@ export function issueService(db: Db) {
     actorAgentId: string;
     actorRunId: string;
     expectedCheckoutRunId: string;
+    expectedStatuses?: string[];
   }) {
     return db.transaction(async (tx) => {
       const lockedIssue = await tx
@@ -7590,7 +7662,7 @@ export function issueService(db: Db) {
       }
 
       if (
-        lockedIssue.status !== "in_progress" ||
+        !(lockedIssue.status === "in_progress" || (lockedIssue.status === "in_review" && input.expectedStatuses?.includes("in_review"))) ||
         lockedIssue.assigneeAgentId !== input.actorAgentId ||
         lockedIssue.checkoutRunId !== input.expectedCheckoutRunId
       ) {
@@ -7648,7 +7720,7 @@ export function issueService(db: Db) {
         .where(
           and(
             eq(issues.id, input.issueId),
-            eq(issues.status, "in_progress"),
+            inArray(issues.status, input.expectedStatuses ?? ["in_progress"]),
             eq(issues.assigneeAgentId, input.actorAgentId),
             eq(issues.checkoutRunId, input.expectedCheckoutRunId),
           ),
@@ -10827,6 +10899,7 @@ export function issueService(db: Db) {
         /** Server-owned transfer being applied; never accepted from HTTP input. */
         caseHandoffId?: string;
         actorRunStopId?: string | null;
+        actorRunHandoffId?: string | null;
         actorUserId?: string | null;
         companyGuard?: string;
         workspaceSelectionActor?: AuthorizationActor;
@@ -10878,6 +10951,7 @@ export function issueService(db: Db) {
         actorRunId,
         caseHandoffId,
         actorRunStopId,
+        actorRunHandoffId,
         actorUserId,
         companyGuard,
         workspaceSelectionActor,
@@ -10958,6 +11032,19 @@ export function issueService(db: Db) {
         ...issueData,
         updatedAt: new Date(),
       };
+      const preserveCooperativeRunLock = Boolean(
+        actorRunHandoffId && actorRunHandoffId === actorRunId && actorRunId &&
+        actorAgentId === existing.assigneeAgentId && existing.executionRunId === actorRunId &&
+        (!existing.checkoutRunId || existing.checkoutRunId === actorRunId) &&
+        issueData.assigneeAgentId && issueData.assigneeAgentId !== actorAgentId &&
+        issueData.assigneeUserId === null && issueData.executionState &&
+        (issueData.status === "in_review" || issueData.status === "in_progress"),
+      );
+      if (actorRunHandoffId && !preserveCooperativeRunLock) {
+        throw conflict("The active run no longer owns this workflow handoff", {
+          code: "issue_handoff_owner_changed",
+        });
+      }
       if (issueData.visibility === "private") {
         patch.privacyRootIssueId = existing.privacyRootIssueId ?? existing.id;
       } else if (issueData.visibility === "open") {
@@ -11112,17 +11199,18 @@ export function issueService(db: Db) {
       if (issueData.status && issueData.status !== "cancelled") {
         patch.cancelledAt = null;
       }
-      if (issueData.status && issueData.status !== "in_progress") {
+      if (issueData.status && issueData.status !== "in_progress" && !preserveCooperativeRunLock) {
         patch.checkoutRunId = null;
         patch.executionRunId = null;
         patch.executionAgentNameKey = null;
         patch.executionLockedAt = null;
       }
       if (
-        (issueData.assigneeAgentId !== undefined &&
+        !preserveCooperativeRunLock &&
+        ((issueData.assigneeAgentId !== undefined &&
           issueData.assigneeAgentId !== existing.assigneeAgentId) ||
-        (issueData.assigneeUserId !== undefined &&
-          issueData.assigneeUserId !== existing.assigneeUserId)
+          (issueData.assigneeUserId !== undefined &&
+          issueData.assigneeUserId !== existing.assigneeUserId))
       ) {
         patch.checkoutRunId = null;
         patch.executionRunId = null;
@@ -11216,8 +11304,35 @@ export function issueService(db: Db) {
           const actorRun = await assertAgentRunWriteAllowed(tx, receiptExisting.companyId, {
             agentId: actorAgentId, runId: actorRunId, stopId: actorRunStopId,
           });
-          assertLegacyRunTaskOwnership(actorRun, receiptExisting);
+          await assertLegacyRunTaskOwnership(tx, actorRun, receiptExisting);
+          if (actorRunHandoffId && (
+            !actorRun || actorRunHandoffId !== actorRunId ||
+            actorRun.runtimeMode !== "legacy" || actorRun.companyId !== receiptExisting.companyId ||
+            receiptExisting.assigneeAgentId !== actorAgentId ||
+            receiptExisting.executionRunId !== actorRunId ||
+            (receiptExisting.checkoutRunId && receiptExisting.checkoutRunId !== actorRunId) ||
+            !issueData.assigneeAgentId || issueData.assigneeAgentId === actorAgentId ||
+            issueData.assigneeUserId !== null || !issueData.executionState ||
+            (issueData.status !== "in_review" && issueData.status !== "in_progress")
+          )) {
+            throw conflict("The active run no longer owns this workflow handoff", {
+              code: "issue_handoff_owner_changed",
+            });
+          }
         }
+        await revokeLegacyRunsOnIssueHandoff(tx, {
+          issue: receiptExisting,
+          nextAssigneeAgentId:
+            issueData.assigneeAgentId !== undefined
+              ? issueData.assigneeAgentId
+              : receiptExisting.assigneeAgentId,
+          nextAssigneeUserId:
+            issueData.assigneeUserId !== undefined
+              ? issueData.assigneeUserId
+              : receiptExisting.assigneeUserId,
+          actorAgentId,
+          actorRunId,
+        });
         if (actorAgentId && patch.status === "done") {
           const [review] = await tx.select({ id: toolActionRequests.id }).from(toolActionRequests).where(and(eq(toolActionRequests.companyId, existing.companyId), eq(toolActionRequests.issueId, id), inArray(toolActionRequests.status, ["pending", "approved", "executing"]))).limit(1);
           if (review) throw conflict("This task is waiting for a connection review. Finish unrelated work, then yield in_review without retrying the governed call.", { code: "tool_review_pending", actionRequestId: review.id });
@@ -11830,8 +11945,8 @@ export function issueService(db: Db) {
           assigneeUserId: null,
           checkoutRunId,
           executionRunId: checkoutRunId,
-          status: "in_progress",
-          startedAt: now,
+          status: sql`case when ${issues.status} = 'in_review' then 'in_review' else 'in_progress' end`,
+          startedAt: sql`case when ${issues.status} = 'in_review' then ${issues.startedAt} else ${now.toISOString()}::timestamptz end`,
           updatedAt: now,
         })
         .where(
@@ -11866,7 +11981,7 @@ export function issueService(db: Db) {
 
       if (
         current.assigneeAgentId === agentId &&
-        current.status === "in_progress" &&
+        (current.status === "in_progress" || (current.status === "in_review" && expectedStatuses.includes("in_review"))) &&
         current.checkoutRunId == null &&
         (current.executionRunId == null ||
           current.executionRunId === checkoutRunId) &&
@@ -11882,7 +11997,7 @@ export function issueService(db: Db) {
           .where(
             and(
               eq(issues.id, id),
-              eq(issues.status, "in_progress"),
+              eq(issues.status, current.status),
               eq(issues.assigneeAgentId, agentId),
               isNull(issues.checkoutRunId),
               or(
@@ -11899,7 +12014,7 @@ export function issueService(db: Db) {
       if (
         checkoutRunId &&
         current.assigneeAgentId === agentId &&
-        current.status === "in_progress" &&
+        (current.status === "in_progress" || (current.status === "in_review" && expectedStatuses.includes("in_review"))) &&
         current.checkoutRunId &&
         current.checkoutRunId !== checkoutRunId
       ) {
@@ -11908,6 +12023,7 @@ export function issueService(db: Db) {
           actorAgentId: agentId,
           actorRunId: checkoutRunId,
           expectedCheckoutRunId: current.checkoutRunId,
+          expectedStatuses,
         });
         if (staleAdoption.adopted) {
           const row = await db
@@ -11941,12 +12057,10 @@ export function issueService(db: Db) {
             executionRunId: checkoutRunId,
             executionAgentNameKey: null,
             executionLockedAt: now,
-            status: "in_progress",
+            status: sql`case when ${issues.status} = 'in_review' then 'in_review' else 'in_progress' end`,
+            startedAt: sql`case when ${issues.status} in ('in_progress', 'in_review') then ${issues.startedAt} else ${now.toISOString()}::timestamptz end`,
             updatedAt: now,
           };
-          if (current.status !== "in_progress") {
-            adoptionSet.startedAt = now;
-          }
           const adopted = await db
             .update(issues)
             .set(adoptionSet)
@@ -11973,7 +12087,7 @@ export function issueService(db: Db) {
       // If this run already owns it and it's in_progress, return it (no self-409)
       if (
         current.assigneeAgentId === agentId &&
-        current.status === "in_progress" &&
+        (current.status === "in_progress" || (current.status === "in_review" && expectedStatuses.includes("in_review"))) &&
         sameRunLock(current.checkoutRunId, checkoutRunId)
       ) {
         const row = await db
@@ -12531,7 +12645,7 @@ export function issueService(db: Db) {
       },
       dbOrTx: any = db,
     ): Promise<IssueComment> {
-      if (dbOrTx === db && (actor.runId || actor.userId)) {
+      if (dbOrTx === db && (actor.runId || actor.userId || actor.agentId)) {
         const append = () =>
           measureRunTransaction(db, "response", async (tx) => {
             // Serialize run-authored comments on the issue so a provider retry
@@ -12553,13 +12667,13 @@ export function issueService(db: Db) {
       // The query below locks human comments on caller-owned transactions too,
       // sharing the fence with both question creation and Slack settlement.
       const issueQuery = dbOrTx
-        .select({ companyId: issues.companyId, conversationAgentId: issues.conversationAgentId })
+        .select({ companyId: issues.companyId, conversationAgentId: issues.conversationAgentId, executionState: issues.executionState })
         .from(issues)
         .where(eq(issues.id, issueId));
       // Caller-owned transactions (including chat and review comments) must
       // serialize with question creation before inserting the human comment.
-      const issue = await (actor.userId || (actor.runId && dbOrTx !== db) ? issueQuery.for("update") : issueQuery)
-        .then((rows: Array<{ companyId: string; conversationAgentId: string | null }>) => rows[0] ?? null);
+      const issue = await (actor.userId || actor.agentId || (actor.runId && dbOrTx !== db) ? issueQuery.for("update") : issueQuery)
+        .then((rows: Array<{ companyId: string; conversationAgentId: string | null; executionState: unknown }>) => rows[0] ?? null);
 
       if (!issue) throw notFound("Issue not found");
 
@@ -12574,6 +12688,7 @@ export function issueService(db: Db) {
           .censorUsernameInLogs,
       };
       const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
+      const publishedBody = withIssueCommentReviewContext(redactedBody, actor.agentId, issue.executionState);
       if (actor.userId && options?.clientRequestId) {
         const [existing] = await dbOrTx.select().from(issueComments).where(and(eq(issueComments.issueId, issueId),
           eq(issueComments.authorUserId, actor.userId), eq(issueComments.clientRequestId, options.clientRequestId)));
@@ -12734,7 +12849,7 @@ export function issueService(db: Db) {
               actor.agentId
                 ? eq(issueComments.authorAgentId, actor.agentId)
                 : isNull(issueComments.authorAgentId),
-              eq(issueComments.body, redactedBody),
+              or(eq(issueComments.body, redactedBody), eq(issueComments.body, UNREVIEWED_AGENT_REPORT_PREFIX + redactedBody)),
               isNull(issueComments.deletedAt),
             ),
           )
@@ -13088,7 +13203,7 @@ export function issueService(db: Db) {
                 payload: projectSafeChatPublication({
                   classification: "external",
                   source: "agent_comment",
-                  text: redactedBody,
+                  text: comment.body,
                 }),
                 state: "pending",
                 createdAt: publicationCreatedAt,
@@ -13561,7 +13676,7 @@ export function issueService(db: Db) {
       return [...mentionedIds].filter((projectId) => valid.has(projectId));
     },
 
-    getAncestors: async (issueId: string) => {
+    getAncestors: async (issueId: string, companyId?: string) => {
       const raw: Array<{
         id: string;
         identifier: string | null;
@@ -13577,7 +13692,9 @@ export function issueService(db: Db) {
       const start = await db
         .select()
         .from(issues)
-        .where(eq(issues.id, issueId))
+        .where(companyId
+          ? and(eq(issues.id, issueId), eq(issues.companyId, companyId))
+          : eq(issues.id, issueId))
         .then((r) => r[0] ?? null);
       let currentId = start?.parentId ?? null;
       while (currentId && !visited.has(currentId) && raw.length < 50) {
@@ -13596,7 +13713,9 @@ export function issueService(db: Db) {
             parentId: issues.parentId,
           })
           .from(issues)
-          .where(eq(issues.id, currentId))
+          .where(companyId
+            ? and(eq(issues.id, currentId), eq(issues.companyId, companyId))
+            : eq(issues.id, currentId))
           .then((r) => r[0] ?? null);
         if (!parent) break;
         raw.push({

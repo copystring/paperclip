@@ -118,6 +118,7 @@ import {
   type IssuePostCommitAction,
 } from "../issues.js";
 import {
+  buildExecutionStageWakeContext,
   applyIssueMonitorPolicyTransition,
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
@@ -5376,6 +5377,15 @@ export function recoveryService(
             },
           },
           extraContext: {
+            executionStage: buildExecutionStageWakeContext({
+              state: pendingExecutionState,
+              wakeRole:
+                pendingExecutionState.currentStageType === "approval"
+                  ? "approver"
+                  : "reviewer",
+              recoveryInstruction:
+                "The previous reviewer run ended without a saved decision for this pending stage. Finish the review and record the decision through the issue update route below. Do not treat comments or prose as a saved decision.",
+            }),
             currentStageId: pendingExecutionState.currentStageId ?? null,
             currentStageType: pendingExecutionState.currentStageType ?? null,
             currentReviewDecisionId:

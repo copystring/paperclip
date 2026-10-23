@@ -667,6 +667,7 @@ function connectionSetupMutationFingerprint(
 ): string {
   return stableHash({
     name: row.name,
+    authKind: row.authKind,
     transport: row.transport,
     status: row.status,
     enabled: row.enabled,
@@ -2170,8 +2171,10 @@ export function toolAccessService(
     // under Advanced authentication; on the simple path it starts from what the
     // operator supplied and is upgraded to `oauth` when discovery proves the
     // endpoint needs sign-in (see `remoteTools` and `startOAuth`).
-    const genericAuthKind: ToolConnectionAuthKind =
-      (remoteMcpConnector ? undefined : method?.auth) ??
+    const galleryAuthKind: ToolConnectionAuthKind | undefined =
+      remoteMcpConnector ? undefined : method?.auth;
+    const requestedAuthKind: ToolConnectionAuthKind =
+      galleryAuthKind ??
       (input.authMode === "oauth" || input.oauthClient
         ? "oauth"
         : input.authMode === "bearer" || input.authMode === "custom_headers"
@@ -2213,23 +2216,51 @@ export function toolAccessService(
     const retainedSource =
       retainedConfig.sourceTemplateKey ??
       asRecord(retainedConnection?.transportConfig).sourceTemplateKey;
-    // Setup forms never receive stored secret values. Treat an omitted value as
-    // "keep the existing secret" only while resuming the exact same curated
-    // provider and method. This prevents a retry from detaching a client secret
-    // or API key, without carrying credentials across a method/provider change.
+    // Setup forms never receive stored secret values. Keep a credential only
+    // when a reconnect retains the same identity and endpoint/auth method.
+    // Credential-bearing URLs are handled independently and must never retain
+    // header or OAuth material from the prior URL.
+    const candidateCredentialSecretRefs =
+      retainedPersonalIdentity?.grant?.credentialSecretRefs ??
+      retainedConnection?.credentialSecretRefs ??
+      [];
+    const sameGenericEndpoint = Boolean(
+      retainedConnection && !galleryEntry &&
+      retainedSource == null && retainedMethodKey == null &&
+      baseConfig.url === retainedConfig.url,
+    );
+    const retainedHeaderPaths = new Set(
+      candidateCredentialSecretRefs.map((ref) => ref.configPath),
+    );
+    const requestedAuthMode = input.authMode ?? "auto";
+    const genericAuthModeMatchesRetained =
+      (requestedAuthMode === "auto" && retainedConnection?.authKind !== "oauth") ||
+      (requestedAuthMode === "bearer" &&
+        retainedHeaderPaths.has("credentials.authorization")) ||
+      (requestedAuthMode === "custom_headers" &&
+        [...retainedHeaderPaths].some((path) => path.startsWith("headers.")));
     const canRetainCredentialMaterial = Boolean(
       retainedConnection &&
+      retainsIdentity &&
       previousGrantKind === requestedGrantKind &&
-      galleryEntry &&
-      retainedSource === galleryEntry.slug &&
-      retainedMethodKey === method?.key &&
-      (!remoteMcpConnector || (baseConfig.url === retainedConfig.url && genericAuthKind === retainedConnection.authKind)),
+      (galleryEntry
+        ? retainedSource === galleryEntry.slug &&
+          retainedMethodKey === method?.key &&
+          (!remoteMcpConnector ||
+            (baseConfig.url === retainedConfig.url &&
+              requestedAuthKind === retainedConnection.authKind))
+        : sameGenericEndpoint &&
+          !remoteUrlCredential?.secretUrl &&
+          genericAuthModeMatchesRetained),
     );
     const retainedCredentialSecretRefs = canRetainCredentialMaterial
-      ? (retainedPersonalIdentity?.grant?.credentialSecretRefs ??
-        retainedConnection?.credentialSecretRefs ??
-        [])
+      ? candidateCredentialSecretRefs
       : [];
+    const genericAuthKind: ToolConnectionAuthKind =
+      canRetainCredentialMaterial && requestedAuthMode === "auto" &&
+        [...retainedHeaderPaths].some((path) => path.startsWith("headers.") || path === "credentials.authorization")
+        ? "api_key"
+        : requestedAuthKind;
     const credentialPolicy: ToolConnectionCredentialPolicy =
       requestedGrantKind === "user"
         ? "per_user"
@@ -2880,6 +2911,9 @@ export function toolAccessService(
       let preserveConcurrentRevival = false;
       if (connectionRow && revivedConnectionPrevious) {
         const attemptedConnection = connectionRow;
+        let rollbackConnectionRestored:
+          | typeof toolConnections.$inferSelect
+          | null = null;
         try {
           await db.transaction(async (tx) => {
             if (revivedGrantMutation) await tx.select({ id: connectionGrants.id }).from(connectionGrants)
@@ -2906,11 +2940,12 @@ export function toolAccessService(
                 connectionSetupMutationFingerprint(attemptedConnection),
             );
             if (connectionMutationIsStillCurrent) {
-              await tx
+              [rollbackConnectionRestored] = await tx
                 .update(toolConnections)
                 .set({
                   agentInstructions: revivedConnectionPrevious.agentInstructions,
                   name: revivedConnectionPrevious.name,
+                  authKind: revivedConnectionPrevious.authKind,
                   transport: revivedConnectionPrevious.transport,
                   status: revivedConnectionPrevious.status,
                   enabled: revivedConnectionPrevious.enabled,
@@ -2925,7 +2960,8 @@ export function toolAccessService(
                   credentialPolicy: revivedConnectionPrevious.credentialPolicy,
                   updatedAt: new Date(),
                 })
-                .where(eq(toolConnections.id, revivedConnectionPrevious.id));
+                .where(eq(toolConnections.id, revivedConnectionPrevious.id))
+                .returning();
             } else {
               preserveConcurrentRevival = true;
             }
@@ -2972,6 +3008,13 @@ export function toolAccessService(
                   .delete(connectionGrants)
                   .where(eq(connectionGrants.id, current.id));
               }
+            }
+            if (connectionMutationIsStillCurrent && rollbackConnectionRestored) {
+              await syncCredentialBindings(
+                rollbackConnectionRestored,
+                [],
+                tx,
+              );
             }
           });
         } catch (rollbackError) {
