@@ -1500,15 +1500,22 @@ describe("renderPaperclipWakePrompt", () => {
     );
   });
 
-  it("keeps task and chat defaults to identity and connection guidance", () => {
+  it("keeps task and chat defaults to identity, connection, and tool guidance", () => {
     for (const template of [
       DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
       DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE,
     ]) {
-      expect(template).toBe(
-        `You are agent {{agent.id}} ({{agent.name}}).\n\n${CONNECTION_INTENT_AGENT_GUIDANCE}`,
-      );
+      expect(template.startsWith("You are agent {{agent.id}} ({{agent.name}}).\n")).toBe(true);
+      expect(template).toContain("Before running a script or optional executable");
+      expect(template).toContain("do not spend a separate model round on preflight alone");
+      expect(template).toContain("Before using optional search or JSON tools");
+      expect(template).toContain("When using assigned MCP tools");
+      expect(template).toContain("For HTTP JSON, keep the response body, HTTP status, headers, and transport diagnostics separate");
+      expect(template).toContain(CONNECTION_INTENT_AGENT_GUIDANCE);
     }
+    expect(DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE).toBe(
+      DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
+    );
   });
 
   it("keeps current task data without generic procedures on fresh scoped wake prompts", () => {
