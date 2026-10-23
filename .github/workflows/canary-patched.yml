@@ -3,60 +3,26 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 jobs:
   verify-upgrade:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    env:
-      NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
-        with:
-          version: 9.15.4
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 24
           package-manager-cache: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: canary-prepared-source
-          run-id: 39883780190
-          github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/prepared
-      - name: Extract exact candidate source and identify frozen dependency cache
+      - name: Validate receipt contracts and execute isolated Canary 6 to 13 upgrade
         run: |
           set -euo pipefail
-          tar -xzf "$RUNNER_TEMP/prepared/canary-source.tgz" -C "$RUNNER_TEMP"
-          cd "$RUNNER_TEMP/paperclip-source"
-          python3 - <<'PY'
-          import hashlib, os, pathlib, subprocess
-          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'paperclip-source'
-          store = subprocess.check_output(['pnpm','store','path','--silent'],cwd=root,text=True).strip()
-          with open(os.environ['GITHUB_ENV'],'a') as f:
-              f.write('PNPM_STORE='+store+'\n')
-              f.write('LOCK_HASH='+hashlib.sha256((root/'pnpm-lock.yaml').read_bytes()).hexdigest()+'\n')
-          PY
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ env.PNPM_STORE }}
-          key: canary-pnpm-${{ runner.os }}-${{ runner.arch }}-pnpm-9.15.4-${{ env.LOCK_HASH }}
-      - name: Build exact candidate migration package
-        working-directory: ${{ runner.temp }}/paperclip-source
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm --filter @paperclipai/shared build
-          pnpm --filter @paperclipai/db build
-      - name: Validate receipt contracts and execute disposable upgrade
-        run: |
           node --test ops/canary-train/verify-migration-compatibility.test.mjs
-          node ops/canary-train/verify-migration-compatibility.mjs "$RUNNER_TEMP/paperclip-source/packages/db" "$RUNNER_TEMP/migration-preparation.json"
+          node ops/canary-train/verify-migration-compatibility.mjs "$RUNNER_TEMP/migration-preparation.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: migration-preparation-proof
+          name: migration-preparation-proof-canary6-to-canary13
           path: ${{ runner.temp }}/migration-preparation.json
           retention-days: 1
           if-no-files-found: error

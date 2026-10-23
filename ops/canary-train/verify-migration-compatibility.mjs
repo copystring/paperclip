@@ -1,36 +1,42 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import net from 'node:net';
+import { inspect } from 'node:util';
+import { existsSync } from 'node:fs';
 
 const EXPECTED_OLD_VERSION = '2026.1017.0-canary.6';
 const EXPECTED_OLD_SRI = 'sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg==';
 const EXPECTED_OLD_INVENTORY_COUNT = 354;
 const EXPECTED_OLD_INVENTORY_SHA256 = '9cec6945b6dd1c38b80940e5246d500da8b5d506a4be68db20ab89136fc11ed9';
-const EXPECTED_ADDED_SQL_COUNT = 19;
+const EXPECTED_CANDIDATE_SOURCE_COMMIT = '9c442cf48e633002fb9600ff0c137550889fdb08';
+const CANDIDATE_PACKAGE_VERSION = '2026.1023.0-canary.13';
+const CANDIDATE_PACKAGE_SRI = 'sha512-Ub4gzp005JhteAMeDsOxUXDjbSA7OUg+dqiQ1CGaqqxB+xZpJS+x5ke5N/GkqL3f/a+DOQMDp/ZJzNC6//Uo3Q==';
+const EXPECTED_CANDIDATE_INVENTORY_COUNT = 375;
+const EXPECTED_CANDIDATE_INVENTORY_SHA256 = '89cd5c4305633ac9eeabbb04a9d0584adce53afe0b2d06a6f7dab983dfe34174';
+const EXPECTED_ADDED_SQL_COUNT = 21;
+const EXPECTED_DEFERRED_MIGRATIONS = ['0374_rare_wolfpack.sql', '0375_short_mercury.sql'];
 export const MIGRATION_INVENTORY_PREFIX = 'node_modules/@paperclipai/db/dist/migrations/';
-const USER = 'paperclip';
-const PASSWORD = 'paperclip';
-const REQUIRED_ASSERTIONS = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'migration-inventory-extension'];
+const REQUIRED_ASSERTIONS = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'restore-point-checkout-migrations', 'migration-inventory-extension'];
 
 export function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 export function verifySRI(bytes, sri) {
   const m = /^sha512-([A-Za-z0-9+/]+={0,2})$/.exec(sri ?? '');
   if (!m) throw new Error('Expected one exact sha512 SRI token');
   const actual = createHash('sha512').update(bytes).digest('base64');
-  if (actual !== m[1]) throw new Error('Old package SRI did not match the pinned package');
+  if (actual !== m[1]) throw new Error('Tarball SRI did not match the pinned package');
   return actual;
 }
-export function makeReceipt({ oldVersion, oldSRI, oldJournalHash, oldMigrationInventoryHash, candidateJournalHash, candidateMigrationHash, assertions }) {
+export function makeReceipt({ oldVersion, oldSRI, oldJournalHash, oldMigrationInventoryHash, candidateVersion, candidateSRI, candidateJournalHash, candidateMigrationHash, assertions }) {
   if (oldVersion !== EXPECTED_OLD_VERSION || oldSRI !== EXPECTED_OLD_SRI) throw new Error('Unapproved old package identity');
+  if (candidateVersion !== CANDIDATE_PACKAGE_VERSION || candidateSRI !== CANDIDATE_PACKAGE_SRI) throw new Error('Unapproved candidate package identity');
   if (![oldJournalHash, oldMigrationInventoryHash, candidateJournalHash, candidateMigrationHash].every((h) => /^[a-f0-9]{64}$/.test(h))) throw new Error('Receipt requires SHA-256 migration identities');
   if (!Array.isArray(assertions) || assertions.length !== REQUIRED_ASSERTIONS.length || assertions.some((a) => a.passed !== true) || REQUIRED_ASSERTIONS.some((id) => !assertions.some((a) => a.id === id))) throw new Error('Receipt must contain every successful migration invariant');
-  const body = { schema: 1, oldPackage: { name: '@paperclipai/db', version: oldVersion, integrity: oldSRI, migrationInventoryCount: EXPECTED_OLD_INVENTORY_COUNT, migrationInventorySha256: oldMigrationInventoryHash, journalSha256: oldJournalHash }, candidate: { migrationInventoryCount: EXPECTED_OLD_INVENTORY_COUNT + EXPECTED_ADDED_SQL_COUNT, migrationInventorySha256: candidateMigrationHash, journalSha256: candidateJournalHash }, assertions };
+  const body = { schema: 1, candidateSourceCommit: EXPECTED_CANDIDATE_SOURCE_COMMIT, oldPackage: { name: '@paperclipai/db', version: oldVersion, integrity: oldSRI, migrationInventoryCount: EXPECTED_OLD_INVENTORY_COUNT, migrationInventorySha256: oldMigrationInventoryHash, journalSha256: oldJournalHash }, candidate: { name: '@paperclipai/db', version: candidateVersion, integrity: candidateSRI, migrationInventoryCount: EXPECTED_CANDIDATE_INVENTORY_COUNT, migrationInventorySha256: candidateMigrationHash, journalSha256: candidateJournalHash }, assertions };
   return { ...body, receiptSha256: sha256(Buffer.from(JSON.stringify(body))) };
 }
 export function canonicalInventoryHash(inventory) {
@@ -45,12 +51,21 @@ export function assertInventoryBinding(inventory, { expectedCount, expectedSha25
 export function resolvePackageDependency(packageEntryPath, dependency) {
   return createRequire(packageEntryPath).resolve(dependency);
 }
-export function assertMigrationExtension(oldInventory, candidateInventory, oldJournal, candidateJournal) {
+export function formatFailure(error, stage = 'migration compatibility run') {
+  const detail = error instanceof Error ? error.stack ?? error.message : inspect(error, { depth: 4, breakLength: 120 });
+  return `[migration-compat] ${stage} failed: ${String(detail).replace(/(postgres(?:ql)?:\/\/)[^\s@]+@/gi, '$1[redacted]@')}`;
+}
+export async function runCli(operation, receiptPath) {
   try {
-    assertInventoryBinding(oldInventory, { expectedCount: EXPECTED_OLD_INVENTORY_COUNT, expectedSha256: EXPECTED_OLD_INVENTORY_SHA256, pathPrefix: MIGRATION_INVENTORY_PREFIX });
-  } catch {
-    throw new Error('Old package migration inventory did not match the reviewed 0354 baseline');
+    await operation();
+    if (!receiptPath || !existsSync(receiptPath)) throw new Error('operation completed without producing its required receipt');
+    return 0;
+  } catch (error) {
+    process.stderr.write(`${formatFailure(error)}\n`);
+    return 1;
   }
+}
+export function assertMigrationExtensionShape(oldInventory, candidateInventory, oldJournal, candidateJournal, { addedSqlCount, candidateCount, candidateSha256 }) {
   const oldFiles = Object.keys(oldInventory).sort();
   const candidateFiles = Object.keys(candidateInventory).sort();
   if (candidateFiles.some((name) => !name.startsWith(MIGRATION_INVENTORY_PREFIX))) throw new Error('Candidate migration inventory has a path outside the package inventory');
@@ -59,23 +74,56 @@ export function assertMigrationExtension(oldInventory, candidateInventory, oldJo
     if (candidateInventory[name] !== oldInventory[name]) throw new Error(`Candidate changed or removed baseline migration ${name}`);
   }
   const added = candidateFiles.filter((name) => !Object.hasOwn(oldInventory, name));
-  if (added.length !== EXPECTED_ADDED_SQL_COUNT || added.some((name) => !/\/\d{4}_.+\.sql$/.test(name))) throw new Error('Candidate must add exactly the 19 reviewed SQL migrations');
-  if (candidateFiles.length !== EXPECTED_OLD_INVENTORY_COUNT + EXPECTED_ADDED_SQL_COUNT) throw new Error('Candidate migration inventory has unexpected files');
+  if (added.length !== addedSqlCount || added.some((name) => !/\/\d{4}_.+\.sql$/.test(name))) throw new Error(`Candidate must add exactly ${addedSqlCount} SQL migrations`);
+  if (candidateFiles.length !== candidateCount || canonicalInventoryHash(candidateInventory) !== candidateSha256) throw new Error('Candidate migration inventory did not match the exact reviewed package hash');
   const priorEntries = oldJournal.entries;
-  if (!Array.isArray(priorEntries) || !Array.isArray(candidateJournal.entries) || candidateJournal.entries.length !== priorEntries.length + EXPECTED_ADDED_SQL_COUNT) throw new Error('Candidate migration journal length is not a 19-entry extension');
+  if (!Array.isArray(priorEntries) || !Array.isArray(candidateJournal.entries) || candidateJournal.entries.length !== priorEntries.length + addedSqlCount) throw new Error(`Candidate migration journal is not an exact ${addedSqlCount}-entry extension`);
   if (JSON.stringify(candidateJournal.entries.slice(0, priorEntries.length)) !== JSON.stringify(priorEntries)) throw new Error('Candidate changed the pinned migration journal prefix');
   return { oldCount: oldFiles.length, candidateCount: candidateFiles.length, addedSql: added.length, oldInventorySha256: canonicalInventoryHash(oldInventory), candidateInventorySha256: canonicalInventoryHash(candidateInventory) };
 }
+export function assertMigrationExtension(oldInventory, candidateInventory, oldJournal, candidateJournal) {
+  try {
+    assertInventoryBinding(oldInventory, { expectedCount: EXPECTED_OLD_INVENTORY_COUNT, expectedSha256: EXPECTED_OLD_INVENTORY_SHA256, pathPrefix: MIGRATION_INVENTORY_PREFIX });
+  } catch {
+    throw new Error('Old package migration inventory did not match the reviewed 0354 baseline');
+  }
+  return assertMigrationExtensionShape(oldInventory, candidateInventory, oldJournal, candidateJournal, {
+    addedSqlCount: EXPECTED_ADDED_SQL_COUNT,
+    candidateCount: EXPECTED_CANDIDATE_INVENTORY_COUNT,
+    candidateSha256: EXPECTED_CANDIDATE_INVENTORY_SHA256,
+  });
+}
 
 function run(command, args, cwd) {
-  const result = spawnSync(command, args, { cwd, encoding: 'utf8', windowsHide: true, timeout: 120_000 });
-  if (result.status !== 0) throw new Error(`${command} failed (${result.status}): ${(result.stderr || result.stdout).slice(-3000)}`);
+  const executable = process.platform === 'win32' && command === 'npm'
+    ? process.execPath
+    : command;
+  const commandArgs = executable === process.execPath && command === 'npm'
+    ? [path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'), ...args]
+    : args;
+  const result = spawnSync(executable, commandArgs, { cwd, encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+  if (result.error || result.status !== 0) {
+    const detail = result.error?.message ?? result.stderr ?? result.stdout ?? 'no process output';
+    throw new Error(`${command} failed (${result.status ?? 'spawn error'}): ${String(detail).slice(-3000)}`);
+  }
   return result.stdout;
 }
-async function port() {
-  return await new Promise((resolve, reject) => {
-    const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close((e) => e ? reject(e) : resolve(p)); });
-  });
+async function assertPrivateTempRoot(temp, expectedParent) {
+  const info = await lstat(temp);
+  const resolved = path.resolve(temp);
+  const actual = await realpath(temp);
+  if (!info.isDirectory() || info.isSymbolicLink() || actual !== resolved || path.dirname(actual) !== expectedParent || !path.basename(actual).startsWith('paperclip-migration-compat-')) {
+    throw new Error('Refusing to mutate or remove a temporary path outside the private migration-run root');
+  }
+  return actual;
+}
+function runNode(args, cwd, databaseUrl) {
+  const result = spawnSync(process.execPath, args, { cwd, encoding: 'utf8', windowsHide: true, timeout: 120_000, env: { ...process.env, MIGRATION_COMPAT_DB_URL: databaseUrl } });
+  if (result.error || result.status !== 0) {
+    const detail = result.error?.message ?? result.stderr ?? result.stdout ?? 'no process output';
+    throw new Error(`Node migration subprocess failed (${result.status ?? 'spawn error'}): ${String(detail).slice(-3000)}`);
+  }
+  return result.stdout;
 }
 async function migrationIdentity(dir) {
   const journal = await readFile(path.join(dir, 'meta', '_journal.json'));
@@ -87,37 +135,42 @@ async function migrationIdentity(dir) {
   return { journalHash: sha256(journal), inventory, journal: JSON.parse(journal.toString('utf8')) };
 }
 async function main() {
-  const [candidateRoot, receiptPath, oldVersion = EXPECTED_OLD_VERSION, oldSRI = EXPECTED_OLD_SRI] = process.argv.slice(2);
-  if (!candidateRoot || !receiptPath) throw new Error('Usage: node verify-migration-compatibility.mjs <candidate-db-package-root> <receipt-output> [old-version] [old-sri]');
-  if (oldVersion !== EXPECTED_OLD_VERSION || oldSRI !== EXPECTED_OLD_SRI) throw new Error('Old package version/SRI must match the reviewed pin');
-  const candidateIndex = path.resolve(candidateRoot, 'dist/index.js');
-  const candidateMigrations = path.resolve(candidateRoot, 'dist/migrations');
-  const candidateIdentity = await migrationIdentity(candidateMigrations);
-  const temp = await mkdtemp(path.join(os.tmpdir(), 'paperclip-migration-compat-'));
-  let pg; let client;
+  const [receiptPath] = process.argv.slice(2);
+  const stage = (name) => process.stderr.write(`[migration-compat] ${name}\n`);
+  if (!receiptPath) throw new Error('Usage: node verify-migration-compatibility.mjs <receipt-output>');
+  const tempParent = await realpath(os.tmpdir());
+  const temp = await mkdtemp(path.join(tempParent, 'paperclip-migration-compat-'));
+  await assertPrivateTempRoot(temp, tempParent);
+  let database; let client; let restoreCandidateJournal; let restoreCandidateBoundary;
   try {
-    const pack = JSON.parse(run('npm', ['pack', `@paperclipai/db@${oldVersion}`, '--json', '--pack-destination', temp], temp))[0];
-    if (pack.version !== oldVersion) throw new Error('Registry returned a different old package version');
-    if (pack.integrity !== oldSRI) throw new Error('Registry metadata integrity did not match the reviewed pin');
-    const tgz = await readFile(path.join(temp, pack.filename));
-    verifySRI(tgz, oldSRI);
-    const install = path.join(temp, 'old');
-    await (await import('node:fs/promises')).mkdir(install);
-    run('npm', ['install', '--prefix', install, '--ignore-scripts', '--no-save', '--package-lock=false', '--no-audit', '--no-fund', path.join(temp, pack.filename)], temp);
-    const oldIndex = path.join(install, 'node_modules/@paperclipai/db/dist/index.js');
-    const oldMigrations = path.join(install, 'node_modules/@paperclipai/db/dist/migrations');
+    stage('fetch and verify pinned old and canary.13 npm packages');
+    const oldPack = JSON.parse(run('npm', ['pack', `@paperclipai/db@${EXPECTED_OLD_VERSION}`, '--json', '--pack-destination', temp], temp))[0];
+    if (oldPack.version !== EXPECTED_OLD_VERSION || oldPack.integrity !== EXPECTED_OLD_SRI) throw new Error('Registry metadata did not match the reviewed old package pin');
+    const oldTarball = path.join(temp, oldPack.filename);
+    verifySRI(await readFile(oldTarball), EXPECTED_OLD_SRI);
+    const candidatePack = JSON.parse(run('npm', ['pack', `@paperclipai/db@${CANDIDATE_PACKAGE_VERSION}`, '--json', '--pack-destination', temp], temp))[0];
+    if (candidatePack.version !== CANDIDATE_PACKAGE_VERSION || candidatePack.integrity !== CANDIDATE_PACKAGE_SRI) throw new Error('Registry metadata did not match the reviewed candidate package pin');
+    const candidateTarball = path.join(temp, candidatePack.filename);
+    verifySRI(await readFile(candidateTarball), CANDIDATE_PACKAGE_SRI);
+    const oldInstall = path.join(temp, 'old');
+    const candidateInstall = path.join(temp, 'candidate');
+    await (await import('node:fs/promises')).mkdir(oldInstall);
+    await (await import('node:fs/promises')).mkdir(candidateInstall);
+    run('npm', ['install', '--prefix', oldInstall, '--ignore-scripts', '--no-save', '--package-lock=false', '--no-audit', '--no-fund', oldTarball], temp);
+    run('npm', ['install', '--prefix', candidateInstall, '--ignore-scripts', '--no-save', '--package-lock=false', '--no-audit', '--no-fund', candidateTarball], temp);
+    const oldIndex = path.join(oldInstall, 'node_modules/@paperclipai/db/dist/index.js');
+    const oldMigrations = path.join(oldInstall, 'node_modules/@paperclipai/db/dist/migrations');
+    const candidateIndex = path.join(candidateInstall, 'node_modules/@paperclipai/db/dist/index.js');
+    const candidateMigrations = path.join(candidateInstall, 'node_modules/@paperclipai/db/dist/migrations');
     const oldIdentity = await migrationIdentity(oldMigrations);
+    const candidateIdentity = await migrationIdentity(candidateMigrations);
     const extension = assertMigrationExtension(oldIdentity.inventory, candidateIdentity.inventory, oldIdentity.journal, candidateIdentity.journal);
+    stage('load old migration engine');
     const oldDb = await import(pathToFileURL(oldIndex));
-    const candidateDb = await import(pathToFileURL(candidateIndex));
-    const EmbeddedPostgres = (await import(pathToFileURL(resolvePackageDependency(oldIndex, 'embedded-postgres')))).default;
-    const dbDir = path.join(temp, 'pg'); const pgPort = await port();
-    pg = new EmbeddedPostgres({ databaseDir: dbDir, user: USER, password: PASSWORD, port: pgPort, persistent: true, initdbFlags: ['--encoding=UTF8', '--locale=C', '--lc-messages=C'] });
-    await pg.initialise(); await pg.start();
-    const adminUrl = `postgres://${USER}:${PASSWORD}@127.0.0.1:${pgPort}/postgres`;
-    await oldDb.ensurePostgresDatabase(adminUrl, 'paperclip');
-    const url = `postgres://${USER}:${PASSWORD}@127.0.0.1:${pgPort}/paperclip`;
-    await oldDb.applyPendingMigrations(url);
+    stage('start disposable database with the pinned package test harness');
+    database = await oldDb.startEmbeddedPostgresTestDatabase('paperclip-migration-compat-');
+    const url = database.connectionString;
+    stage('seed historical rows in the old schema');
     const { default: postgres } = await import(pathToFileURL(resolvePackageDependency(oldIndex, 'postgres')));
     client = postgres(url, { max: 1 });
     const company = '10000000-0000-4000-8000-000000000001';
@@ -132,32 +185,104 @@ async function main() {
     await client`insert into company_secrets(id,company_id,scope,key,name) values ('10000000-0000-4000-8000-000000000005',${company},'company','compat_company','Compatibility company secret')`;
     await client`insert into company_secrets(id,company_id,scope,owner_user_id,user_secret_definition_id,key,name) values ('10000000-0000-4000-8000-000000000006',${company},'user','compat-user',${userDefinition},'compat_user','Compatibility user secret')`;
     await client`insert into company_secrets(id,company_id,scope,owner_agent_id,owner_plugin_id,key,name) values ('10000000-0000-4000-8000-000000000007',${company},'instance',${agent},${plugin},'compat_instance','Compatibility instance secret')`;
-    await candidateDb.applyPendingMigrations(url);
-    const state = await candidateDb.inspectMigrations(url);
+    const candidateJournalPath = path.join(candidateMigrations, 'meta', '_journal.json');
+    await assertPrivateTempRoot(temp, tempParent);
+    const journalInfo = await lstat(candidateJournalPath);
+    const journalParent = await realpath(path.dirname(candidateJournalPath));
+    if (!journalInfo.isFile() || journalInfo.isSymbolicLink() || !journalParent.startsWith(`${temp}${path.sep}`)) throw new Error('Refusing to modify a candidate journal outside the private npm installation');
+    const originalCandidateJournal = await readFile(candidateJournalPath);
+    const originalJournalHash = sha256(originalCandidateJournal);
+    restoreCandidateJournal = async () => {
+      await assertPrivateTempRoot(temp, tempParent);
+      const restoreParent = await realpath(path.dirname(candidateJournalPath));
+      const restoreInfo = await lstat(candidateJournalPath);
+      if (!restoreInfo.isFile() || restoreInfo.isSymbolicLink() || !restoreParent.startsWith(`${temp}${path.sep}`)) throw new Error('Refusing to restore a journal outside the private npm installation');
+      await writeFile(candidateJournalPath, originalCandidateJournal);
+      const restored = await readFile(candidateJournalPath);
+      if (!restored.equals(originalCandidateJournal) || sha256(restored) !== originalJournalHash) throw new Error('Temporary candidate journal was not restored byte-for-byte');
+    };
+    const candidateJournal = JSON.parse(originalCandidateJournal.toString('utf8'));
+    const deferredNames = candidateJournal.entries.slice(-2).map((entry) => `${entry.tag}.sql`);
+    if (JSON.stringify(deferredNames) !== JSON.stringify(EXPECTED_DEFERRED_MIGRATIONS)) throw new Error('Candidate tail did not match the pinned 0374/0375 restore-point migrations');
+    const deferredDirectory = path.join(temp, 'deferred-candidate-migrations');
+    await mkdir(deferredDirectory);
+    const deferredFiles = deferredNames.map((name) => ({
+      name,
+      source: path.join(candidateMigrations, name),
+      deferred: path.join(deferredDirectory, name),
+    }));
+    const deferredHashes = new Map();
+    for (const file of deferredFiles) deferredHashes.set(file.name, sha256(await readFile(file.source)));
+    restoreCandidateBoundary = async () => {
+      await assertPrivateTempRoot(temp, tempParent);
+      for (const file of deferredFiles) {
+        const sourceExists = existsSync(file.source);
+        const deferredExists = existsSync(file.deferred);
+        if (!sourceExists && deferredExists) await rename(file.deferred, file.source);
+        else if (!sourceExists || deferredExists) throw new Error(`Temporary migration file restore state was invalid for ${file.name}`);
+        const restoredMigration = await readFile(file.source);
+        if (sha256(restoredMigration) !== deferredHashes.get(file.name)) throw new Error(`Temporary migration file was not restored byte-for-byte: ${file.name}`);
+      }
+      await restoreCandidateJournal();
+    };
+    const through0373 = { ...candidateJournal, entries: candidateJournal.entries.slice(0, -2) };
+    stage('apply candidate migrations through 0373 using the real migration engine');
+    await writeFile(candidateJournalPath, `${JSON.stringify(through0373, null, 2)}\n`);
+    for (const file of deferredFiles) {
+      const info = await lstat(file.source);
+      const sourceParent = await realpath(path.dirname(file.source));
+      if (!info.isFile() || info.isSymbolicLink() || !sourceParent.startsWith(`${temp}${path.sep}`) || !path.resolve(file.deferred).startsWith(`${temp}${path.sep}`)) throw new Error(`Refusing to defer a migration outside the private npm installation: ${file.name}`);
+      await rename(file.source, file.deferred);
+    }
+    const inspectScript = "import {pathToFileURL} from 'node:url'; const db=await import(pathToFileURL(process.argv[1])); const url=process.env.MIGRATION_COMPAT_DB_URL; await db.applyPendingMigrations(url); const state=await db.inspectMigrations(url); process.stdout.write(JSON.stringify(state));";
+    const preRestorePointState = JSON.parse(runNode(['--input-type=module', '-e', inspectScript, candidateIndex], temp, url));
+    if (preRestorePointState.status !== 'upToDate' || preRestorePointState.journalEntryCount !== candidateJournal.entries.length - 2) throw new Error(`Fixture did not stop at the exact 0373 pre-restore-point-migration boundary: ${JSON.stringify(preRestorePointState)}`);
+    await restoreCandidateBoundary();
+    const project = '10000000-0000-4000-8000-000000000008';
+    const workspace = '10000000-0000-4000-8000-000000000009';
+    await client`insert into projects(id,company_id,name) values (${project},${company},'compatibility project')`;
+    await client`insert into execution_workspaces(id,company_id,project_id,mode,strategy_type,name) values (${workspace},${company},${project},'local','worktree','compatibility workspace')`;
+    await client`insert into execution_workspace_restore_points(id,company_id,execution_workspace_id,generation,object_key,sha256,byte_size,status) values ('10000000-0000-4000-8000-000000000010',${company},${workspace},7,'compat/primary',${'a'.repeat(64)},10,'active')`;
+    stage('apply exact candidate migrations 0374 and 0375');
+    const applyScript = "import {pathToFileURL} from 'node:url'; const db=await import(pathToFileURL(process.argv[1])); const url=process.env.MIGRATION_COMPAT_DB_URL; await db.applyPendingMigrations(url); const state=await db.inspectMigrations(url); process.stdout.write(JSON.stringify(state));";
+    const state = JSON.parse(runNode(['--input-type=module', '-e', applyScript, candidateIndex], temp, url));
     if (state.status !== 'upToDate') throw new Error(`Candidate migration state was ${state.status}`);
     const fixture = await client`select company_id,agent_id,idempotency_key,payload from agent_wakeup_requests where idempotency_key='task-retry:compatibility-fixture'`;
     if (fixture.length !== 1 || fixture[0].company_id !== company || fixture[0].agent_id !== agent || fixture[0].payload.source !== 'upgrade-fixture') throw new Error('Representative wakeup row did not survive candidate migrations');
     const unique = await client`select indexdef from pg_indexes where indexname='agent_wakeup_requests_task_retry_idempotency_uq'`;
     const projectOwner = await client`select column_name from information_schema.columns where table_name='company_secrets' and column_name='owner_project_id'`;
     const secrets = await client`select scope,owner_user_id,user_secret_definition_id,owner_agent_id,owner_project_id,owner_plugin_id from company_secrets where id in ('10000000-0000-4000-8000-000000000005','10000000-0000-4000-8000-000000000006','10000000-0000-4000-8000-000000000007') order by scope`;
+    const originalRestorePoint = await client`select checkout_name,generation,object_key,status from execution_workspace_restore_points where id='10000000-0000-4000-8000-000000000010'`;
+    const deletedRestorePoint = await client`insert into execution_workspace_restore_points(id,company_id,execution_workspace_id,generation,object_key,sha256,byte_size,status) values ('10000000-0000-4000-8000-000000000011',${company},${workspace},7,'compat/deleted',${'b'.repeat(64)},10,'deleted') returning id`;
+    const alternateCheckout = await client`insert into execution_workspace_restore_points(id,company_id,execution_workspace_id,generation,checkout_name,object_key,sha256,byte_size,status) values ('10000000-0000-4000-8000-000000000012',${company},${workspace},7,'alternate','compat/alternate',${'c'.repeat(64)},10,'pending') returning id`;
+    const duplicateAlternate = await client`insert into execution_workspace_restore_points(id,company_id,execution_workspace_id,generation,checkout_name,object_key,sha256,byte_size,status) values ('10000000-0000-4000-8000-000000000013',${company},${workspace},7,'alternate','compat/alternate-duplicate',${'d'.repeat(64)},10,'active') on conflict do nothing returning id`;
+    const restoreIndex = await client`select indexdef from pg_indexes where indexname='execution_workspace_restore_points_live_status_uniq'`;
     const assertions = [
       { id: 'migration-engine-upgrade', passed: true, detail: 'old package schema upgraded using candidate migration engine' },
       { id: 'task-retry-row-preserved', passed: true, detail: 'company/agent/payload/idempotency data preserved' },
       { id: 'candidate-schema-current', passed: true, detail: 'candidate migration journal reports upToDate' },
       { id: 'migration-specific-invariants', passed: unique.length === 1 && projectOwner.length === 1, detail: 'retry uniqueness index and project-secret owner column present' },
       { id: 'secret-scope-data-preserved', passed: secrets.length === 3 && secrets.some((s) => s.scope === 'company' && s.owner_user_id === null && s.user_secret_definition_id === null && s.owner_agent_id === null && s.owner_project_id === null && s.owner_plugin_id === null) && secrets.some((s) => s.scope === 'user' && s.owner_user_id === 'compat-user' && s.user_secret_definition_id === userDefinition && s.owner_agent_id === null && s.owner_project_id === null && s.owner_plugin_id === null) && secrets.some((s) => s.scope === 'instance' && s.owner_user_id === null && s.user_secret_definition_id === null && s.owner_agent_id === agent && s.owner_project_id === null && s.owner_plugin_id === plugin), detail: 'company, user, and agent-owned instance secret metadata survived with valid scope shapes' },
-      { id: 'migration-inventory-extension', passed: extension.addedSql === 19, detail: `exact ${extension.oldCount}-file baseline plus ${extension.addedSql} SQL migrations; no baseline SQL changed` },
+      { id: 'restore-point-checkout-migrations', passed: originalRestorePoint.length === 1 && originalRestorePoint[0].checkout_name === '' && originalRestorePoint[0].generation === 7 && originalRestorePoint[0].object_key === 'compat/primary' && deletedRestorePoint.length === 1 && alternateCheckout.length === 1 && duplicateAlternate.length === 0 && restoreIndex.length === 1 && restoreIndex[0].indexdef.includes('checkout_name') && restoreIndex[0].indexdef.includes('pending') && restoreIndex[0].indexdef.includes('active') && restoreIndex[0].indexdef.includes('expiring'), detail: '0374 preserves existing rows and default checkout name; 0375 enforces per-checkout live uniqueness while allowing deleted history' },
+      { id: 'migration-inventory-extension', passed: extension.addedSql === 21, detail: `exact ${extension.oldCount}-file baseline plus ${extension.addedSql} pinned SQL migrations; no baseline SQL changed` },
     ];
     if (assertions.some((a) => !a.passed)) throw new Error('Candidate schema invariants failed');
-    const receipt = makeReceipt({ oldVersion, oldSRI, oldJournalHash: oldIdentity.journalHash, oldMigrationInventoryHash: extension.oldInventorySha256, candidateJournalHash: candidateIdentity.journalHash, candidateMigrationHash: extension.candidateInventorySha256, assertions });
+    await restoreCandidateBoundary();
+    restoreCandidateBoundary = undefined;
+    restoreCandidateJournal = undefined;
+    const receipt = makeReceipt({ oldVersion: EXPECTED_OLD_VERSION, oldSRI: EXPECTED_OLD_SRI, oldJournalHash: oldIdentity.journalHash, oldMigrationInventoryHash: extension.oldInventorySha256, candidateVersion: CANDIDATE_PACKAGE_VERSION, candidateSRI: CANDIDATE_PACKAGE_SRI, candidateJournalHash: candidateIdentity.journalHash, candidateMigrationHash: extension.candidateInventorySha256, assertions });
     await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx' });
+    stage('migration receipt written');
     process.stdout.write(`${JSON.stringify(receipt)}\n`);
   } finally {
+    await restoreCandidateBoundary?.().catch(() => {});
+    await restoreCandidateJournal?.().catch(() => {});
     await client?.end({ timeout: 1 }).catch(() => {});
-    await pg?.stop().catch(() => {});
+    await database?.cleanup().catch(() => {});
+    await assertPrivateTempRoot(temp, tempParent);
     await rm(temp, { recursive: true, force: true });
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  main().catch((error) => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
+  process.exitCode = await runCli(main, process.argv[2]);
 }
