@@ -14,15 +14,15 @@ const EXPECTED_OLD_VERSION = '2026.1017.0-canary.6';
 const EXPECTED_OLD_SRI = 'sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg==';
 const EXPECTED_OLD_INVENTORY_COUNT = 354;
 const EXPECTED_OLD_INVENTORY_SHA256 = '9cec6945b6dd1c38b80940e5246d500da8b5d506a4be68db20ab89136fc11ed9';
-const EXPECTED_CANDIDATE_INVENTORY_COUNT = 375;
-const EXPECTED_CANDIDATE_INVENTORY_SHA256 = '89cd5c4305633ac9eeabbb04a9d0584adce53afe0b2d06a6f7dab983dfe34174';
-const EXPECTED_ADDED_SQL_COUNT = 21;
-const EXPECTED_DEFERRED_MIGRATIONS = ['0374_rare_wolfpack.sql', '0375_short_mercury.sql'];
+const EXPECTED_CANDIDATE_INVENTORY_COUNT = 376;
+const EXPECTED_CANDIDATE_INVENTORY_SHA256 = 'd4091a9a05fc45f25f3513d665dd2b1c68fc992aa8822a4db6c28c7b0971b91f';
+const EXPECTED_ADDED_SQL_COUNT = 22;
+const EXPECTED_DEFERRED_MIGRATIONS = ['0374_rare_wolfpack.sql', '0375_short_mercury.sql', '0376_clear_committed_native_recovery_state.sql'];
 const EMBEDDED_POSTGRES_PLATFORM = '@embedded-postgres/linux-x64';
 const EMBEDDED_POSTGRES_PLATFORM_VERSION = '18.1.0-beta.16';
 const EMBEDDED_POSTGRES_PLATFORM_SRI = 'sha512-+GIabpHh7QV2AcYBuzyQC41AYczSFphxfHy4ccTPIPrp6OSthZXH+A9fymjQzOiDHg9+1UeYET00Aj7sScjXrg==';
 export const MIGRATION_INVENTORY_PREFIX = 'node_modules/@paperclipai/db/dist/migrations/';
-const REQUIRED_ASSERTIONS = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'restore-point-checkout-migrations', 'migration-inventory-extension'];
+const REQUIRED_ASSERTIONS = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'restore-point-checkout-migrations', 'committed-native-recovery-state-migration', 'migration-inventory-extension'];
 
 export function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 export function verifySRI(bytes, sri) {
@@ -330,8 +330,8 @@ async function main() {
       if (!restored.equals(originalCandidateJournal) || sha256(restored) !== originalJournalHash) throw new Error('Temporary candidate journal was not restored byte-for-byte');
     };
     const candidateJournal = JSON.parse(originalCandidateJournal.toString('utf8'));
-    const deferredNames = candidateJournal.entries.slice(-2).map((entry) => `${entry.tag}.sql`);
-    if (JSON.stringify(deferredNames) !== JSON.stringify(EXPECTED_DEFERRED_MIGRATIONS)) throw new Error('Candidate tail did not match the pinned 0374/0375 restore-point migrations');
+    const deferredNames = candidateJournal.entries.slice(-EXPECTED_DEFERRED_MIGRATIONS.length).map((entry) => `${entry.tag}.sql`);
+    if (JSON.stringify(deferredNames) !== JSON.stringify(EXPECTED_DEFERRED_MIGRATIONS)) throw new Error('Candidate tail did not match the pinned 0374/0375/0376 compatibility migrations');
     const deferredDirectory = path.join(temp, 'deferred-candidate-migrations');
     await mkdir(deferredDirectory);
     const deferredFiles = deferredNames.map((name) => ({
@@ -353,7 +353,7 @@ async function main() {
       }
       await restoreCandidateJournal();
     };
-    const through0373 = { ...candidateJournal, entries: candidateJournal.entries.slice(0, -2) };
+    const through0373 = { ...candidateJournal, entries: candidateJournal.entries.slice(0, -EXPECTED_DEFERRED_MIGRATIONS.length) };
     stage('apply candidate migrations through 0373 using the real migration engine');
     await writeFile(candidateJournalPath, `${JSON.stringify(through0373, null, 2)}\n`);
     for (const file of deferredFiles) {
@@ -364,14 +364,29 @@ async function main() {
     }
     const inspectScript = "import {pathToFileURL} from 'node:url'; const db=await import(pathToFileURL(process.argv[1])); const url=process.env.MIGRATION_COMPAT_DB_URL; await db.applyPendingMigrations(url); const state=await db.inspectMigrations(url); process.stdout.write(JSON.stringify(state));";
     const preRestorePointState = JSON.parse(runNode(['--input-type=module', '-e', inspectScript, candidateIndex], temp, url));
-    if (preRestorePointState.status !== 'upToDate' || preRestorePointState.journalEntryCount !== candidateJournal.entries.length - 2) throw new Error(`Fixture did not stop at the exact 0373 pre-restore-point-migration boundary: ${JSON.stringify(preRestorePointState)}`);
+    if (preRestorePointState.status !== 'upToDate' || preRestorePointState.journalEntryCount !== candidateJournal.entries.length - EXPECTED_DEFERRED_MIGRATIONS.length) throw new Error(`Fixture did not stop at the exact 0373 pre-restore-point-migration boundary: ${JSON.stringify(preRestorePointState)}`);
     await restoreCandidateBoundary();
     const project = '10000000-0000-4000-8000-000000000008';
     const workspace = '10000000-0000-4000-8000-000000000009';
     await client`insert into projects(id,company_id,name) values (${project},${company},'compatibility project')`;
     await client`insert into execution_workspaces(id,company_id,project_id,mode,strategy_type,name) values (${workspace},${company},${project},'local','worktree','compatibility workspace')`;
     await client`insert into execution_workspace_restore_points(id,company_id,execution_workspace_id,generation,object_key,sha256,byte_size,status) values ('10000000-0000-4000-8000-000000000010',${company},${workspace},7,'compat/primary',${'a'.repeat(64)},10,'active')`;
-    stage('apply exact candidate migrations 0374 and 0375');
+    const issue = '10000000-0000-4000-8000-000000000014';
+    await client`insert into issues(id,company_id,title,status) values (${issue},${company},'native recovery migration fixture','done')`;
+    const recoveryHistory = [{ disposition: 'resume_dead_runner', requestId: 'history-fixture' }];
+    const baselineUpdatedAt = '2000-01-01T00:00:00.000Z';
+    const nativeFinalizationFixtures = [
+      { key: 'committed-unleased', runId: '10000000-0000-4000-8000-000000000015', phase: 'committed', leaseOwner: null, recoveryState: 'resuming_session', recoveryRequestId: 'committed-request' },
+      { key: 'committed-leased', runId: '10000000-0000-4000-8000-000000000016', phase: 'committed', leaseOwner: 'native-finalizer:live', recoveryState: 'resuming_session', recoveryRequestId: 'leased-request' },
+      { key: 'observed-unleased', runId: '10000000-0000-4000-8000-000000000017', phase: 'observed', leaseOwner: null, recoveryState: 'resuming_session', recoveryRequestId: 'observed-request' },
+      { key: 'terminal-failure-unleased', runId: '10000000-0000-4000-8000-000000000018', phase: 'terminal_failure', leaseOwner: null, recoveryState: 'blocked', recoveryRequestId: 'terminal-request' },
+      { key: 'committed-without-recovery-state', runId: '10000000-0000-4000-8000-000000000019', phase: 'committed', leaseOwner: null, recoveryState: null, recoveryRequestId: 'null-state-request' },
+    ];
+    for (const fixture of nativeFinalizationFixtures) {
+      await client`insert into heartbeat_runs(id,company_id,agent_id,status,runtime_mode,native_issue_id) values (${fixture.runId},${company},${agent},'succeeded','native',${issue})`;
+      await client`insert into native_run_finalizations(run_id,company_id,issue_id,phase,lease_owner,recovery_state,recovery_request_id,recovery_history,updated_at) values (${fixture.runId},${company},${issue},${fixture.phase},${fixture.leaseOwner},${fixture.recoveryState},${fixture.recoveryRequestId},${client.json(recoveryHistory)},${baselineUpdatedAt})`;
+    }
+    stage('apply exact candidate migrations 0374, 0375 and 0376');
     const applyScript = "import {pathToFileURL} from 'node:url'; const db=await import(pathToFileURL(process.argv[1])); const url=process.env.MIGRATION_COMPAT_DB_URL; await db.applyPendingMigrations(url); const state=await db.inspectMigrations(url); process.stdout.write(JSON.stringify(state));";
     const state = JSON.parse(runNode(['--input-type=module', '-e', applyScript, candidateIndex], temp, url));
     if (state.status !== 'upToDate') throw new Error(`Candidate migration state was ${state.status}`);
@@ -385,6 +400,35 @@ async function main() {
     const alternateCheckout = await client`insert into execution_workspace_restore_points(id,company_id,execution_workspace_id,generation,checkout_name,object_key,sha256,byte_size,status) values ('10000000-0000-4000-8000-000000000012',${company},${workspace},7,'alternate','compat/alternate',${'c'.repeat(64)},10,'pending') returning id`;
     const duplicateAlternate = await client`insert into execution_workspace_restore_points(id,company_id,execution_workspace_id,generation,checkout_name,object_key,sha256,byte_size,status) values ('10000000-0000-4000-8000-000000000013',${company},${workspace},7,'alternate','compat/alternate-duplicate',${'d'.repeat(64)},10,'active') on conflict do nothing returning id`;
     const restoreIndex = await client`select indexdef from pg_indexes where indexname='execution_workspace_restore_points_live_status_uniq'`;
+    const migratedFinalizations = new Map();
+    for (const fixture of nativeFinalizationFixtures) {
+      const [row] = await client`select phase,lease_owner,recovery_state,recovery_request_id,recovery_history,updated_at from native_run_finalizations where run_id=${fixture.runId}`;
+      if (!row) throw new Error(`Native finalization migration fixture disappeared: ${fixture.key}`);
+      migratedFinalizations.set(fixture.key, row);
+    }
+    const clearedCommitted = migratedFinalizations.get('committed-unleased');
+    const preservedLeased = migratedFinalizations.get('committed-leased');
+    const preservedObserved = migratedFinalizations.get('observed-unleased');
+    const preservedTerminal = migratedFinalizations.get('terminal-failure-unleased');
+    const preservedNullState = migratedFinalizations.get('committed-without-recovery-state');
+    const historyPreserved = (row) => JSON.stringify(row?.recovery_history) === JSON.stringify(recoveryHistory);
+    const baselineTimestamp = Date.parse(baselineUpdatedAt);
+    const nativeRecoveryMigrationPassed =
+      clearedCommitted.phase === 'committed' && clearedCommitted.lease_owner === null &&
+      clearedCommitted.recovery_state === null && clearedCommitted.recovery_request_id === null &&
+      historyPreserved(clearedCommitted) && Date.parse(clearedCommitted.updated_at) > baselineTimestamp &&
+      preservedLeased.phase === 'committed' && preservedLeased.lease_owner === 'native-finalizer:live' &&
+      preservedLeased.recovery_state === 'resuming_session' && preservedLeased.recovery_request_id === 'leased-request' &&
+      historyPreserved(preservedLeased) && Date.parse(preservedLeased.updated_at) === baselineTimestamp &&
+      preservedObserved.phase === 'observed' && preservedObserved.lease_owner === null &&
+      preservedObserved.recovery_state === 'resuming_session' && preservedObserved.recovery_request_id === 'observed-request' &&
+      historyPreserved(preservedObserved) && Date.parse(preservedObserved.updated_at) === baselineTimestamp &&
+      preservedTerminal.phase === 'terminal_failure' && preservedTerminal.lease_owner === null &&
+      preservedTerminal.recovery_state === 'blocked' && preservedTerminal.recovery_request_id === 'terminal-request' &&
+      historyPreserved(preservedTerminal) && Date.parse(preservedTerminal.updated_at) === baselineTimestamp &&
+      preservedNullState.phase === 'committed' && preservedNullState.lease_owner === null &&
+      preservedNullState.recovery_state === null && preservedNullState.recovery_request_id === 'null-state-request' &&
+      historyPreserved(preservedNullState) && Date.parse(preservedNullState.updated_at) === baselineTimestamp;
     const assertions = [
       { id: 'migration-engine-upgrade', passed: true, detail: 'old package schema upgraded using candidate migration engine' },
       { id: 'task-retry-row-preserved', passed: true, detail: 'company/agent/payload/idempotency data preserved' },
@@ -392,7 +436,8 @@ async function main() {
       { id: 'migration-specific-invariants', passed: unique.length === 1 && projectOwner.length === 1, detail: 'retry uniqueness index and project-secret owner column present' },
       { id: 'secret-scope-data-preserved', passed: secrets.length === 3 && secrets.some((s) => s.scope === 'company' && s.owner_user_id === null && s.user_secret_definition_id === null && s.owner_agent_id === null && s.owner_project_id === null && s.owner_plugin_id === null) && secrets.some((s) => s.scope === 'user' && s.owner_user_id === 'compat-user' && s.user_secret_definition_id === userDefinition && s.owner_agent_id === null && s.owner_project_id === null && s.owner_plugin_id === null) && secrets.some((s) => s.scope === 'instance' && s.owner_user_id === null && s.user_secret_definition_id === null && s.owner_agent_id === agent && s.owner_project_id === null && s.owner_plugin_id === plugin), detail: 'company, user, and agent-owned instance secret metadata survived with valid scope shapes' },
       { id: 'restore-point-checkout-migrations', passed: originalRestorePoint.length === 1 && originalRestorePoint[0].checkout_name === '' && originalRestorePoint[0].generation === 7 && originalRestorePoint[0].object_key === 'compat/primary' && deletedRestorePoint.length === 1 && alternateCheckout.length === 1 && duplicateAlternate.length === 0 && restoreIndex.length === 1 && restoreIndex[0].indexdef.includes('checkout_name') && restoreIndex[0].indexdef.includes('pending') && restoreIndex[0].indexdef.includes('active') && restoreIndex[0].indexdef.includes('expiring'), detail: '0374 preserves existing rows and default checkout name; 0375 enforces per-checkout live uniqueness while allowing deleted history' },
-      { id: 'migration-inventory-extension', passed: extension.addedSql === 21, detail: `exact ${extension.oldCount}-file baseline plus ${extension.addedSql} pinned SQL migrations; no baseline SQL changed` },
+      { id: 'committed-native-recovery-state-migration', passed: nativeRecoveryMigrationPassed, detail: '0376 clears only recovery state on committed unleased rows, updates their timestamp, and preserves lease-owned, noncommitted, null-state and history data' },
+      { id: 'migration-inventory-extension', passed: extension.addedSql === 22, detail: `exact ${extension.oldCount}-file baseline plus ${extension.addedSql} pinned SQL migrations; no baseline SQL changed` },
     ];
     if (assertions.some((a) => !a.passed)) throw new Error('Candidate schema invariants failed');
     await restoreCandidateBoundary();

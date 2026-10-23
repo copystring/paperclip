@@ -88,6 +88,11 @@ Changed migration inventories remain blocked by default. A local
 inventory hashes and a nonempty `requiredAssertions` list. The release must
 contain a matching `migrationCompatibilityReceipt` from its verified successful
 workflow, including the installed baseline package version and npm integrity.
+The current reviewed transition also requires the isolated fixture assertion
+`committed-native-recovery-state-migration`, which verifies that migration
+0376 clears recovery fields only on committed, unleased rows with recovery
+state, while preserving leases, other phases, null-state rows, timestamps,
+and recovery history.
 The receipt is bound to the workflow run, attempt, controller, source and patched
 commit. Approval alone cannot substitute for that evidence.
 
