@@ -13,8 +13,10 @@ const EXPECTED_OLD_SRI = 'sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8
 const EXPECTED_OLD_INVENTORY_COUNT = 354;
 const EXPECTED_OLD_INVENTORY_SHA256 = '9cec6945b6dd1c38b80940e5246d500da8b5d506a4be68db20ab89136fc11ed9';
 const EXPECTED_ADDED_SQL_COUNT = 19;
+export const MIGRATION_INVENTORY_PREFIX = 'node_modules/@paperclipai/db/dist/migrations/';
 const USER = 'paperclip';
 const PASSWORD = 'paperclip';
+const REQUIRED_ASSERTIONS = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'migration-inventory-extension'];
 
 export function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 export function verifySRI(bytes, sri) {
@@ -27,7 +29,7 @@ export function verifySRI(bytes, sri) {
 export function makeReceipt({ oldVersion, oldSRI, oldJournalHash, oldMigrationInventoryHash, candidateJournalHash, candidateMigrationHash, assertions }) {
   if (oldVersion !== EXPECTED_OLD_VERSION || oldSRI !== EXPECTED_OLD_SRI) throw new Error('Unapproved old package identity');
   if (![oldJournalHash, oldMigrationInventoryHash, candidateJournalHash, candidateMigrationHash].every((h) => /^[a-f0-9]{64}$/.test(h))) throw new Error('Receipt requires SHA-256 migration identities');
-  if (!Array.isArray(assertions) || assertions.length < 3 || assertions.some((a) => a.passed !== true)) throw new Error('Receipt can only attest successful invariants');
+  if (!Array.isArray(assertions) || assertions.length !== REQUIRED_ASSERTIONS.length || assertions.some((a) => a.passed !== true) || REQUIRED_ASSERTIONS.some((id) => !assertions.some((a) => a.id === id))) throw new Error('Receipt must contain every successful migration invariant');
   const body = { schema: 1, oldPackage: { name: '@paperclipai/db', version: oldVersion, integrity: oldSRI, migrationInventoryCount: EXPECTED_OLD_INVENTORY_COUNT, migrationInventorySha256: oldMigrationInventoryHash, journalSha256: oldJournalHash }, candidate: { migrationInventoryCount: EXPECTED_OLD_INVENTORY_COUNT + EXPECTED_ADDED_SQL_COUNT, migrationInventorySha256: candidateMigrationHash, journalSha256: candidateJournalHash }, assertions };
   return { ...body, receiptSha256: sha256(Buffer.from(JSON.stringify(body))) };
 }
@@ -35,16 +37,26 @@ export function canonicalInventoryHash(inventory) {
   const sorted = Object.fromEntries(Object.entries(inventory).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
   return sha256(Buffer.from(JSON.stringify(sorted)));
 }
+export function assertInventoryBinding(inventory, { expectedCount, expectedSha256, pathPrefix }) {
+  const files = Object.keys(inventory);
+  if (files.length !== expectedCount || files.some((name) => !name.startsWith(pathPrefix)) || canonicalInventoryHash(inventory) !== expectedSha256) throw new Error('Migration inventory does not match its bound prefix, count, and hash');
+  return true;
+}
 export function assertMigrationExtension(oldInventory, candidateInventory, oldJournal, candidateJournal) {
+  try {
+    assertInventoryBinding(oldInventory, { expectedCount: EXPECTED_OLD_INVENTORY_COUNT, expectedSha256: EXPECTED_OLD_INVENTORY_SHA256, pathPrefix: MIGRATION_INVENTORY_PREFIX });
+  } catch {
+    throw new Error('Old package migration inventory did not match the reviewed 0354 baseline');
+  }
   const oldFiles = Object.keys(oldInventory).sort();
   const candidateFiles = Object.keys(candidateInventory).sort();
-  if (oldFiles.length !== EXPECTED_OLD_INVENTORY_COUNT || canonicalInventoryHash(oldInventory) !== EXPECTED_OLD_INVENTORY_SHA256) throw new Error('Old package migration inventory did not match the reviewed 0354 baseline');
+  if (candidateFiles.some((name) => !name.startsWith(MIGRATION_INVENTORY_PREFIX))) throw new Error('Candidate migration inventory has a path outside the package inventory');
   for (const name of oldFiles) {
-    if (name === 'meta/_journal.json') continue;
+    if (name === `${MIGRATION_INVENTORY_PREFIX}meta/_journal.json`) continue;
     if (candidateInventory[name] !== oldInventory[name]) throw new Error(`Candidate changed or removed baseline migration ${name}`);
   }
   const added = candidateFiles.filter((name) => !Object.hasOwn(oldInventory, name));
-  if (added.length !== EXPECTED_ADDED_SQL_COUNT || added.some((name) => !/^\d{4}_.+\.sql$/.test(name))) throw new Error('Candidate must add exactly the 19 reviewed SQL migrations');
+  if (added.length !== EXPECTED_ADDED_SQL_COUNT || added.some((name) => !/\/\d{4}_.+\.sql$/.test(name))) throw new Error('Candidate must add exactly the 19 reviewed SQL migrations');
   if (candidateFiles.length !== EXPECTED_OLD_INVENTORY_COUNT + EXPECTED_ADDED_SQL_COUNT) throw new Error('Candidate migration inventory has unexpected files');
   const priorEntries = oldJournal.entries;
   if (!Array.isArray(priorEntries) || !Array.isArray(candidateJournal.entries) || candidateJournal.entries.length !== priorEntries.length + EXPECTED_ADDED_SQL_COUNT) throw new Error('Candidate migration journal length is not a 19-entry extension');
@@ -67,8 +79,8 @@ async function migrationIdentity(dir) {
   const fs = await import('node:fs/promises');
   const names = await fs.readdir(dir);
   const inventory = {};
-  for (const name of names.filter((n) => n.endsWith('.sql')).sort()) inventory[name] = sha256(await readFile(path.join(dir, name)));
-  inventory['meta/_journal.json'] = sha256(journal);
+  for (const name of names.filter((n) => n.endsWith('.sql')).sort()) inventory[`${MIGRATION_INVENTORY_PREFIX}${name}`] = sha256(await readFile(path.join(dir, name)));
+  inventory[`${MIGRATION_INVENTORY_PREFIX}meta/_journal.json`] = sha256(journal);
   return { journalHash: sha256(journal), inventory, journal: JSON.parse(journal.toString('utf8')) };
 }
 async function main() {
