@@ -393,8 +393,11 @@ async function main() {
     const nativeProcessFixtures = [
       { key: 'old-failed-with-stopped-remote-lease', status: 'failed', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: 'stopped', coordinatorPhase: null, clears: true },
       { key: 'old-timeout-with-destroyed-lease-and-settled-coordinator', status: 'timed_out', finishedAt: oldFinishedAt, checkpoint: false, event: true, leaseMode: 'destroyed', coordinatorPhase: 'committed', clears: true },
+      { key: 'old-cancelled-with-terminal-failure-coordinator', status: 'cancelled', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: 'stopped', coordinatorPhase: 'terminal_failure', clears: true },
+      { key: 'old-interrupted-with-stopped-remote-lease', status: 'interrupted', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: 'stopped', coordinatorPhase: null, clears: true },
       { key: 'recent-failure', status: 'failed', finishedAt: recentFinishedAt, checkpoint: true, leaseMode: 'stopped', coordinatorPhase: null, clears: false },
       { key: 'running-run', status: 'running', finishedAt: null, checkpoint: true, leaseMode: 'stopped', coordinatorPhase: null, clears: false },
+      { key: 'old-legacy-failed-run', status: 'failed', runtimeMode: 'legacy', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: 'stopped', coordinatorPhase: null, clears: false },
       { key: 'missing-lease', status: 'failed', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: null, coordinatorPhase: null, clears: false },
       { key: 'missing-termination-receipt', status: 'failed', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: 'missing', coordinatorPhase: null, clears: false },
       { key: 'misbound-termination-receipt', status: 'failed', finishedAt: oldFinishedAt, checkpoint: true, leaseMode: 'misbound', coordinatorPhase: null, clears: false },
@@ -429,7 +432,7 @@ async function main() {
       fixture.index = index;
       fixture.runId = `10000000-0000-4000-8000-${String(30 + index).padStart(12, '0')}`;
       const profile = fixture.checkpoint ? { sessionCheckpoint: { sessionId: `fixture-session-${index}` } } : {};
-      await client`insert into heartbeat_runs(id,company_id,agent_id,status,runtime_mode,native_issue_id,finished_at,runner_profile_json,process_pid,process_group_id,process_started_at) values (${fixture.runId},${company},${agent},${fixture.status},'native',${issue},${fixture.finishedAt},${client.json(profile)},${70000 + index},${80000 + index},${processStartedAt})`;
+      await client`insert into heartbeat_runs(id,company_id,agent_id,status,runtime_mode,native_issue_id,finished_at,runner_profile_json,process_pid,process_group_id,process_started_at) values (${fixture.runId},${company},${agent},${fixture.status},${fixture.runtimeMode ?? 'native'},${issue},${fixture.finishedAt},${client.json(profile)},${70000 + index},${80000 + index},${processStartedAt})`;
       if (fixture.event) await client`insert into heartbeat_run_events(company_id,run_id,agent_id,seq,event_type,stream,level,message,payload) values (${company},${fixture.runId},${agent},1,'harness.ready','system','info','migration compatibility evidence',${client.json({ fixture: fixture.key })})`;
       if (fixture.leaseMode === 'stopped' || fixture.leaseMode === 'destroyed' || fixture.leaseMode === 'misbound' || fixture.leaseMode === 'local') {
         await leaseFor(fixture, 0, fixture.leaseMode);
@@ -496,7 +499,7 @@ async function main() {
       const row = migratedProcessFixtures.get(fixture.key);
       const cleared = row.process_pid === null && row.process_group_id === null && row.process_started_at === null;
       const preserved = row.process_pid === 70000 + fixture.index && row.process_group_id === 80000 + fixture.index && Date.parse(row.process_started_at) === Date.parse(processStartedAt);
-      return fixture.clears ? cleared : preserved;
+      return row.status === fixture.status && (fixture.clears ? cleared : preserved);
     });
     const assertions = [
       { id: 'migration-engine-upgrade', passed: true, detail: 'old package schema upgraded using candidate migration engine' },
@@ -506,7 +509,7 @@ async function main() {
       { id: 'secret-scope-data-preserved', passed: secrets.length === 3 && secrets.some((s) => s.scope === 'company' && s.owner_user_id === null && s.user_secret_definition_id === null && s.owner_agent_id === null && s.owner_project_id === null && s.owner_plugin_id === null) && secrets.some((s) => s.scope === 'user' && s.owner_user_id === 'compat-user' && s.user_secret_definition_id === userDefinition && s.owner_agent_id === null && s.owner_project_id === null && s.owner_plugin_id === null) && secrets.some((s) => s.scope === 'instance' && s.owner_user_id === null && s.user_secret_definition_id === null && s.owner_agent_id === agent && s.owner_project_id === null && s.owner_plugin_id === plugin), detail: 'company, user, and agent-owned instance secret metadata survived with valid scope shapes' },
       { id: 'restore-point-checkout-migrations', passed: originalRestorePoint.length === 1 && originalRestorePoint[0].checkout_name === '' && originalRestorePoint[0].generation === 7 && originalRestorePoint[0].object_key === 'compat/primary' && deletedRestorePoint.length === 1 && alternateCheckout.length === 1 && duplicateAlternate.length === 0 && restoreIndex.length === 1 && restoreIndex[0].indexdef.includes('checkout_name') && restoreIndex[0].indexdef.includes('pending') && restoreIndex[0].indexdef.includes('active') && restoreIndex[0].indexdef.includes('expiring'), detail: '0374 preserves existing rows and default checkout name; 0375 enforces per-checkout live uniqueness while allowing deleted history' },
       { id: 'committed-native-recovery-state-migration', passed: nativeRecoveryMigrationPassed, detail: '0376 clears only recovery state on committed unleased rows, updates their timestamp, and preserves lease-owned, noncommitted, null-state and history data' },
-      { id: 'settled-native-run-process-identity-migration', passed: settledNativeProcessIdentityMigrationPassed, detail: '0377 clears process identity only for old terminal native runs with session evidence, a fully confirmed remote lease and no unsettled finalization; active, recent, local, unleased, unconfirmed, misbound, unactioned, and coordinator-owned rows retain all identity fields' },
+      { id: 'settled-native-run-process-identity-migration', passed: settledNativeProcessIdentityMigrationPassed, detail: '0377 clears process identity only for old terminal native runs with session evidence, a fully confirmed remote lease and no unsettled finalization; failed, timed_out, cancelled, and interrupted native runs are covered, while legacy, active, recent, local, unleased, unconfirmed, misbound, unactioned, and unsettled-coordinator rows retain status and all identity fields' },
       { id: 'migration-inventory-extension', passed: extension.addedSql === 23, detail: `exact ${extension.oldCount}-file baseline plus ${extension.addedSql} pinned SQL migrations; no baseline SQL changed` },
     ];
     if (assertions.some((a) => !a.passed)) throw new Error('Candidate schema invariants failed');
