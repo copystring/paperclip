@@ -709,7 +709,19 @@ class ArtifactTests(unittest.TestCase):
             for index in range(374)
         }
         inventory["node_modules/@paperclipai/db/dist/migrations/meta/_journal.json"] = hashlib.sha256(b"journal").hexdigest()
-        candidate_hash = hashlib.sha256(build.canonical_json(dict(sorted(inventory.items())))).hexdigest()
+        # Exercise the real JavaScript receipt producer, rather than deriving
+        # the expected wire digest with the Python consumer's own file codec.
+        producer_url = MODULE_PATH.with_name("verify-migration-compatibility.mjs").as_uri()
+        script = (
+            f"import {{ canonicalInventoryHash }} from {json.dumps(producer_url)};"
+            "import { readFileSync } from 'node:fs';"
+            "console.log(canonicalInventoryHash(JSON.parse(readFileSync(0, 'utf8'))));"
+        )
+        candidate_hash = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            input=json.dumps(dict(reversed(list(inventory.items())))),
+            text=True, encoding="utf-8", capture_output=True, check=True,
+        ).stdout.strip()
         assertions = [{"id": item, "passed": True} for item in build.MIGRATION_COMPAT_ASSERTIONS]
         candidate_version = "2026.1024.0-canary.14"
         candidate_integrity = "sha512-Ub4gzp005JhteAMeDsOxUXDjbSA7OUg+dqiQ1CGaqqxB+xZpJS+x5ke5N/GkqL3f/a+DOQMDp/ZJzNC6//Uo3Q=="

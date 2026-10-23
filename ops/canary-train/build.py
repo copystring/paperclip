@@ -1149,7 +1149,9 @@ def assemble_migration_compatibility_receipt(receipt: dict[str, Any], provenance
     assertion_ids = [item.get("id") for item in assertions if isinstance(item, dict) and item.get("passed") is True]
     if len(assertion_ids) != len(MIGRATION_COMPAT_ASSERTIONS) or len(set(assertion_ids)) != len(assertion_ids) or set(assertion_ids) != set(MIGRATION_COMPAT_ASSERTIONS):
         raise TrainError("migration compatibility evidence contains failed, missing, or duplicate assertions")
-    actual_hash = sha256(canonical_json(dict(sorted(runtime_inventory.items()))))
+    # Inventory receipts hash compact sorted JSON bytes without a trailing LF.
+    # canonical_json() is the on-disk receipt codec and deliberately adds one.
+    actual_hash = sha256(json.dumps(runtime_inventory, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
     if len(runtime_inventory) != 375 or actual_hash != MIGRATION_CANDIDATE_HASH or actual_hash != candidate.get("migrationInventorySha256"):
         raise TrainError("compiled runtime migration inventory differs from the tested candidate")
     if not re.fullmatch(r"[a-f0-9]{40}", controller_commit) or run_id <= 0 or run_attempt <= 0:
