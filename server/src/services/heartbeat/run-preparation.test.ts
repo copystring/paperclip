@@ -2,6 +2,7 @@ import type { Db } from "@paperclipai/db";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
+import { selectPaperclipPromptSections } from "@paperclipai/adapter-utils/server-utils";
 import {
   buildPaperclipRuntimeMcpServers as legacyBuildRuntimeMcpServers,
   buildPaperclipWakePayload as legacyBuildWakePayload,
@@ -20,7 +21,7 @@ import {
 // These results isolate the factory binding and preparation query order.
 function databaseWithResults(...results: unknown[][]) {
   const scopes: unknown[][] = [];
-  const select = vi.fn(() => {
+  const select = vi.fn((_selection: unknown) => {
     const rows = results.shift() ?? [];
     const query = {
       from: () => query,
@@ -51,8 +52,60 @@ describe("heartbeat run preparation module", () => {
     expect(failure.code).toBe("configuration_incomplete");
   });
 
+  it("carries a consumed one-shot monitor into the rendered wake without exposing its external reference", async () => {
+    const payload = await buildPaperclipWakePayload({
+      db: databaseWithResults([]).db,
+      companyId: "company-one",
+      contextSnapshot: {
+        issueId: "issue-one",
+        wakeReason: "issue_monitor_due",
+        nextCheckAt: "2026-10-15T14:51:23.000Z",
+        monitorAttemptCount: 2,
+        monitorNotes: "Check whether platform runtime-verification is green and report the result.",
+        serviceName: "Platform runtime verification",
+        timeoutAt: "2026-10-15T16:00:00.000Z",
+        maxAttempts: 4,
+        recoveryPolicy: "wake_owner",
+        externalRef: "must-not-reach-prompt",
+      },
+      // The scheduler already consumed the monitor, so the current issue has
+      // no active monitor policy to read back. The wake snapshot is authoritative.
+      issueSummary: {
+        id: "issue-one",
+        identifier: "AIW-23",
+        title: "Verify runtime",
+        description: null,
+        status: "in_progress",
+        priority: "high",
+        workMode: "standard",
+        executionPolicy: { mode: "normal", commentRequired: true, stages: [], monitor: null },
+      },
+    });
+
+    expect(payload?.issueMonitor).toEqual({
+      nextCheckAt: "2026-10-15T14:51:23.000Z",
+      notes: "Check whether platform runtime-verification is green and report the result.",
+      attemptCount: 2,
+      serviceName: "Platform runtime verification",
+      timeoutAt: "2026-10-15T16:00:00.000Z",
+      maxAttempts: 4,
+      recoveryPolicy: "wake_owner",
+    });
+    for (const resumedSession of [false, true]) {
+      const { wakePrompt: prompt } = selectPaperclipPromptSections(
+        { paperclipTaskMarkdown: "Complete the assigned task.", paperclipWake: payload },
+        { resumedSession },
+      );
+      expect(prompt).toContain("## One-shot issue monitor check");
+      expect(prompt).toContain("monitor attempt: 2/4");
+      expect(prompt).toContain("Check whether platform runtime-verification is green and report the result.");
+      expect(prompt).toContain("A monitor is not recurring");
+      expect(prompt).not.toContain("must-not-reach-prompt");
+    }
+  });
+
   it("binds each context loader to its database and company scope", async () => {
-    const first = databaseWithResults([{ id: "issue-one", title: "First company" }]);
+    const first = databaseWithResults([{ id: "issue-one", title: "First company", assigneeAgentId: "agent-one", assigneeUserId: null }]);
     const second = databaseWithResults([{ id: "issue-two", title: "Second company" }]);
     const firstPreparation = createHeartbeatRunPreparation(first.db);
     const secondPreparation = createHeartbeatRunPreparation(second.db);
@@ -63,6 +116,8 @@ describe("heartbeat run preparation module", () => {
       secondPreparation.getIssueExecutionContext("company-two", "issue-two"),
     ]);
     expect(firstIssue).toMatchObject({ id: "issue-one", title: "First company" });
+    expect(firstIssue).toMatchObject({ assigneeAgentId: "agent-one", assigneeUserId: null });
+    expect(first.select.mock.calls[0]?.[0]).toHaveProperty("assigneeUserId");
     expect(secondIssue).toMatchObject({ id: "issue-two", title: "Second company" });
     expect(first.scopes[0]).toEqual(expect.arrayContaining(["company-one", "issue-one"]));
     expect(second.scopes[0]).toEqual(expect.arrayContaining(["company-two", "issue-two"]));

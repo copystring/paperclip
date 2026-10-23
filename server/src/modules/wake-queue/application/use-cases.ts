@@ -82,6 +82,39 @@ function currentAgentParticipant(issue: IssueSnapshot): { agentId: string } | nu
   return agentId ? { agentId } : null;
 }
 
+function isCurrentExecutionStageWake(issue: IssueSnapshot, candidate: DeferredWakeCandidate): boolean | null {
+  if (candidate.deferredContextSeed.source !== "issue.execution_stage") return null;
+  const stage = parseObject(candidate.deferredContextSeed.executionStage);
+  const state = parseObject(issue.executionState);
+  const stageId = readNonEmptyString(stage.stageId);
+  if (!stageId || issue.assigneeUserId || issue.assigneeAgentId !== candidate.agentId) return false;
+  const currentStageType = readNonEmptyString(state.currentStageType);
+  const currentParticipant = parseObject(state.currentParticipant);
+  const seededParticipant = parseObject(stage.currentParticipant);
+  const stageParticipantMatches = currentParticipant.type === "agent" &&
+    seededParticipant.type === "agent" &&
+    seededParticipant.agentId === currentParticipant.agentId;
+  if (candidate.wakeReason === "execution_review_requested" || candidate.wakeReason === "execution_approval_requested") {
+    const expectedStageType = candidate.wakeReason === "execution_approval_requested" ? "approval" : "review";
+    const expectedWakeRole = expectedStageType === "approval" ? "approver" : "reviewer";
+    return issue.status === "in_review" && state.status === "pending" &&
+      state.currentStageId === stageId && currentStageType === expectedStageType &&
+      stage.stageType === currentStageType && stage.wakeRole === expectedWakeRole &&
+      stageParticipantMatches && currentParticipant.agentId === candidate.agentId;
+  }
+  if (candidate.wakeReason === "execution_changes_requested") {
+    const returnAssignee = parseObject(state.returnAssignee);
+    const seededReturnAssignee = parseObject(stage.returnAssignee);
+    return issue.status === "in_progress" && state.status === "changes_requested" &&
+      state.currentStageId === stageId && currentStageType === stage.stageType &&
+      (currentStageType === "review" || currentStageType === "approval") && stageParticipantMatches &&
+      returnAssignee.type === "agent" && returnAssignee.agentId === candidate.agentId &&
+      seededReturnAssignee.type === "agent" && seededReturnAssignee.agentId === returnAssignee.agentId &&
+      stage.wakeRole === "executor";
+  }
+  return false;
+}
+
 /**
  * Resolves the responsible user for a heartbeat run the module is about to
  * queue. The promote path and the immediate-recovery path both call this
@@ -335,6 +368,15 @@ async function promoteDeferredWake(
 ): Promise<ReleaseTransactionResult | null> {
   let currentIssue = issue;
   let shouldReopen = false;
+  if (isCurrentExecutionStageWake(currentIssue, workingCandidate) === false) {
+    await ports.transaction.cancelDeferredWake({
+      companyId: run.companyId,
+      wakeId: workingCandidate.id,
+      reason: "Deferred workflow stage no longer matches the current issue state",
+      now: input.now,
+    });
+    return null;
+  }
   if (
     !workingCandidate.authorizedFailedChatRetry &&
     workingCandidate.deferredCommentIds.length > 0 &&

@@ -44,6 +44,20 @@ profile assignments with `ctx.agents.getRuntime`. It requires the existing
 assignment changes use the opt-in `agent_runtime` stream. These inputs contain
 no grant credentials and do not authorize a task's tool calls. See the
 [runtime contract](../../doc/plugins/AGENT_RUNTIME_SYNC.md#standing-connection-assignments).
+The OpenCode local adapter delivers the already assigned runtime MCP servers
+through a private, temporary remote-MCP configuration. This delivery does not
+change grants, profiles, or action policies. Adapter tests cover authentication,
+configuration preservation, and cleanup; a synthetic Linux CLI connection and
+tools/list probe checks transport only, not every assigned app action.
+
+On-demand discovery ranks query terms across tool names, application names and
+descriptions after deriving the caller's authorized tool set. Punctuation and
+word spacing do not require an exact catalog phrase; discovery never adds grants.
+An OpenCode exit without assistant text or a completed tool action is reported as
+`opencode_empty_response`, rather than successful work.
+An owned remote-call deadline is `tool_timeout` even when the HTTP wrapper
+changes the thrown error type. It preserves connection health and reports the
+remote outcome as unknown; it never replays a possibly applied action.
 
 ## `action-policy`
 
