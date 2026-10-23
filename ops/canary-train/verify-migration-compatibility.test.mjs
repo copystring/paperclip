@@ -82,11 +82,14 @@ test('prepared source must be a clean provenance-bound patch commit', async (t) 
   t.after(() => rm(provenancePath, { force: true }));
   await writeFile(provenancePath, JSON.stringify(provenance));
   assert.deepEqual(await assertPreparedSource(root, provenancePath, sourceInventory, {
-    expectedSourceCommit: sourceCommit, expectedInventoryCount: 2, expectedInventorySha256: canonicalInventoryHash(sourceInventory),
+    expectedInventoryCount: 2, expectedInventorySha256: canonicalInventoryHash(sourceInventory),
   }), {
     sourceCommit, patchCommit: provenance.patchCommit, patchTree: provenance.patchTree,
     migrationInventoryCount: 2, migrationInventorySha256: canonicalInventoryHash(sourceInventory),
   });
+  await assert.rejects(assertPreparedSource(root, provenancePath, sourceInventory, {
+    expectedSourceCommit: 'f'.repeat(40), expectedInventoryCount: 2, expectedInventorySha256: canonicalInventoryHash(sourceInventory),
+  }), /clean immutable provenance/);
   await writeFile(path.join(root, 'untracked.txt'), 'dirty');
   await assert.rejects(assertPreparedSource(root, provenancePath, sourceInventory, {
     expectedSourceCommit: sourceCommit, expectedInventoryCount: 2, expectedInventorySha256: canonicalInventoryHash(sourceInventory),
