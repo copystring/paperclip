@@ -20,6 +20,7 @@ class DependencyCacheWorkflowTests(unittest.TestCase):
         self.assertIn('verify-migration-compatibility.mjs', job)
         self.assertIn('migration-output/provenance.json', job)
         self.assertIn('retention-days: 1', job)
+        self.assertIn('overwrite: true', job)
         self.assertNotIn('publish.py', job)
         self.assertNotIn('contents: write', job)
         self.assertNotIn('actions/cache/', job)

@@ -68,6 +68,7 @@ jobs:
           name: canary-pr-migration-compatibility
           path: ${{ runner.temp }}/migration-fixture-receipt/receipt.json
           retention-days: 1
+          overwrite: true
           if-no-files-found: error
 
   assemble:
