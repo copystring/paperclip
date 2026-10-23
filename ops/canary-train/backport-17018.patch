@@ -1,0 +1,576 @@
+diff --git a/doc/execution-semantics.md b/doc/execution-semantics.md
+index 0b76a3a34e..e8f416a34d 100644
+--- a/doc/execution-semantics.md
++++ b/doc/execution-semantics.md
+@@ -115,6 +115,8 @@ This requirement is prospective-only on rollout: it applies to transitions into
+ 
+ ### `in_review`
+ 
++Automatic review recovery belongs to the current review round. The last saved execution decision defines the round boundary, including when the same reviewer returns to the same stage. Earlier reviewer runs do not consume the current round's recovery attempt or become its retry predecessor. A missing referenced decision leaves recovery pending for state repair. Current-round failures, explicit stops, holds, budgets, and human-owned recovery remain in force.
++
+ Execution work is paused because the next move belongs to a reviewer or approver, not the current executor.
+ 
+ An external review service can also be a valid review path when the issue keeps an agent assignee and has an active one-shot monitor that will wake that assignee to check the service later.
+diff --git a/server/src/__tests__/heartbeat-process-recovery.test.ts b/server/src/__tests__/heartbeat-process-recovery.test.ts
+index bc87bffcbb..e742d1ee5d 100644
+--- a/server/src/__tests__/heartbeat-process-recovery.test.ts
++++ b/server/src/__tests__/heartbeat-process-recovery.test.ts
+@@ -81,6 +81,7 @@ import {
+   issueQuestionResponseDeliveries,
+   issueApprovals,
+   issueDocuments,
++  issueExecutionDecisions,
+   issuePlanDecompositions,
+   issueRecoveryActions,
+   issueRelations,
+@@ -10656,6 +10657,61 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+     expect(issue?.assigneeAgentId).toBe(agentId);
+   });
+ 
++  it.each(["previous", "precision", "current", "missing"] as const)("scopes cancelled reviewer recovery to the current decision (%s)", async (round) => {
++    const previousRound = round === "previous" || round === "precision";
++    const { companyId, agentId, issueId, runId, wakeupRequestId, stageId } =
++      await seedInReviewParticipantRunFixture({
++        wakeReason: "execution_review_participant_recovery",
++        retryReason: "execution_review_participant_recovery",
++      });
++    const decisionId = randomUUID();
++    const decisionAt = new Date("2026-03-19T00:10:00.000Z");
++    const runAt = new Date(previousRound ? "2026-03-19T00:05:00.000Z" : "2026-03-19T00:11:00.000Z");
++    if (round !== "missing") {
++      await db.insert(issueExecutionDecisions).values({
++        id: decisionId, companyId, issueId, stageId, stageType: "review",
++        actorAgentId: agentId, outcome: "changes_requested", body: "Correct the evidence.",
++        createdAt: decisionAt,
++      });
++    }
++    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
++    await db.update(issues).set({
++      executionRunId: null, executionAgentNameKey: null, executionLockedAt: null,
++      executionState: { ...issue!.executionState as Record<string, unknown>,
++        lastDecisionId: decisionId, lastDecisionOutcome: "changes_requested" },
++    }).where(eq(issues.id, issueId));
++    await db.update(heartbeatRuns).set({
++      status: "cancelled", errorCode: "issue_reassigned", error: "Cancelled before issue reassignment",
++      createdAt: runAt, startedAt: runAt, finishedAt: runAt, updatedAt: runAt,
++      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
++    }).where(eq(heartbeatRuns.id, runId));
++    if (round === "precision") {
++      // PostgreSQL retains sub-millisecond precision. Do not round the decision
++      // through a JavaScript Date and admit the earlier run in the same ms.
++      await db.execute(sql`update issue_execution_decisions
++        set created_at = '2026-03-19T00:10:00.000200Z'::timestamptz where id = ${decisionId}`);
++      await db.execute(sql`update heartbeat_runs
++        set created_at = '2026-03-19T00:10:00.000100Z'::timestamptz where id = ${runId}`);
++    }
++    await db.update(agentWakeupRequests).set({ status: "completed", finishedAt: runAt })
++      .where(eq(agentWakeupRequests.id, wakeupRequestId));
++
++    const result = await heartbeatService(db).reconcileStrandedAssignedIssues();
++    expect(result.reviewParticipantRequeued).toBe(previousRound ? 1 : 0);
++    expect(result.escalated).toBe(round === "current" ? 1 : 0);
++    if (round === "missing") expect(result.skipped).toBe(1);
++    if (previousRound) {
++      const runs = await selectRecoveryRunsByAgent(agentId);
++      const next = runs.find(row => row.id !== runId);
++      expect(next).toBeTruthy();
++      expect(next?.retryOfRunId).toBeNull();
++      expect(next?.contextSnapshot).toMatchObject({
++        issueId, currentStageId: stageId, currentReviewDecisionId: decisionId,
++        retryReason: "execution_review_participant_recovery",
++      });
++    }
++  });
++
+   it("retries a pending execution-review participant once before blocking with a recovery action", async () => {
+     const probe = await seedInReviewParticipantRunFixture();
+     await db.update(agentWakeupRequests)
+diff --git a/server/src/modules/wake-queue/adapters/postgres.test.ts b/server/src/modules/wake-queue/adapters/postgres.test.ts
+index 28c6ebb485..9fcacd4cb7 100644
+--- a/server/src/modules/wake-queue/adapters/postgres.test.ts
++++ b/server/src/modules/wake-queue/adapters/postgres.test.ts
+@@ -1,6 +1,6 @@
+ import { instanceSettingsService } from "../../../services/instance-settings.js";
+ import { randomUUID } from "node:crypto";
+-import { eq } from "drizzle-orm";
++import { eq, sql } from "drizzle-orm";
+ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+ import type { Db } from "@paperclipai/db";
+ import {
+@@ -12,6 +12,7 @@ import {
+   environmentLeases,
+   heartbeatRunEvents,
+   heartbeatRuns,
++  issueExecutionDecisions,
+   issueComments,
+   issueRecoveryActions,
+   issues,
+@@ -835,6 +836,99 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
+     });
+   }
+ 
++  it.each(["previous_round", "current_round", "missing_decision", "foreign_issue", "foreign_company"] as const)(
++    "classifies review recovery against the referenced decision boundary (%s)",
++    async (scenario) => {
++      const companyId = await seedCompany();
++      const agentId = await seedAgent({ companyId });
++      const issueId = await seedIssue({ companyId, assigneeAgentId: agentId, status: "in_review" });
++      const decisionId = randomUUID();
++      const runId = await seedRun({
++        companyId,
++        agentId,
++        status: "cancelled",
++        errorCode: "issue_reassigned",
++        contextSnapshot: {
++          issueId,
++          wakeReason: "execution_review_requested",
++          retryReason: "execution_review_participant_recovery",
++        },
++      });
++      // The lock release runs only after legacy execution reconciliation has
++      // ruled out unresolved provider work. This fixture models a cancelled
++      // before-dispatch review recovery run and keeps ownership attached until
++      // the adapter performs its normal release transaction.
++      await db.update(heartbeatRuns).set({ resultJson: {
++        executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
++      } }).where(eq(heartbeatRuns.id, runId));
++      let decisionCompanyId = companyId;
++      let decisionIssueId = issueId;
++      let decisionAgentId = agentId;
++      if (scenario === "foreign_company") {
++        decisionCompanyId = await seedCompany();
++        decisionAgentId = await seedAgent({ companyId: decisionCompanyId });
++      }
++      if (scenario === "foreign_issue" || scenario === "foreign_company") {
++        decisionIssueId = await seedIssue({ companyId: decisionCompanyId, assigneeAgentId: decisionAgentId });
++      }
++      if (scenario !== "missing_decision") {
++        await db.insert(issueExecutionDecisions).values({
++          id: decisionId,
++          companyId: decisionCompanyId,
++          issueId: decisionIssueId,
++          stageId: randomUUID(),
++          stageType: "review",
++          actorAgentId: decisionAgentId,
++          actorUserId: null,
++          outcome: "changes_requested",
++          body: "Please address the requested changes.",
++        });
++      }
++      // Keep the fixtures within the same JavaScript millisecond. A Date
++      // round-trip would erase these PostgreSQL microseconds and could make
++      // the stale/current comparison depend on lossy application precision.
++      if (scenario !== "missing_decision") {
++        await db.execute(sql`update issue_execution_decisions
++          set created_at = '2026-01-01T00:00:00.000200Z'::timestamptz
++          where id = ${decisionId}`);
++      }
++      await db.execute(sql`update heartbeat_runs
++        set created_at = ${scenario === "current_round"
++          ? "2026-01-01T00:00:00.000300Z"
++          : "2026-01-01T00:00:00.000100Z"}::timestamptz
++        where id = ${runId}`);
++      await db.update(issues).set({ executionState: {
++        status: "pending",
++        currentStageId: randomUUID(),
++        currentStageIndex: 0,
++        currentStageType: "review",
++        currentParticipant: { type: "agent", agentId },
++        returnAssignee: { type: "agent", agentId },
++        reviewRequest: { instructions: "Review the completed work." },
++        completedStageIds: [],
++        lastDecisionId: decisionId,
++        lastDecisionOutcome: "changes_requested",
++      }, executionRunId: runId }).where(eq(issues.id, issueId));
++
++      const release = createReleaseIssueExecution({
++        issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
++        recovery: { escalateStrandedAssignedIssue: async () => {}, escalateStrandedRecoveryIssueInPlace: async () => {} },
++      });
++      const result = await release({ companyId, runId, now: new Date() });
++
++      if (scenario === "current_round") {
++        // Same-round cancelled recovery still blocks instead of silently
++        // retrying an automatic recovery run forever.
++        expect(result.outcome.kind).toBe("blocked");
++      } else {
++        // An earlier-round run, or an unverifiable referenced decision, has
++        // no authority to classify the current pending review attempt.
++        expect(result.outcome.kind).toBe("released");
++      }
++      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
++    },
++  );
++
+   it("releases an acknowledged native handoff without blocking or restarting the old owner", async () => {
+     const companyId = await seedCompany();
+     const agentId = await seedAgent({ companyId });
+diff --git a/server/src/modules/wake-queue/adapters/postgres.ts b/server/src/modules/wake-queue/adapters/postgres.ts
+index c252186930..4502147557 100644
+--- a/server/src/modules/wake-queue/adapters/postgres.ts
++++ b/server/src/modules/wake-queue/adapters/postgres.ts
+@@ -14,6 +14,7 @@ import {
+   agents,
+   chatActions,
+   heartbeatRuns,
++  issueExecutionDecisions,
+   issueComments,
+   issueRecoveryActions,
+   issueRelations,
+@@ -31,7 +32,7 @@ import { HttpError } from "../../../errors.js";
+ import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
+ import { issueTreeControlService, isVerifiedIssueTreeControlInteractionWake } from "../../../services/issue-tree-control.js";
+ import { isAutomaticRecoverySuppressedByPauseHold } from "../../../services/recovery/pause-hold-guard.js";
+-import { classifyContinuationFailure } from "../../../services/recovery/service.js";
++import { classifyContinuationFailure, executionReviewAttemptBoundaryCondition } from "../../../services/recovery/service.js";
+ import { issueService } from "../../../services/issues.js";
+ import { issueRecoveryActionService } from "../../../services/issue-recovery-actions.js";
+ import { readContinuationAttempt } from "../../../services/recovery/run-liveness-continuations.js";
+@@ -602,6 +603,24 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
+       );
+     },
+ 
++    async isRunInCurrentExecutionReviewAttempt({ companyId, issueId, runId, decisionId }) {
++      const [currentAttemptRun] = await tx
++        .select({ id: heartbeatRuns.id })
++        .from(heartbeatRuns)
++        .innerJoin(
++          issueExecutionDecisions,
++          and(
++            eq(issueExecutionDecisions.id, decisionId),
++            eq(issueExecutionDecisions.companyId, companyId),
++            eq(issueExecutionDecisions.issueId, issueId),
++            executionReviewAttemptBoundaryCondition(companyId, issueId, decisionId),
++          ),
++        )
++        .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)))
++        .limit(1);
++      return currentAttemptRun !== undefined;
++    },
++
+     async queueReviewParticipantRecoveryRun({ companyId, issue, finishingRun, recoveryAgent, sessionBefore, now }) {
+       const executionState = parseIssueExecutionState(issue.executionState);
+       const executionStage = executionState
+@@ -627,6 +646,9 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
+               retryOfRunId: finishingRun.id,
+               retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON,
+               ...(executionStage ? { executionStage } : {}),
++              currentStageId: executionState?.currentStageId ?? null,
++              currentStageType: executionState?.currentStageType ?? null,
++              currentReviewDecisionId: executionState?.lastDecisionId ?? null,
+             },
+             "normal_model",
+           ),
+@@ -656,6 +678,11 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
+               source: "issue.execution_review_recovery",
+               retryOfRunId: finishingRun.id,
+               ...(executionStage ? { executionStage } : {}),
++              currentStageId: executionState?.currentStageId ?? null,
++              currentStageType: executionState?.currentStageType ?? null,
++              currentReviewDecisionId: executionState?.lastDecisionId ?? null,
++              reviewRecoveryInstruction:
++                "The previous reviewer run ended while this execution-review stage was still pending. Submit the review decision now, or mark the issue blocked with the exact unblock action.",
+             },
+             "normal_model",
+           ),
+diff --git a/server/src/modules/wake-queue/application/ports.ts b/server/src/modules/wake-queue/application/ports.ts
+index c37aa995e0..6469b7af31 100644
+--- a/server/src/modules/wake-queue/application/ports.ts
++++ b/server/src/modules/wake-queue/application/ports.ts
+@@ -196,6 +196,13 @@ export interface WakeQueueTransaction {
+   isAutomaticRecoverySuppressedByPauseHold(input: { companyId: string; issueId: string }): Promise<boolean>;
+   /** Deny-only facts from the exact finishing run and its durable chat wake owner. */
+   isImmediateRecoverySourceBlocked(input: { companyId: string; runId: string }): Promise<boolean>;
++  /** Whether this finishing run was created after the issue's current execution-review decision. */
++  isRunInCurrentExecutionReviewAttempt(input: {
++    companyId: string;
++    issueId: string;
++    runId: string;
++    decisionId: string;
++  }): Promise<boolean>;
+   queueReviewParticipantRecoveryRun(input: {
+     companyId: string;
+     issue: IssueSnapshot;
+diff --git a/server/src/modules/wake-queue/application/use-cases.test.ts b/server/src/modules/wake-queue/application/use-cases.test.ts
+index 0c7e66f9dd..790c16166c 100644
+--- a/server/src/modules/wake-queue/application/use-cases.test.ts
++++ b/server/src/modules/wake-queue/application/use-cases.test.ts
+@@ -123,6 +123,7 @@ function createFakeTransaction(overrides: Partial<WakeQueueTransaction> = {}): W
+     hasExplicitBlockerPath: vi.fn(async () => false),
+     isAutomaticRecoverySuppressedByPauseHold: vi.fn(async () => false),
+     isImmediateRecoverySourceBlocked: vi.fn(async () => false),
++    isRunInCurrentExecutionReviewAttempt: vi.fn(async () => true),
+     queueReviewParticipantRecoveryRun: vi.fn(async () => runSummary("review-recovery")),
+     queueImmediateRecoveryRun: vi.fn(async () => runSummary("immediate-recovery")),
+     ...overrides,
+@@ -146,6 +147,49 @@ function createFakeRecovery(): RecoveryEscalationPort {
+ }
+ 
+ describe("releaseIssueExecution", () => {
++  it.each([
++    { currentAttempt: false, expectedOutcome: "released" },
++    { currentAttempt: true, expectedOutcome: "blocked" },
++  ])("uses the current review decision boundary before recovery classification (%s)", async ({ currentAttempt, expectedOutcome }) => {
++    const decisionId = "decision-1";
++    const issue = {
++      ...ISSUE,
++      status: "in_review",
++      assigneeAgentId: null,
++      executionState: {
++        status: "pending",
++        currentParticipant: { type: "agent", agentId: RUN.agentId },
++        lastDecisionId: decisionId,
++      },
++    };
++    const run = {
++      ...RUN,
++      status: "cancelled",
++      contextSnapshot: {
++        wakeReason: "execution_review_requested",
++        retryReason: "execution_review_participant_recovery",
++      },
++    };
++    const transaction = createFakeTransaction({
++      isRunInCurrentExecutionReviewAttempt: vi.fn(async () => currentAttempt),
++    });
++    const release = createReleaseIssueExecution({
++      issueLock: createFakeIssueLock(createFakeHost(), transaction, issue, run),
++      recovery: createFakeRecovery(),
++    });
++
++    const result = await release({ companyId: RUN.companyId, runId: RUN.id, now: new Date() });
++
++    expect(result.outcome.kind).toBe(expectedOutcome);
++    expect(transaction.isRunInCurrentExecutionReviewAttempt).toHaveBeenCalledWith({
++      companyId: issue.companyId,
++      issueId: issue.id,
++      runId: run.id,
++      decisionId,
++    });
++    expect(transaction.queueReviewParticipantRecoveryRun).not.toHaveBeenCalled();
++  });
++
+   it.each([false, true])("preserves a paused head without blocking an eligible follower (%s)", async withFollower => {
+     const paused = wakeCandidate({ id: "paused-wake", wakeReason: "issue_comment_mentioned", queuedCommentIds: ["paused-comment"] });
+     const ready = wakeCandidate({ id: "ready-wake", agentId: "ready-agent", queuedCommentIds: ["ready-comment"] });
+diff --git a/server/src/modules/wake-queue/application/use-cases.ts b/server/src/modules/wake-queue/application/use-cases.ts
+index 47d4e0a281..ab89c39331 100644
+--- a/server/src/modules/wake-queue/application/use-cases.ts
++++ b/server/src/modules/wake-queue/application/use-cases.ts
+@@ -559,13 +559,25 @@ async function runReleaseRecoveryTail(
+   });
+ 
+   const currentParticipant = currentAgentParticipant(issue);
+-  const reviewParticipantApplies =
++  const reviewParticipantCandidate =
+     issue.status === "in_review" &&
+     !issue.assigneeUserId &&
+     currentParticipant !== null &&
+     currentParticipant.agentId === run.agentId &&
+     isExecutionReviewParticipantRecoveryEligibleRun(run) &&
+     HEARTBEAT_RUN_TERMINAL_STATUSES.has(run.status);
++  const currentReviewDecisionId = readNonEmptyString(issue.executionState?.lastDecisionId);
++  // `lastDecisionId` is the durable review-attempt boundary. When it exists,
++  // a participant's older terminal run must not influence classification of
++  // the newly pending round. Missing/stale decision references fail closed in
++  // the adapter's company/issue-scoped comparison.
++  const reviewParticipantApplies = reviewParticipantCandidate &&
++    (!currentReviewDecisionId || await transaction.isRunInCurrentExecutionReviewAttempt({
++      companyId: issue.companyId,
++      issueId: issue.id,
++      runId: run.id,
++      decisionId: currentReviewDecisionId,
++    }));
+ 
+   const immediateApplies =
+     (issue.status === "todo" || issue.status === "in_progress") &&
+diff --git a/server/src/services/recovery/provider-failure-classification.test.ts b/server/src/services/recovery/provider-failure-classification.test.ts
+index 31407ac82c..fa86495d5c 100644
+--- a/server/src/services/recovery/provider-failure-classification.test.ts
++++ b/server/src/services/recovery/provider-failure-classification.test.ts
+@@ -131,12 +131,12 @@ describe("classifyAdapterFailureForRecovery", () => {
+     });
+   });
+ 
+-  it("classifies the qualifier-less limit wording and parses the 'resets' clock", () => {
++  it.each(["'", "\u2019"])("classifies the qualifier-less limit wording with apostrophe %s", (apostrophe) => {
+     // Current Claude CLI phrasing, as recorded on the run by the adapter.
+     const now = new Date("2026-08-28T22:30:00.000Z");
+     const classification = classifyAdapterFailureForRecovery({
+       errorCode: "adapter_failed",
+-      error: "Claude run failed: subtype=success: You've hit your limit · resets 2:30am (UTC)",
++      error: `Claude run failed: subtype=success: You${apostrophe}ve hit your limit · resets 2:30am (UTC)`,
+       resultJson: null,
+     }, now);
+ 
+diff --git a/server/src/services/recovery/service.ts b/server/src/services/recovery/service.ts
+index b6e9a1966c..19649d296b 100644
+--- a/server/src/services/recovery/service.ts
++++ b/server/src/services/recovery/service.ts
+@@ -59,6 +59,7 @@ import {
+   companies,
+   heartbeatRunWatchdogDecisions,
+   heartbeatRuns,
++  issueExecutionDecisions,
+   issueAttachments,
+   issueComments,
+   issueApprovals,
+@@ -924,6 +925,26 @@ function isRepeatedProductiveContinuationRecovery(
+   );
+ }
+ 
++/**
++ * SQL boundary for deciding whether a heartbeat run belongs to the pending
++ * execution-review attempt referenced by an issue's lastDecisionId. Keeping
++ * the comparison in SQL preserves PostgreSQL timestamp precision; a missing
++ * or cross-scope decision produces NULL and therefore fails the predicate.
++ */
++export function executionReviewAttemptBoundaryCondition(
++  companyId: string,
++  issueId: string,
++  decisionId: string,
++) {
++  return sql`${heartbeatRuns.createdAt} > (
++    select created_at
++    from issue_execution_decisions
++    where company_id = ${companyId}
++      and issue_id = ${issueId}
++      and id = ${decisionId}
++  )`;
++}
++
+ export function recoveryService(
+   db: Db,
+   deps: {
+@@ -1000,6 +1021,7 @@ export function recoveryService(
+     companyId: string,
+     issueId: string,
+     agentId: string,
++    reviewAttempt?: { decisionId: string },
+   ): Promise<LatestIssueRun> {
+     return db
+       .select({
+@@ -1020,6 +1042,11 @@ export function recoveryService(
+           eq(heartbeatRuns.companyId, companyId),
+           eq(heartbeatRuns.agentId, agentId),
+           sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
++          ...(reviewAttempt
++            ? [
++                executionReviewAttemptBoundaryCondition(companyId, issueId, reviewAttempt.decisionId),
++              ]
++            : []),
+         ),
+       )
+       .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
+@@ -1027,6 +1054,34 @@ export function recoveryService(
+       .then((rows) => rows[0] ?? null);
+   }
+ 
++  async function getLatestExecutionReviewParticipantRun(
++    companyId: string,
++    issueId: string,
++    agentId: string,
++    decisionId: string | null,
++  ): Promise<LatestIssueRun | undefined> {
++    if (!decisionId) {
++      return getLatestIssueRunForAgent(companyId, issueId, agentId);
++    }
++    const [decision] = await db
++      .select({ createdAt: issueExecutionDecisions.createdAt })
++      .from(issueExecutionDecisions)
++      .where(
++        and(
++          eq(issueExecutionDecisions.companyId, companyId),
++          eq(issueExecutionDecisions.issueId, issueId),
++          eq(issueExecutionDecisions.id, decisionId),
++        ),
++      )
++      .limit(1);
++    // A missing referenced decision makes the attempt boundary unverifiable.
++    // Do not let an older reviewer run affect recovery for this pending state.
++    if (!decision) return undefined;
++    return getLatestIssueRunForAgent(companyId, issueId, agentId, {
++      decisionId,
++    });
++  }
++
+   async function summarizeRecentContinuationRetries(
+     companyId: string,
+     issueId: string,
+@@ -4753,12 +4808,20 @@ export function recoveryService(
+ 
+       const participantLatestRunForRecovery =
+         issue.status === "in_review" && participantAgentId
+-          ? await getLatestIssueRunForAgent(
++          ? await getLatestExecutionReviewParticipantRun(
+               issue.companyId,
+               issue.id,
+               participantAgentId,
++              pendingExecutionState?.lastDecisionId ?? null,
+             )
+           : null;
++      if (participantLatestRunForRecovery === undefined) {
++        // The pending state references a decision row that cannot be found in
++        // this company/issue scope. Its attempt boundary is unknown, so do not
++        // classify old runs or enqueue another recovery against stale state.
++        result.skipped += 1;
++        continue;
++      }
+       const executionRecoverySource =
+         issue.status === "in_review"
+           ? participantLatestRunForRecovery
+@@ -5112,7 +5175,7 @@ export function recoveryService(
+         const participantLatestRun = participantLatestRunForRecovery;
+ 
+         if (
+-          !participantLatestRun ||
++          participantLatestRun &&
+           !isTerminalIssueRun(participantLatestRun)
+         ) {
+           if (!agentInvokable) {
+@@ -5136,6 +5199,7 @@ export function recoveryService(
+         }
+ 
+         const participantAdapterFailureClassification =
++          participantLatestRun &&
+           isUnsuccessfulTerminalIssueRun(participantLatestRun)
+             ? classifyAdapterFailureForRecovery(
+                 participantLatestRun,
+@@ -5143,6 +5207,7 @@ export function recoveryService(
+               )
+             : null;
+         if (
++          participantLatestRun &&
+           participantAdapterFailureClassification?.kind === "provider_quota"
+         ) {
+           const monitored = await scheduleProviderQuotaRecoveryMonitor({
+@@ -5163,6 +5228,7 @@ export function recoveryService(
+           continue;
+         }
+         if (
++          participantLatestRun &&
+           participantAdapterFailureClassification?.kind ===
+           "configuration_incomplete"
+         ) {
+@@ -5251,7 +5317,7 @@ export function recoveryService(
+           reason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
+           retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
+           source: "issue.execution_review_recovery",
+-          retryOfRunId: participantLatestRun.id,
++          retryOfRunId: participantLatestRun?.id,
+           extraContext: {
+             executionStage: buildExecutionStageWakeContext({
+               state: pendingExecutionState,
+@@ -5262,6 +5328,12 @@ export function recoveryService(
+               recoveryInstruction:
+                 "The previous reviewer run ended without a saved decision for this pending stage. Finish the review and record the decision through the issue update route below. Do not treat comments or prose as a saved decision.",
+             }),
++            currentStageId: pendingExecutionState.currentStageId ?? null,
++            currentStageType: pendingExecutionState.currentStageType ?? null,
++            currentReviewDecisionId:
++              pendingExecutionState.lastDecisionId ?? null,
++            reviewRecoveryInstruction:
++              "The previous reviewer run ended while this execution-review stage was still pending. Submit the review decision now, or mark the issue blocked with the exact unblock action.",
+           },
+           issueStateGuard: {
+             statuses: ["in_review"],

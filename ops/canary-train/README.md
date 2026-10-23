@@ -42,6 +42,33 @@ The empty-layout check also reads the exact published source commit. If a future
 
 The manifest records the official npm version and tarball digests, exact upstream and patched commits/trees, pinned PR heads and outcomes, package-map inventory, archive digest, compiled migration digests, and quality-gate results. The workflow may add its run ID, attempt, controller commit, and workflow reference before publication. Production credentials and private settings do not belong in the artifact.
 
+### Current source integration
+
+The maintained input now includes the modular MCP port (fork PR #22), native
+guidance and its regenerated Copilot profile identity (fork PR #24), and the
+complete autonomy source port on the assembled prefix (fork PR #25). Their
+exact reviewed heads remain in `patches.json`. The original autonomy source
+PR #21 remains lineage, rather than a second overlapping source input.
+
+The earlier upstream PR #16723 only refreshed generated capability anchors for
+an older skill source. Its independent pin is retired: PR #25 regenerates those
+inventories from the actual resulting skill through upstream generator functions.
+Both upstream capability checks must still pass in the final build. Old anchor
+values are not copied into a newer source tree.
+
+Compatibility diffs for PRs #16520, #16678, #8, #11 and #17018 retain the exact
+GitHub-verified original PR file sets. PR #19 retains an independently reviewed
+compatibility diff as a fail-closed fallback. Normal verified application is
+preferred when it succeeds. No changed-path exception or dirty-source packaging
+bypass is introduced. PR #25 is based on the assembled prefix so changes already
+owned by earlier source inputs need no artificial no-op edits.
+
+A local authoring preflight against a named published package is not a build,
+release receipt, or authorization to use a mismatched CLI/server pair. The
+production workflow continues to resolve synchronized current Canary tags,
+verify the npm integrity/source identity, and require its complete immutable
+Linux test/build/package evidence before publication.
+
 ## Instance consumer
 
 `deploy.py` is a standalone service-account executable. Keeping release validation, ownership checks, the idle hold, cutover, and rollback in one auditable file allows the instance to pin and atomically install a single consumer without importing unverified updater code from a candidate. Its regression tests cover partial cutover failures, rejected restarts, retry idempotency, migration drift, and file ownership boundaries.

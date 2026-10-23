@@ -1,11 +1,11 @@
 diff --git a/maps/agent-access-map/app-permissions.md b/maps/agent-access-map/app-permissions.md
-index a160f78b3..e4c9e2845 100644
+index 7183dcb59..765f58e8d 100644
 --- a/maps/agent-access-map/app-permissions.md
 +++ b/maps/agent-access-map/app-permissions.md
-@@ -41,6 +41,21 @@ assignment changes use the opt-in `agent_runtime` stream. These inputs contain
+@@ -44,6 +44,20 @@ profile assignments with `ctx.agents.getRuntime`. It requires the existing
+ assignment changes use the opt-in `agent_runtime` stream. These inputs contain
  no grant credentials and do not authorize a task's tool calls. See the
  [runtime contract](../../doc/plugins/AGENT_RUNTIME_SYNC.md#standing-connection-assignments).
- 
 +The OpenCode local adapter delivers the already assigned runtime MCP servers
 +through a private, temporary remote-MCP configuration. This delivery does not
 +change grants, profiles, or action policies. Adapter tests cover authentication,
@@ -20,15 +20,14 @@ index a160f78b3..e4c9e2845 100644
 +An owned remote-call deadline is `tool_timeout` even when the HTTP wrapper
 +changes the thrown error type. It preserves connection health and reports the
 +remote outcome as unknown; it never replays a possibly applied action.
-+
+ 
  ## `action-policy`
  
- Review: `baseline`.
 diff --git a/maps/agent-access-map/task-coordination.md b/maps/agent-access-map/task-coordination.md
-index 20b33cb29..582a17334 100644
+index a9bd1ddcc..4d4b794e8 100644
 --- a/maps/agent-access-map/task-coordination.md
 +++ b/maps/agent-access-map/task-coordination.md
-@@ -90,6 +90,15 @@ remaining operations before qualifying the whole capability.
+@@ -98,6 +98,15 @@ remaining operations before qualifying the whole capability.
  Gaps: Review policy determines final completion; formal board approval is a different
  boundary.
  
@@ -43,27 +42,26 @@ index 20b33cb29..582a17334 100644
 +
  ## `tree-control`
  
- Review: `baseline`.
+ Capability ID: `task-coordination/tree-control`.
 diff --git a/maps/feature-map/tasks.md b/maps/feature-map/tasks.md
-index 0b2d90936..8b09664ba 100644
+index 505885652..ed7405b73 100644
 --- a/maps/feature-map/tasks.md
 +++ b/maps/feature-map/tasks.md
-@@ -61,6 +61,10 @@ Manual: Filter by status and assignee, change grouping/sort, open a task, and re
- 
- Automated: [task detail](../../ui/src/pages/IssueDetail.test.tsx) covers component behavior, while [issue service](../../server/src/__tests__/issues-service.test.ts) covers server contracts.
- 
+@@ -101,6 +101,9 @@ Automated: [paused assignee relevance](../../tests/e2e/completed-task-paused-ass
+ uses a real disposable server and paused process agent, with no inference, to
+ check both task interfaces. Done and cancelled tasks hide the paused-agent
+ warning; reopening restores it. The agent stays paused and no run starts.
 +Automated: [task chat](../../ui/src/components/TaskChatThread.test.tsx) verifies that active recovery actions are visible in the current chat interface and use the shared recovery controls. Closed tasks suppress historical recovery, and native execution reconciliation retains its separate guarded path.
 +
 +Manual: Open a blocked task with an active operator recovery action in the current chat interface. Verify that the recovery explanation and permitted actions appear, that resolving through the existing control persists the requested transition, and that the subsequent run follows the execution policy. A successful run summary alone is not a review decision.
-+
+ 
  Manual: For a disposable task owned by a legacy agent, have its current run
  assign the task to a human with status In review. Verify that assignment and
- status persist, that the current run finishes without `issue_reassigned`, and
 diff --git a/packages/adapter-utils/src/server-utils.test.ts b/packages/adapter-utils/src/server-utils.test.ts
-index 89ecc5379..bddacdd24 100644
+index 1f3aa928a..61aed3646 100644
 --- a/packages/adapter-utils/src/server-utils.test.ts
 +++ b/packages/adapter-utils/src/server-utils.test.ts
-@@ -2868,6 +2868,8 @@ describe("renderPaperclipWakePrompt", () => {
+@@ -2906,6 +2906,8 @@ describe("renderPaperclipWakePrompt", () => {
              "Please focus on edge cases and leave a short risk summary.",
          },
          allowedActions: ["approve", "request_changes"],
@@ -72,7 +70,7 @@ index 89ecc5379..bddacdd24 100644
        },
        fallbackFetchNeeded: false,
      });
-@@ -2879,6 +2881,33 @@ describe("renderPaperclipWakePrompt", () => {
+@@ -2917,6 +2919,33 @@ describe("renderPaperclipWakePrompt", () => {
      expect(prompt).toContain(
        "You are waking as the active reviewer for this issue.",
      );
@@ -107,7 +105,7 @@ index 89ecc5379..bddacdd24 100644
  
    it("delivers typed disposition repair instructions without liveness classification", () => {
 diff --git a/packages/adapter-utils/src/server-utils.ts b/packages/adapter-utils/src/server-utils.ts
-index 4569db080..f5ac6e76f 100644
+index a14abc080..76e924905 100644
 --- a/packages/adapter-utils/src/server-utils.ts
 +++ b/packages/adapter-utils/src/server-utils.ts
 @@ -553,6 +553,7 @@ type PaperclipWakeExecutionStage = {
@@ -135,7 +133,7 @@ index 4569db080..f5ac6e76f 100644
  export type PaperclipExternalChatProvider =
    "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "imessage-photon" | "speko";
  
-@@ -786,6 +797,7 @@ type PaperclipWakePayload = {
+@@ -787,6 +798,7 @@ type PaperclipWakePayload = {
    executionContinuation: ExecutionContinuationEnvelope | null;
    reason: string | null;
    recovery: PaperclipWakeRecovery | null;
@@ -143,7 +141,7 @@ index 4569db080..f5ac6e76f 100644
    issue: PaperclipWakeIssue | null;
    checkedOutByHarness: boolean;
    externalChatExecutionBound: boolean;
-@@ -856,6 +868,28 @@ function normalizePaperclipWakeRecovery(
+@@ -857,6 +869,28 @@ function normalizePaperclipWakeRecovery(
    };
  }
  
@@ -172,7 +170,7 @@ index 4569db080..f5ac6e76f 100644
  function normalizePaperclipWakeAgentMessage(
    value: unknown,
  ): PaperclipWakeAgentMessage | null {
-@@ -1582,6 +1616,8 @@ function normalizePaperclipWakeExecutionStage(
+@@ -1583,6 +1617,8 @@ function normalizePaperclipWakeExecutionStage(
    const stageType = asString(stage.stageType, "").trim() || null;
    const lastDecisionOutcome =
      asString(stage.lastDecisionOutcome, "").trim() || null;
@@ -181,7 +179,7 @@ index 4569db080..f5ac6e76f 100644
  
    if (
      !wakeRole &&
-@@ -1591,6 +1627,7 @@ function normalizePaperclipWakeExecutionStage(
+@@ -1592,6 +1628,7 @@ function normalizePaperclipWakeExecutionStage(
      !returnAssignee &&
      !reviewRequest &&
      !lastDecisionOutcome &&
@@ -189,7 +187,7 @@ index 4569db080..f5ac6e76f 100644
      allowedActions.length === 0
    ) {
      return null;
-@@ -1605,6 +1642,7 @@ function normalizePaperclipWakeExecutionStage(
+@@ -1606,6 +1643,7 @@ function normalizePaperclipWakeExecutionStage(
      reviewRequest,
      lastDecisionOutcome,
      allowedActions,
@@ -197,7 +195,7 @@ index 4569db080..f5ac6e76f 100644
    };
  }
  
-@@ -1752,6 +1790,7 @@ export function normalizePaperclipWakePayload(
+@@ -1753,6 +1791,7 @@ export function normalizePaperclipWakePayload(
    );
    const taskWatchdog = normalizePaperclipWakeTaskWatchdog(payload.taskWatchdog);
    const recovery = normalizePaperclipWakeRecovery(payload.recovery);
@@ -205,7 +203,7 @@ index 4569db080..f5ac6e76f 100644
    const childIssueSummaries = Array.isArray(payload.childIssueSummaries)
      ? payload.childIssueSummaries
          .map((entry) => normalizePaperclipWakeChildIssueSummary(entry))
-@@ -1833,6 +1872,7 @@ export function normalizePaperclipWakePayload(
+@@ -1834,6 +1873,7 @@ export function normalizePaperclipWakePayload(
      !executionWorkspace &&
      !agentMessage &&
      !recovery &&
@@ -213,15 +211,15 @@ index 4569db080..f5ac6e76f 100644
      !issue
    ) {
      return null;
-@@ -1842,6 +1882,7 @@ export function normalizePaperclipWakePayload(
-     reason: asString(payload.reason, "").trim() || null,
+@@ -1851,6 +1891,7 @@ export function normalizePaperclipWakePayload(
+         }) : [],
      executionContinuation: parseObject(payload.executionContinuation).version === 1 ? payload.executionContinuation as ExecutionContinuationEnvelope : null,
      recovery,
 +    issueMonitor,
      issue,
      checkedOutByHarness: asBoolean(payload.checkedOutByHarness, false),
      externalChatExecutionBound: payload.externalChatExecutionBound === true,
-@@ -2428,6 +2469,32 @@ function renderPaperclipWakePromptBody(
+@@ -2437,6 +2478,32 @@ function renderPaperclipWakePromptBody(
            "",
          ]
        : [];
@@ -254,7 +252,7 @@ index 4569db080..f5ac6e76f 100644
    const wakeSummaryLines = [
      `- reason: ${normalized.reason ?? "unknown"}`,
      `- issue: ${normalized.issue?.identifier ?? normalized.issue?.id ?? "unknown"}${normalized.issue?.title ? ` ${normalized.issue.title}` : ""}`,
-@@ -2450,6 +2517,7 @@ function renderPaperclipWakePromptBody(
+@@ -2459,6 +2526,7 @@ function renderPaperclipWakePromptBody(
              : []),
          ]
        : []),
@@ -262,7 +260,7 @@ index 4569db080..f5ac6e76f 100644
      ...(normalized.reason === "issue_recovery_action_restored"
        ? [
            "- instruction: Do not narrate the recovery in your next comment — at most one short sentence; lead with the work.",
-@@ -2921,6 +2989,9 @@ function renderPaperclipWakePromptBody(
+@@ -2933,6 +3001,9 @@ function renderPaperclipWakePromptBody(
          executionStage.reviewRequest.instructions,
        );
      }
@@ -272,7 +270,7 @@ index 4569db080..f5ac6e76f 100644
      lines.push("");
      if (
        executionStage.wakeRole === "reviewer" ||
-@@ -2931,12 +3002,22 @@ function renderPaperclipWakePromptBody(
+@@ -2943,12 +3014,22 @@ function renderPaperclipWakePromptBody(
          "Do not execute the task itself or continue executor work.",
          "Review the issue and choose one of the allowed actions above.",
          "If you request changes, the workflow routes back to the stored return assignee.",
@@ -761,7 +759,7 @@ index eac949db0..67f9a73cf 100644
      expect(mocks.stop).toHaveBeenCalledTimes(1);
    });
 diff --git a/packages/adapters/opencode-local/src/server/execute.ts b/packages/adapters/opencode-local/src/server/execute.ts
-index bc387a4ef..379456370 100644
+index bc387a4ef..85833f0f2 100644
 --- a/packages/adapters/opencode-local/src/server/execute.ts
 +++ b/packages/adapters/opencode-local/src/server/execute.ts
 @@ -52,6 +52,7 @@ import {
@@ -772,6 +770,16 @@ index bc387a4ef..379456370 100644
  } from "@paperclipai/adapter-utils/server-utils";
  import { isOpenCodeUnknownSessionError, parseOpenCodeJsonl, createOpenCodeJsonlParser } from "./parse.js";
  import {
+@@ -63,8 +64,8 @@ import {
+ import { removeMaintainerOnlySkillSymlinks } from "@paperclipai/adapter-utils/server-utils";
+ import { apiKeyBillingType } from "@paperclipai/adapter-utils/api-billing-type";
+ import { prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
+-import { SANDBOX_INSTALL_COMMAND } from "../index.js";
+ import { prepareManagedModelImageInput } from "./model-input.js";
++import { SANDBOX_INSTALL_COMMAND } from "../index.js";
+ import { resolveOpenCodeSkillsHome } from "./skills.js";
+ 
+ const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 @@ -211,6 +212,59 @@ async function ensureOpenCodeSkillsInjected(
    }
  }
@@ -863,7 +871,7 @@ index bc387a4ef..379456370 100644
    }
  
    const envConfig = parseObject(config.env);
-@@ -331,12 +401,34 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
+@@ -331,13 +401,36 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
    if (authToken) {
      env.PAPERCLIP_API_KEY = authToken;
    }
@@ -885,6 +893,7 @@ index bc387a4ef..379456370 100644
      targetIsRemote: executionTargetIsRemote,
 -    runtimeMcpServers: ctx.runtimeMcp?.getServers() ?? [],
    });
+-  const localRuntimeConfigHome = preparedRuntimeConfig.runtimeConfigHome ?? "";
 +  const taskToolsGuidance = !executionTargetIsRemote && preparedRuntimeConfig.taskToolsPath
 +    && env.PAPERCLIP_API_URL && env.PAPERCLIP_API_KEY && env.PAPERCLIP_TASK_ID
 +    ? [
@@ -896,10 +905,12 @@ index bc387a4ef..379456370 100644
 +        "set-monitor --at ISO_TIME --timeout-at ISO_TIME --max-attempts N --notes TEXT: schedules one monitor on the current eligible task, preserving other execution-policy fields and tighter existing budgets, then confirms by readback. It never changes status or automatically retries. After a conflict or uncertain transport outcome inspect current state before any further write. If no useful independent work remains, use this durable path and end the run instead of sleeping or polling.",
 +        "These helpers do not validate result claims or grant additional authority. Trace success criteria to the authorized task or primary source. Compute/check derived values with an actual tool invocation; an earlier agent document or a succeeded run is not independent proof.",
 +      ].join("\n") : "";
-   const localRuntimeConfigHome = preparedRuntimeConfig.runtimeConfigHome ?? "";
++  const localRuntimeConfigHome =
++    preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
    try {
      const runtimeEnv = Object.fromEntries(
-@@ -366,7 +458,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
+       Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
+@@ -366,17 +459,27 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
        timeoutSec,
      });
      const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(command, executionTarget, cwd, runtimeEnv);
@@ -914,7 +925,24 @@ index bc387a4ef..379456370 100644
        runtimeEnv,
        includeRuntimeKeys: ["HOME"],
        resolvedCommand,
-@@ -469,12 +567,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
+     });
+     if (!executionTargetIsRemote) {
+       await prepareManagedModelImageInput({
+-        runId, target: executionTarget, cwd, env: preparedRuntimeConfig.env,
+-        model, managed: Boolean(config.managedAiConnection), localEnvironment: runtimeEnv,
++        runId,
++        target: executionTarget,
++        cwd,
++        env: preparedRuntimeConfig.env,
++        model,
++        managed: Boolean(config.managedAiConnection),
++        localEnvironment: runtimeEnv,
+       });
+-      Object.assign(runtimeEnv, preparedRuntimeConfig.env);
+       await ensureOpenCodeModelConfiguredAndAvailable({
+         model,
+         command,
+@@ -469,16 +572,36 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
            });
        if (remoteHomeDir && preparedExecutionTargetRuntime.assetDirs.skills) {
          const remoteSkillsDir = path.posix.join(remoteHomeDir, ".claude", "skills");
@@ -943,8 +971,18 @@ index bc387a4ef..379456370 100644
 +        }
        }
        await prepareManagedModelImageInput({
-         runId, target: overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd),
-@@ -506,7 +620,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
+-        runId, target: overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd),
+-        cwd, env: preparedRuntimeConfig.env, model, managed: Boolean(config.managedAiConnection),
++        runId,
++        target: overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd),
++        cwd,
++        env: preparedRuntimeConfig.env,
++        model,
++        managed: Boolean(config.managedAiConnection),
+       });
+       await ensureRemoteOpenCodeModelConfiguredAndAvailable({
+         runId,
+@@ -506,7 +629,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
        });
        if (paperclipBridge) {
          Object.assign(preparedRuntimeConfig.env, paperclipBridge.env);
@@ -957,7 +995,7 @@ index bc387a4ef..379456370 100644
            runtimeEnv: Object.fromEntries(
              Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
                (entry): entry is [string, string] => typeof entry[1] === "string",
-@@ -518,6 +636,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
+@@ -518,6 +645,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
        }
      }
  
@@ -977,7 +1015,7 @@ index bc387a4ef..379456370 100644
      const runtimeSessionParams = parseObject(runtime.sessionParams);
      const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
      const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
-@@ -602,6 +733,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
+@@ -602,6 +742,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
        const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
        const basePrompt = joinPromptSections([
          instructionsPrefix,
@@ -987,7 +1025,7 @@ index bc387a4ef..379456370 100644
          renderedBootstrapPrompt,
          wakePrompt,
          taskContextNote,
-@@ -769,9 +903,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
+@@ -769,9 +912,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
        const parsedError = typeof attempt.parsed.errorMessage === "string" ? attempt.parsed.errorMessage.trim() : "";
        const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
        const rawExitCode = attempt.proc.exitCode;
@@ -1001,7 +1039,7 @@ index bc387a4ef..379456370 100644
          stderrLine ||
          `OpenCode exited with code ${synthesizedExitCode ?? -1}`;
        const modelId = model || null;
-@@ -785,9 +922,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
+@@ -785,9 +931,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
          usageBasis: "per_run",
          errorMessage: (synthesizedExitCode ?? 0) === 0 ? null : fallbackErrorMessage,
          // Forward the transport-level error code from the run-disposition seam.
@@ -1157,16 +1195,17 @@ index c244fa0e1..a016b8ad0 100644
        usageReported,
        usageComplete: usageReported && !missingUsage,
 diff --git a/packages/adapters/opencode-local/src/server/runtime-config.test.ts b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
-index c9a986fdb..d877b98f3 100644
+index 86a4bf056..2bb1c96b7 100644
 --- a/packages/adapters/opencode-local/src/server/runtime-config.test.ts
 +++ b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
-@@ -1,10 +1,12 @@
+@@ -1,11 +1,13 @@
  import fs from "node:fs/promises";
  import os from "node:os";
  import path from "node:path";
 -import { afterEach, describe, expect, it } from "vitest";
 +import { pathToFileURL } from "node:url";
 +import { afterEach, describe, expect, it, vi } from "vitest";
+ import { OPENROUTER_ATTRIBUTION_HEADERS } from "@paperclipai/adapter-utils/openrouter-attribution";
  import { prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
  
  const cleanupPaths = new Set<string>();
@@ -1174,61 +1213,80 @@ index c9a986fdb..d877b98f3 100644
  
  afterEach(async () => {
    await Promise.all(
-@@ -31,6 +33,26 @@ async function makeConfigHome(initialConfig?: Record<string, unknown>) {
- }
+@@ -43,7 +45,7 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+       } } }),
+     }, config: {} });
+     cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+-    const { alias } = JSON.parse(prepared.env.OPENCODE_CONFIG_CONTENT).provider;
++    const { alias } = JSON.parse(prepared.env.OPENCODE_CONFIG_CONTENT!).provider;
+     expect(alias.options).toMatchObject({ apiKey: "fixture-key", headers: { ...OPENROUTER_ATTRIBUTION_HEADERS, "X-Route": "selected" } });
+     expect(alias.options.headers).not.toHaveProperty("http-referer");
+     expect(alias.models.model.headers).toEqual(OPENROUTER_ATTRIBUTION_HEADERS);
+@@ -53,50 +55,479 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+     await prepared.cleanup();
+   });
  
- describe("prepareOpenCodeRuntimeConfig", () => {
-+  it("preserves configured model modalities when the inline layer defines that model", async () => {
-+    const configHome = await makeConfigHome({
-+      provider: { gateway: { models: { vision: { modalities: ["text", "image"] } } } },
-+    });
-+    const prepared = await prepareOpenCodeRuntimeConfig({
-+      env: {
-+        XDG_CONFIG_HOME: configHome,
-+        OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { gateway: { models: { vision: {} } } } }),
+-  it.each([true, false])("prepares explicit remote runtime settings without reading host config (skipPermissions=%s)", async (skipPermissions) => {
+-    const configHome = await makeConfigHome({ theme: "host-only", permission: { bash: "deny" } });
++  it("keeps explicit managed model modalities when inline config omits them", async () => {
++    const configHome = await makeConfigHome({ provider: { gateway: {
++      models: { model: { modalities: { input: ["text", "image"], output: ["text"] } } },
++    } } });
+     const prepared = await prepareOpenCodeRuntimeConfig({
+       env: {
+         XDG_CONFIG_HOME: configHome,
+-        PAPERCLIP_OPENCODE_PROVIDERS: JSON.stringify({ gateway: {
+-          npm: "@ai-sdk/openai-compatible",
+-          options: { baseURL: "https://gateway.example/v1", apiKey: "{env:GATEWAY_KEY}" },
+-          models: { "gateway/model": { name: "Gateway Model" } },
+-        } }),
+-        GATEWAY_KEY: "runtime-key-value",
+-        PAPERCLIP_OPENCODE_SMALL_MODEL: "gateway/model",
++        OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { gateway: { models: { model: { name: "Gateway model" } } } } }),
 +      },
-+      config: { model: "gateway/vision", dangerouslySkipPermissions: false },
++      config: { model: "gateway/model" },
 +    });
 +    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
-+
-+    expect(JSON.parse(prepared.env.OPENCODE_CONFIG_CONTENT!)).toMatchObject({
-+      provider: { gateway: { models: { vision: { modalities: ["text", "image"] } } } },
-+    });
++    const inline = JSON.parse(prepared.env.OPENCODE_CONFIG_CONTENT!).provider.gateway.models.model;
++    expect(inline.modalities).toEqual({ input: ["text", "image"], output: ["text"] });
 +    await prepared.cleanup();
-+    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
 +  });
 +
-   it.each([true, false])("prepares explicit remote runtime settings without reading host config (skipPermissions=%s)", async (skipPermissions) => {
-     const configHome = await makeConfigHome({ theme: "host-only", permission: { bash: "deny" } });
-     const prepared = await prepareOpenCodeRuntimeConfig({
-@@ -47,10 +69,10 @@ describe("prepareOpenCodeRuntimeConfig", () => {
-       config: { model: "gateway/model", dangerouslySkipPermissions: skipPermissions },
++  it("ships delivered remote MCP settings without loosening explicit permissions", async () => {
++    const hostConfig = await makeConfigHome({ permission: { bash: "deny" }, theme: "host-only" });
++    const prepared = await prepareOpenCodeRuntimeConfig({
++      env: {
++        XDG_CONFIG_HOME: hostConfig,
++        OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { bash: "deny" }, theme: "runtime" }),
+       },
+-      config: { model: "gateway/model", dangerouslySkipPermissions: skipPermissions },
++      config: { dangerouslySkipPermissions: false },
        targetIsRemote: true,
++      runtimeMcp: [{
++        name: "assigned",
++        connectionId: "fixture-remote-mcp",
++        url: "https://paperclip.example/mcp",
++        token: "fixture-token",
++      }],
      });
--    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
-+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME!);
+     cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
++    expect(prepared.runtimeConfigHome).not.toBeNull();
++    expect(prepared.notes.join("\n")).toContain("MCP server");
++    expect(prepared.env.OPENCODE_CONFIG_CONTENT).toContain('"bash":"deny"');
++    const runtime = JSON.parse(await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"));
++    expect(runtime.permission).toBeUndefined();
++    expect(runtime.theme).toBeUndefined();
++    expect(Object.values(runtime.mcp)).toHaveLength(1);
++    await prepared.cleanup();
++  });
  
-     expect(prepared.runtimeConfigHome).toBe(prepared.env.XDG_CONFIG_HOME);
+-    expect(prepared.runtimeConfigHome).toBe(prepared.env.XDG_CONFIG_HOME);
 -    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
-+    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME!, "opencode", "opencode.json");
-     const runtimeConfig = JSON.parse(await fs.readFile(runtimeConfigPath, "utf8")) as Record<string, unknown>;
-     expect(runtimeConfig.theme).toBeUndefined();
-     expect(runtimeConfig).toMatchObject({
-@@ -61,8 +83,8 @@ describe("prepareOpenCodeRuntimeConfig", () => {
-     expect(prepared.notes.join(" ")).not.toContain("runtime-key-value");
- 
-     await prepared.cleanup();
--    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
--    await expect(fs.access(prepared.env.XDG_CONFIG_HOME)).rejects.toThrow();
-+    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME!);
-+    await expect(fs.access(prepared.env.XDG_CONFIG_HOME!)).rejects.toThrow();
-   });
- 
-   it("does not create a remote config when permissions are enabled and no runtime settings need transport", async () => {
-@@ -78,6 +100,438 @@ describe("prepareOpenCodeRuntimeConfig", () => {
-     await prepared.cleanup();
-   });
- 
+-    const runtimeConfig = JSON.parse(await fs.readFile(runtimeConfigPath, "utf8")) as Record<string, unknown>;
+-    expect(runtimeConfig.theme).toBeUndefined();
+-    expect(runtimeConfig).toMatchObject({
+-      provider: { gateway: { options: { apiKey: "runtime-key-value" } } },
+-      small_model: "gateway/model",
 +  it("ships task tools privately and removes them with the runtime configuration", async () => {
 +    const configHome = await makeConfigHome();
 +    const prepared = await prepareOpenCodeRuntimeConfig({ env: { XDG_CONFIG_HOME: configHome }, config: {} });
@@ -1248,7 +1306,9 @@ index c9a986fdb..d877b98f3 100644
 +          models: { simple: {} },
 +        },
 +      },
-+    });
+     });
+-    expect(runtimeConfig.permission).toBe(skipPermissions ? "allow" : undefined);
+-    expect(prepared.notes.join(" ")).not.toContain("runtime-key-value");
 +    const dataHome = await makeConfigHome();
 +    const prepared = await prepareOpenCodeRuntimeConfig({
 +      env: { XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: dataHome },
@@ -1280,13 +1340,15 @@ index c9a986fdb..d877b98f3 100644
 +    if (process.platform !== "win32") {
 +      expect((await fs.stat(path.join(pluginDir, pluginName)).then((s) => s.mode & 0o777))).toBe(0o600);
 +    }
-+
-+    await prepared.cleanup();
-+    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
+ 
+     await prepared.cleanup();
+     cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
+-    await expect(fs.access(prepared.env.XDG_CONFIG_HOME)).rejects.toThrow();
 +    await expect(fs.access(prepared.env.XDG_DATA_HOME!)).resolves.toBeUndefined();
 +    expect(await fs.readFile(path.join(configHome, "opencode", "opencode.json"), "utf8")).toContain(apiKey);
-+  });
-+
+   });
+ 
+-  it("does not create a remote config when permissions are enabled and no runtime settings need transport", async () => {
 +  it("fails the optional timeout feature closed for a copied plugins-directory symlink", async () => {
 +    const apiKey = "fixture-private-plugin-key";
 +    const configHome = await makeConfigHome({
@@ -1297,12 +1359,18 @@ index c9a986fdb..d877b98f3 100644
 +    const userPlugin = path.join(outsidePlugins, "user-plugin.js");
 +    await fs.writeFile(userPlugin, "export const UserPlugin = async () => ({});", "utf8");
 +    await fs.symlink(outsidePlugins, path.join(configHome, "opencode", "plugins"), "junction");
-+    const prepared = await prepareOpenCodeRuntimeConfig({
+     const prepared = await prepareOpenCodeRuntimeConfig({
+-      env: {},
+-      config: { dangerouslySkipPermissions: false },
+-      targetIsRemote: true,
 +      env: { XDG_CONFIG_HOME: configHome },
 +      config: { model: "paperclip/simple" },
-+    });
+     });
 +    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
-+
+ 
+-    expect(prepared.runtimeConfigHome).toBeNull();
+-    expect(prepared.env.XDG_CONFIG_HOME).toBeUndefined();
+-    expect(prepared.notes).toEqual([]);
 +    const runtimePluginDir = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "plugins");
 +    expect((await fs.lstat(runtimePluginDir)).isSymbolicLink()).toBe(true);
 +    expect(prepared.notes.join("\n")).toContain("plugins directory is a symlink");
@@ -1658,13 +1726,10 @@ index c9a986fdb..d877b98f3 100644
 +    expect(envContent.provider.paperclip.options).toEqual({ apiKey });
 +    expect(JSON.parse(prepared.env.OPENCODE_AUTH_CONTENT!)).toEqual({ paperclip: { type: "api", key: apiKey } });
 +    expect(prepared.notes.join("\n")).not.toContain(apiKey);
-+    await prepared.cleanup();
-+  });
-+
-   it("allows all tools and connected tools by default", async () => {
-     const configHome = await makeConfigHome({
-       permission: {
-@@ -105,12 +559,170 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+     await prepared.cleanup();
+   });
+ 
+@@ -127,12 +558,164 @@ describe("prepareOpenCodeRuntimeConfig", () => {
        theme: "system",
        permission: "allow",
      });
@@ -1697,12 +1762,8 @@ index c9a986fdb..d877b98f3 100644
 +  });
 +
 +  it("adds only delivered HTTP MCP servers with a Bearer header and preserves user servers on collision", async () => {
-+    const { createHash } = await import("node:crypto");
 +    const connectionId = "fixture-connection";
-+    const suffix = createHash("sha256").update(`${connectionId}\0${0}`).digest("hex").toUpperCase();
-+    const collidedName = `paperclip_${suffix.slice(0, 12)}`;
-+    const assignedName = `paperclip_${suffix.slice(0, 10)}_1`;
-+    expect(collidedName.length).toBeLessThanOrEqual(22);
++    const collidedName = "Paperclip_assigned";
 +    const suppliedToken = "fixture-token-not-a-real-credential";
 +    const configHome = await makeConfigHome({
 +      mcp: {
@@ -1732,15 +1793,13 @@ index c9a986fdb..d877b98f3 100644
 +    expect(runtimeConfig.theme).toBe("system");
 +    expect(runtimeConfig.mcp[collidedName]).toEqual({ type: "local", command: ["user-owned-server"] });
 +    expect(runtimeConfig.mcp.other).toEqual({ type: "remote", url: "https://user.example/mcp", enabled: true });
-+    expect(runtimeConfig.mcp[assignedName]).toMatchObject({
++    expect(runtimeConfig.mcp[`${collidedName}_2`]).toMatchObject({
 +      type: "remote",
 +      url: "https://paperclip.example/mcp/gateways/run-scoped",
 +      enabled: true,
 +      oauth: false,
-+      timeout: 30_000,
 +      headers: { Authorization: `Bearer ${suppliedToken}` },
 +    });
-+    expect(assignedName.length).toBeLessThanOrEqual(22);
 +    expect(serializedConfig).toContain(`Bearer ${suppliedToken}`);
 +    expect(prepared.notes.join("\n")).not.toContain(suppliedToken);
 +    expect(Object.keys(prepared.env).filter((key) => key.startsWith("PAPERCLIP_OPENCODE_MCP_TOKEN_"))).toEqual([]);
@@ -1835,23 +1894,237 @@ index c9a986fdb..d877b98f3 100644
    it("merges custom providers from PAPERCLIP_OPENCODE_PROVIDERS into the config", async () => {
      const configHome = await makeConfigHome({ permission: { read: "allow" } });
      const providers = {
+@@ -249,7 +832,7 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+     const runtimeConfig = JSON.parse(
+       await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+     ) as Record<string, unknown>;
+-    expect(runtimeConfig.provider).toMatchObject({ openrouter: { options: { headers: { "HTTP-Referer": "https://paperclip.ing" } } } });
++    expect(runtimeConfig.provider).toEqual({ openrouter: { options: { headers: OPENROUTER_ATTRIBUTION_HEADERS } } });
+     expect(prepared.notes).toContain(
+       "PAPERCLIP_OPENCODE_PROVIDERS contains invalid JSON; custom providers ignored.",
+     );
+@@ -266,7 +849,7 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+     const runtimeConfig = JSON.parse(
+       await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+     ) as Record<string, unknown>;
+-    expect(runtimeConfig.provider).toMatchObject({ openrouter: { options: { headers: { "HTTP-Referer": "https://paperclip.ing" } } } });
++    expect(runtimeConfig.provider).toEqual({ openrouter: { options: { headers: OPENROUTER_ATTRIBUTION_HEADERS } } });
+     expect(prepared.notes).toContain(
+       "PAPERCLIP_OPENCODE_PROVIDERS is set but is not a JSON object; custom providers ignored.",
+     );
+@@ -310,7 +893,7 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+     const runtimeConfig = JSON.parse(
+       await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+     ) as Record<string, unknown>;
+-    expect(runtimeConfig.provider).toMatchObject({ openrouter: { options: { headers: { "HTTP-Referer": "https://paperclip.ing" } } } });
++    expect(runtimeConfig.provider).toEqual({ openrouter: { options: { headers: OPENROUTER_ATTRIBUTION_HEADERS } } });
+     expect(prepared.notes).toContain(
+       "PAPERCLIP_OPENCODE_PROVIDERS: skipped provider(s) with non-object values: bifrost.",
+     );
+@@ -357,9 +940,10 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+     const runtimeConfig = JSON.parse(
+       await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+     ) as { provider?: Record<string, { models?: Record<string, unknown> }> };
+-    expect(runtimeConfig.provider?.openrouter?.models).toEqual(Object.fromEntries(
+-      Object.entries(providers.openrouter.models).map(([id, model]) => [id, { ...model, headers: OPENROUTER_ATTRIBUTION_HEADERS }]),
+-    ));
++    expect(runtimeConfig.provider?.openrouter?.models).toEqual({
++      "openai/gpt-oss-120b:nitro": { name: "GPT-OSS 120B (nitro)", headers: OPENROUTER_ATTRIBUTION_HEADERS },
++      "example/other": { headers: OPENROUTER_ATTRIBUTION_HEADERS },
++    });
+     expect(
+       prepared.notes.some((note) => note.startsWith("Registered configured model")),
+     ).toBe(false);
+@@ -376,167 +960,19 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+     const runtimeConfig = JSON.parse(
+       await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+     ) as Record<string, unknown>;
+-    expect(runtimeConfig.provider).toMatchObject({ openrouter: { options: { headers: { "HTTP-Referer": "https://paperclip.ing" } } } });
++    expect(runtimeConfig.provider).toEqual({ openrouter: { options: { headers: OPENROUTER_ATTRIBUTION_HEADERS } } });
+     await prepared.cleanup();
+   });
+ 
+-  it("preserves permission settings while attributing OpenRouter when skip-permissions is off", async () => {
++  it("respects explicit opt-out", async () => {
+     const configHome = await makeConfigHome();
+     const prepared = await prepareOpenCodeRuntimeConfig({
+       env: { XDG_CONFIG_HOME: configHome },
+       config: { dangerouslySkipPermissions: false },
+     });
+ 
+-    const config = JSON.parse(await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"));
+-    expect(config.permission).toBeUndefined();
+-    expect(config.provider.openrouter.options.headers["HTTP-Referer"]).toBe("https://paperclip.ing");
+-    await prepared.cleanup();
+-  });
+-
+-  it.each([false, true])("adds run-scoped MCP servers without changing permission policy (skip=%s)", async (skip) => {
+-    const configHome = await makeConfigHome({
+-      permission: { bash: "ask", "mcp__existing__write": "deny" },
+-      mcp: {
+-        "paperclip-assigned": { type: "remote", url: "https://user.example/mcp", enabled: true },
+-        existing: { type: "remote", url: "https://existing.example/mcp", enabled: true },
+-      },
+-      provider: { custom: { models: { "example/model": {} } } },
+-      small_model: "example/model",
+-    });
+-    const token = "run-scoped-fixture-secret";
+-    const prepared = await prepareOpenCodeRuntimeConfig({
+-      env: { XDG_CONFIG_HOME: configHome },
+-      config: { dangerouslySkipPermissions: skip },
+-      runtimeMcpServers: [
+-        { name: "paperclip-assigned", connectionId: `assignment:${"a".repeat(64)}`, url: "https://paperclip.example/mcp/one", token },
+-        { name: "paperclip-assigned", connectionId: `assignment:${"b".repeat(64)}`, url: "https://paperclip.example/mcp/two", token: "second-run-token" },
+-      ],
+-    });
+-    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+-
+-    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
+-    const runtimeConfig = JSON.parse(await fs.readFile(runtimeConfigPath, "utf8")) as {
+-      mcp: Record<string, unknown>;
+-      permission?: unknown;
+-      provider?: unknown;
+-      small_model?: unknown;
+-    };
+-    expect(runtimeConfig.mcp).toMatchObject({
+-      "paperclip-assigned": { url: "https://user.example/mcp" },
+-      existing: { url: "https://existing.example/mcp" },
+-      "paperclip-assigned_2": {
+-        type: "remote",
+-        url: "https://paperclip.example/mcp/one",
+-        enabled: true,
+-        oauth: false,
+-        timeout: 30_000,
+-        headers: { Authorization: `Bearer ${token}` },
+-      },
+-      "paperclip-assigned_3": {
+-        type: "remote",
+-        url: "https://paperclip.example/mcp/two",
+-        headers: { Authorization: "Bearer second-run-token" },
+-      },
+-    });
+-    const generatedNames = ["paperclip-assigned_2", "paperclip-assigned_3"];
+-    const gatewayMetaActionNames = [
+-      `mcp.app-gallery-files:${"read_sensitive_metadata".padEnd(103 - "mcp.app-gallery-files:".length, "x")}`,
+-      `mcp.app-gallery-files:${"update_sensitive_metadata".padEnd(104 - "mcp.app-gallery-files:".length, "y")}`,
+-    ];
+-    const composedToolNames = generatedNames.flatMap((serverName) =>
+-      gatewayMetaActionNames.map((toolName) => `${serverName}__${toolName}`),
+-    );
+-    expect(gatewayMetaActionNames.map((name) => name.length)).toEqual([103, 104]);
+-    expect(generatedNames.every((name) => name.length <= 22)).toBe(true);
+-    expect(composedToolNames.every((name) => name.length <= 128)).toBe(true);
+-    expect(new Set(composedToolNames).size).toBe(composedToolNames.length);
+-    expect(JSON.stringify(runtimeConfig.mcp)).not.toContain("a".repeat(64));
+-    expect(JSON.stringify(runtimeConfig.mcp)).not.toContain("b".repeat(64));
+-    expect(runtimeConfig.permission).toEqual(skip ? "allow" : { bash: "ask", "mcp__existing__write": "deny" });
+-    expect(runtimeConfig.provider).toEqual({
+-      custom: { models: { "example/model": {} } },
+-      openrouter: { options: { headers: OPENROUTER_ATTRIBUTION_HEADERS } },
+-    });
+-    expect(runtimeConfig.small_model).toBe("example/model");
+-    if (process.platform !== "win32") {
+-      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
+-    }
+-    expect(JSON.stringify(prepared.notes)).not.toContain(token);
+-    expect(JSON.parse(await fs.readFile(path.join(configHome, "opencode", "opencode.json"), "utf8"))).toMatchObject({
+-      permission: { bash: "ask" },
+-      mcp: { "paperclip-assigned": { url: "https://user.example/mcp" } },
+-    });
+-
+-    await prepared.cleanup();
+-    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
+-    await expect(fs.access(prepared.env.XDG_CONFIG_HOME)).rejects.toThrow();
+-  });
+-
+-  it("keeps a readable short label and deterministically bounds long labels", async () => {
+-    const configHome = await makeConfigHome();
+-    const servers = [{
+-      name: "Paperclip project tools with a long descriptive label",
+-      connectionId: `assignment:${"c".repeat(64)}`,
+-      url: "https://paperclip.example/mcp",
+-      token: "fixture-token",
+-    }];
+-    const first = await prepareOpenCodeRuntimeConfig({
+-      env: { XDG_CONFIG_HOME: configHome },
+-      config: { dangerouslySkipPermissions: false },
+-      runtimeMcpServers: servers,
+-    });
+-    cleanupPaths.add(first.env.XDG_CONFIG_HOME);
+-    const firstConfig = JSON.parse(
+-      await fs.readFile(path.join(first.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+-    ) as { mcp: Record<string, unknown> };
+-    const [firstName] = Object.keys(firstConfig.mcp);
+-    expect(firstName).toMatch(/^Paperclip_pro_[a-f0-9]{8}$/);
+-    expect(firstName.length).toBeLessThanOrEqual(22);
+-
+-    await first.cleanup();
+-    cleanupPaths.delete(first.env.XDG_CONFIG_HOME);
+-    const second = await prepareOpenCodeRuntimeConfig({
+-      env: { XDG_CONFIG_HOME: configHome },
+-      config: { dangerouslySkipPermissions: false },
+-      runtimeMcpServers: servers,
+-    });
+-    cleanupPaths.add(second.env.XDG_CONFIG_HOME);
+-    const secondConfig = JSON.parse(
+-      await fs.readFile(path.join(second.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+-    ) as { mcp: Record<string, unknown> };
+-    expect(Object.keys(secondConfig.mcp)).toEqual([firstName]);
+-    await second.cleanup();
+-    cleanupPaths.delete(second.env.XDG_CONFIG_HOME);
+-  });
+-
+-  it("does not follow a user config symlink when writing the run secret", async () => {
+-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-symlink-test-"));
+-    cleanupPaths.add(root);
+-    const configHome = path.join(root, "config");
+-    const externalConfig = path.join(root, "external.json");
+-    const configDir = path.join(configHome, "opencode");
+-    await fs.mkdir(configDir, { recursive: true });
+-    await fs.writeFile(externalConfig, JSON.stringify({ theme: "system" }), "utf8");
+-    await fs.symlink(externalConfig, path.join(configDir, "opencode.json"));
+-
+-    const prepared = await prepareOpenCodeRuntimeConfig({
+-      env: { XDG_CONFIG_HOME: configHome },
+-      config: { dangerouslySkipPermissions: false },
+-      runtimeMcpServers: [{
+-        name: "Assigned tools",
+-        connectionId: "connection-1",
+-        url: "https://paperclip.example/mcp",
+-        token: "fixture-secret",
+-      }],
+-    });
+-    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+-    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
+-    expect((await fs.lstat(runtimeConfigPath)).isSymbolicLink()).toBe(false);
+-    expect(await fs.readFile(externalConfig, "utf8")).toBe(JSON.stringify({ theme: "system" }));
+-    if (process.platform !== "win32") {
+-      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
+-    }
++    expect(prepared.env).toEqual({ XDG_CONFIG_HOME: configHome });
++    expect(prepared.notes).toEqual([]);
+     await prepared.cleanup();
+-    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
+   });
+ });
 diff --git a/packages/adapters/opencode-local/src/server/runtime-config.ts b/packages/adapters/opencode-local/src/server/runtime-config.ts
-index c03ee30c8..2712aa328 100644
+index a06abded3..f70e9a67e 100644
 --- a/packages/adapters/opencode-local/src/server/runtime-config.ts
 +++ b/packages/adapters/opencode-local/src/server/runtime-config.ts
-@@ -1,19 +1,21 @@
+@@ -1,10 +1,11 @@
 +import { createHash, randomUUID } from "node:crypto";
  import fs from "node:fs/promises";
--import { createHash } from "node:crypto";
  import os from "node:os";
  import path from "node:path";
+-import { createHash } from "node:crypto";
  import type { AdapterRuntimeMcpServer } from "@paperclipai/adapter-utils";
+ import { isOpenRouterUrl, openRouterAttributionHeaders } from "@paperclipai/adapter-utils/openrouter-attribution";
  import { asBoolean } from "@paperclipai/adapter-utils/server-utils";
 +import { PAPERCLIP_TASK_TOOLS_SOURCE } from "./task-tools.js";
-+
-+const MAX_RUNTIME_MCP_SERVER_NAME_LENGTH = 22;
  
- type PreparedOpenCodeRuntimeConfig = {
+ const MAX_RUNTIME_MCP_SERVER_NAME_LENGTH = 22;
+ 
+@@ -12,6 +13,7 @@ type PreparedOpenCodeRuntimeConfig = {
    env: Record<string, string>;
    notes: string[];
    runtimeConfigHome: string | null;
@@ -1859,12 +2132,7 @@ index c03ee30c8..2712aa328 100644
    cleanup: () => Promise<void>;
  };
  
--const MAX_RUNTIME_MCP_SERVER_NAME_LENGTH = 22;
--
- function resolveXdgConfigHome(env: Record<string, string>): string {
-   return (
-     (typeof env.XDG_CONFIG_HOME === "string" && env.XDG_CONFIG_HOME.trim()) ||
-@@ -22,10 +24,31 @@ function resolveXdgConfigHome(env: Record<string, string>): string {
+@@ -23,10 +25,31 @@ function resolveXdgConfigHome(env: Record<string, string>): string {
    );
  }
  
@@ -1896,7 +2164,7 @@ index c03ee30c8..2712aa328 100644
  // Recursively replace {env:VAR} placeholders with the resolved value. Used to bake
  // gateway provider secrets (e.g. the LLM-gateway virtual key) into opencode.json
  // SERVER-SIDE, where the value is reliably present. OpenCode's own {env:...}
-@@ -89,14 +112,6 @@ function parseProviderConfig(
+@@ -90,14 +113,6 @@ function parseProviderConfig(
    return Object.keys(providers).length > 0 ? providers : null;
  }
  
@@ -1911,42 +2179,41 @@ index c03ee30c8..2712aa328 100644
  async function readJsonObject(filepath: string): Promise<Record<string, unknown>> {
    try {
      const raw = await fs.readFile(filepath, "utf8");
-@@ -107,62 +122,43 @@ async function readJsonObject(filepath: string): Promise<Record<string, unknown>
+@@ -114,8 +129,17 @@ function buildRuntimeMcpConfig(
+ ): Record<string, unknown> {
+   const mcp: Record<string, unknown> = { ...existing };
+   const usedNames = new Set(Object.keys(mcp));
+-
+   for (const server of servers) {
++    let endpoint: URL;
++    try {
++      endpoint = new URL(server.url);
++    } catch {
++      throw new Error("A Paperclip runtime MCP server has an invalid URL.");
++    }
++    if (!(endpoint.protocol === "http:" || endpoint.protocol === "https:") || endpoint.username || endpoint.password ||
++        !server.connectionId.trim() || !server.token.trim() || /[\r\n]/.test(server.token)) {
++      throw new Error("A Paperclip runtime MCP server has an invalid HTTP binding.");
++    }
+     const safeServerName = server.name.replace(/[^a-zA-Z0-9_-]/g, "_") || "connection";
+     let suffix = 1;
+     let name: string;
+@@ -141,101 +165,298 @@ function buildRuntimeMcpConfig(
+       timeout: 30_000,
+     };
    }
+-
+   return mcp;
  }
  
--function buildRuntimeMcpConfig(
--  existing: Record<string, unknown>,
--  servers: readonly AdapterRuntimeMcpServer[],
--): Record<string, unknown> {
--  const mcp: Record<string, unknown> = { ...existing };
--  const usedNames = new Set(Object.keys(mcp));
--  for (const server of servers) {
--    const safeServerName = server.name.replace(/[^a-zA-Z0-9_-]/g, "_") || "connection";
--    let suffix = 1;
--    let name: string;
--    do {
--      const collisionSuffix = suffix === 1 ? "" : `_${suffix}`;
--      const nameBudget = MAX_RUNTIME_MCP_SERVER_NAME_LENGTH - collisionSuffix.length;
--      if (safeServerName.length <= nameBudget) name = `${safeServerName}${collisionSuffix}`;
--      else {
--        const hash = createHash("sha256").update(safeServerName).digest("hex").slice(0, 8);
--        const prefixLength = nameBudget - hash.length - 1;
--        name = `${safeServerName.slice(0, prefixLength)}_${hash}${collisionSuffix}`;
--      }
--      suffix += 1;
--    } while (usedNames.has(name));
--    usedNames.add(name);
--    mcp[name] = {
--      type: "remote",
--      url: server.url,
--      headers: { Authorization: `Bearer ${server.token}` },
--      enabled: true,
--      oauth: false,
--      timeout: 30_000,
--    };
+-async function replaceRuntimeConfigSymlink(filepath: string): Promise<void> {
+-  let stat: Awaited<ReturnType<typeof fs.lstat>>;
 +async function ensurePrivatePluginDirectory(pluginDir: string): Promise<void> {
-+  try {
+   try {
+-    stat = await fs.lstat(filepath);
+-  } catch (err) {
+-    if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return;
+-    throw err;
 +    const stat = await fs.lstat(pluginDir);
 +    if (stat.isSymbolicLink()) {
 +      // Do not silently discard user plugins from an external target. Copying
@@ -1958,30 +2225,33 @@ index c03ee30c8..2712aa328 100644
 +    }
 +  } catch (error) {
 +    if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw error;
-+  }
+   }
+-  if (!stat.isSymbolicLink()) return;
+-
+-  let contents: Buffer | null = null;
+-  try {
+-    contents = await fs.readFile(filepath);
+-  } catch (err) {
+-    if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw err;
 +  await fs.mkdir(pluginDir, { recursive: true, mode: 0o700 });
 +  await fs.chmod(pluginDir, 0o700);
 +  if ((await fs.readdir(pluginDir)).length > 0) {
 +    throw new Error("OpenCode plugin hooks may already define provider fetch behavior");
    }
--  return mcp;
- }
- 
--async function replaceRuntimeConfigSymlink(filepath: string): Promise<void> {
--  let stat: Awaited<ReturnType<typeof fs.lstat>>;
--  try { stat = await fs.lstat(filepath); }
--  catch (err) {
--    if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return;
--    throw err;
--  }
--  if (!stat.isSymbolicLink()) return;
--  let contents: Buffer | null = null;
--  try { contents = await fs.readFile(filepath); }
--  catch (err) {
--    if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw err;
--  }
 -  await fs.unlink(filepath);
 -  if (contents) await fs.writeFile(filepath, contents, { mode: 0o600 });
+ }
+ 
+-/** Carry effective explicit settings into the inline layer before catalog discovery. */
+-function preserveExplicitModelModalities(
+-  env: Record<string, string>, providers: unknown, model: unknown,
+-): Record<string, string> {
+-  const ref = parseConfiguredModelRef(model);
+-  if (!ref || !isPlainObject(providers)) return env;
+-  const provider = providers[ref.provider];
+-  if (!isPlainObject(provider) || !isPlainObject(provider.models)) return env;
+-  const definition = provider.models[ref.model];
+-  if (!isPlainObject(definition) || definition.modalities === undefined) return env;
 +const DEFAULT_OPEN_CODE_MODEL_TIMEOUT_MS = 300_000;
 +const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
 +const MAX_OPEN_CODE_TIMEOUT_RETRIES = 2;
@@ -1991,37 +2261,22 @@ index c03ee30c8..2712aa328 100644
 +  const separator = raw.indexOf("/");
 +  if (separator <= 0 || separator === raw.length - 1) return null;
 +  return { provider: raw.slice(0, separator).trim(), model: raw.slice(separator + 1).trim() };
- }
- 
--/** Carry effective explicit settings into the inline layer before catalog discovery. */
-+/** Carry explicit disk/provider modality metadata into OpenCode's inline config. */
- function preserveExplicitModelModalities(
-   env: Record<string, string>, providers: unknown, model: unknown,
- ): Record<string, string> {
--  const ref = parseConfiguredModelRef(model);
-+  const ref = configuredModelRef(model);
-   if (!ref || !isPlainObject(providers)) return env;
-   const provider = providers[ref.provider];
-   if (!isPlainObject(provider) || !isPlainObject(provider.models)) return env;
-@@ -171,8 +167,6 @@ function preserveExplicitModelModalities(
-   try {
-     const inline = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}");
-     const entry = inline?.provider?.[ref.provider]?.models?.[ref.model];
--    // Inline settings have higher priority. Only fill the omitted field on an
--    // existing entry, so discovery cannot shadow explicit disk/provider input.
-     if (!isPlainObject(entry) || entry.modalities !== undefined) return env;
-     entry.modalities = definition.modalities;
-     return { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify(inline) };
-@@ -181,145 +175,536 @@ function preserveExplicitModelModalities(
-   }
- }
- 
++}
++
 +function parseConfigContent(raw: unknown): Record<string, unknown> | null {
 +  if (typeof raw !== "string" || raw.trim().length === 0) return null;
-+  try {
+   try {
+-    const inline = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}");
+-    const entry = inline?.provider?.[ref.provider]?.models?.[ref.model];
+-    // Inline settings have higher priority. Only fill the omitted field on an
+-    // existing entry, so discovery cannot shadow explicit disk/provider input.
+-    if (!isPlainObject(entry) || entry.modalities !== undefined) return env;
+-    entry.modalities = definition.modalities;
+-    return { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify(inline) };
 +    const parsed: unknown = JSON.parse(raw);
 +    return isPlainObject(parsed) ? parsed : null;
-+  } catch {
+   } catch {
+-    return env;
 +    return null;
 +  }
 +}
@@ -2031,7 +2286,7 @@ index c03ee30c8..2712aa328 100644
 +  const resolved = expandEnvPlaceholders(raw, (name) => env[name] ?? process.env[name]);
 +  if (typeof resolved !== "string" || resolved.trim().length === 0 || /\{env:[A-Za-z_][A-Za-z0-9_]*\}/.test(resolved)) {
 +    return null;
-+  }
+   }
 +  return resolved;
 +}
 +
@@ -2242,31 +2497,20 @@ index c03ee30c8..2712aa328 100644
 +  };
 +};
 +`;
-+}
-+
+ }
+ 
  export async function prepareOpenCodeRuntimeConfig(input: {
    env: Record<string, string>;
    config: Record<string, unknown>;
+-  targetIsRemote?: boolean;
 +  runtimeMcp?: AdapterRuntimeMcpServer[];
-   targetIsRemote?: boolean;
--  runtimeMcpServers?: readonly AdapterRuntimeMcpServer[];
+   runtimeMcpServers?: readonly AdapterRuntimeMcpServer[];
++  targetIsRemote?: boolean;
  }): Promise<PreparedOpenCodeRuntimeConfig> {
    const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
-   const targetIsRemote = input.targetIsRemote === true;
--  const runtimeMcpServers = targetIsRemote ? [] : (input.runtimeMcpServers ?? []);
--  if (!skipPermissions && !targetIsRemote && runtimeMcpServers.length === 0) {
--    const existingConfig = await readJsonObject(
--      path.join(resolveXdgConfigHome(input.env), "opencode", "opencode.json"),
--    );
--    return {
--      env: preserveExplicitModelModalities(input.env, existingConfig.provider, input.config.model),
--      notes: [],
--      runtimeConfigHome: null,
--      cleanup: async () => {},
--    };
--  }
--
--  const notes: string[] = skipPermissions
+-  const runtimeMcpServers = input.runtimeMcpServers ?? [];
+-  const targetIsRemote = input.targetIsRemote === true;
+-  const notes = skipPermissions
 -    ? ["Injected runtime OpenCode config with permission=allow for all tools and connections."]
 -    : [];
 -  const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
@@ -2274,16 +2518,12 @@ index c03ee30c8..2712aa328 100644
 -    input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS,
 -    resolveEnv,
 -    notes,
-+  const runtimeMcpServers = targetIsRemote ? [] : (input.runtimeMcp ?? []);
-+  const selectedModel = configuredModelRef(input.config.model);
-+  const hasExplicitRemoteSettings = Boolean(
-+    (input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS)?.trim() ||
-+    (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim(),
-   );
+-  );
 -  const smallModel = (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim();
--  if (targetIsRemote && !skipPermissions && !gatewayProviders && !smallModel) {
-+  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || targetIsRemote) &&
-+      (!targetIsRemote || !hasExplicitRemoteSettings)) {
+-  if (targetIsRemote && !skipPermissions && !gatewayProviders && !smallModel && runtimeMcpServers.length === 0) {
++  const runtimeMcpServers = input.runtimeMcp ?? input.runtimeMcpServers ?? [];
++  const selectedModel = configuredModelRef(input.config.model);
++  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || input.targetIsRemote)) {
      return {
 -      env: preserveExplicitModelModalities(input.env, undefined, input.config.model),
 -      notes,
@@ -2293,45 +2533,41 @@ index c03ee30c8..2712aa328 100644
        cleanup: async () => {},
      };
    }
- 
+-
+-  if (!skipPermissions) notes.push("Prepared isolated OpenCode provider configuration.");
 -  const sourceConfigDir = targetIsRemote
 -    ? null
 -    : path.join(resolveXdgConfigHome(input.env), "opencode");
-+  // Remote targets need an isolated runtime config only when managed settings
-+  // must be shipped. Never copy a host config directory into a remote run.
-+  const sourceConfigDir = targetIsRemote ? null : path.join(resolveXdgConfigHome(input.env), "opencode");
++  const sourceConfigDir = input.targetIsRemote ? null : path.join(resolveXdgConfigHome(input.env), "opencode");
    const runtimeConfigHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-config-"));
    const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
    const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
  
--  await fs.mkdir(runtimeConfigDir, { recursive: true });
+-  let cleanupDone = false;
+-  const cleanup = async () => {
+-    if (cleanupDone) return;
+-    cleanupDone = true;
+-    await fs.rm(runtimeConfigHome, { recursive: true, force: true });
+-  };
+-
+   try {
+-  await fs.mkdir(runtimeConfigDir, { recursive: true, mode: 0o700 });
 -  if (sourceConfigDir) {
--    try {
--      await fs.cp(sourceConfigDir, runtimeConfigDir, {
--        recursive: true,
--        force: true,
--        errorOnExist: false,
--        dereference: false,
--      });
--    } catch (err) {
--      if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
--        throw err;
-+  try {
 +    await fs.mkdir(runtimeConfigDir, { recursive: true, mode: 0o700 });
 +    await fs.chmod(runtimeConfigHome, 0o700);
 +    await fs.chmod(runtimeConfigDir, 0o700);
-+    if (sourceConfigDir) {
-+      try {
-+        await fs.cp(sourceConfigDir, runtimeConfigDir, {
-+          recursive: true,
-+          force: true,
-+          errorOnExist: false,
-+          dereference: false,
-+        });
-+      } catch (err) {
-+        if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
-+          throw err;
-+        }
+     try {
+-      await fs.cp(sourceConfigDir, runtimeConfigDir, {
++      if (sourceConfigDir) await fs.cp(sourceConfigDir, runtimeConfigDir, {
+         recursive: true,
+         force: true,
+         errorOnExist: false,
+@@ -243,136 +464,265 @@ export async function prepareOpenCodeRuntimeConfig(input: {
+       });
+     } catch (err) {
+       if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
+-        await cleanup();
+         throw err;
        }
      }
 -  }
@@ -2389,7 +2625,7 @@ index c03ee30c8..2712aa328 100644
 +    // hard-coded) so the gateway URL, key env, and model list stay declarative.
 +    const existingProvider = isPlainObject(existingConfig.provider) ? existingConfig.provider : {};
 +    let nextProvider = existingProvider;
-+    if (skipPermissions || targetIsRemote) {
++    if (skipPermissions) {
 +      const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
 +      const gatewayProviders = parseProviderConfig(
 +        input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS,
@@ -2405,13 +2641,14 @@ index c03ee30c8..2712aa328 100644
      }
 -  }
  
--  const nextConfig: Record<string, unknown> = {
--    ...existingConfig,
--    ...(skipPermissions ? { permission: "allow" } : {}),
--  };
--  if (Object.keys(nextProvider).length > 0) {
--    nextConfig.provider = nextProvider;
--  }
+-  const inlineContent = input.env.OPENCODE_CONFIG_CONTENT ?? process.env.OPENCODE_CONFIG_CONTENT;
+-  let inlineConfig: Record<string, unknown> | undefined;
+-  if (inlineContent) {
+-    try {
+-      const parsed: unknown = JSON.parse(inlineContent);
+-      if (isPlainObject(parsed)) inlineConfig = parsed;
+-    } catch {
+-      // OpenCode must still report invalid operator configuration.
 +    // Register the configured model on its provider's models map. OpenCode resolves
 +    // `--model provider/model` only when the model id exists in that map, so ids the
 +    // models.dev catalog does not carry — OpenRouter routing variants such as
@@ -2436,18 +2673,30 @@ index c03ee30c8..2712aa328 100644
 +          `Registered configured model ${configuredModel.provider}/${configuredModel.model} in the runtime OpenCode config.`,
 +        );
 +      }
-+    }
+     }
+-  }
+-  nextProvider = attributeOpenCodeProviders(mergeConfigObjects(
+-    nextProvider,
+-    isPlainObject(inlineConfig?.provider) ? inlineConfig.provider : {},
+-  ));
+-
+-  const nextConfig: Record<string, unknown> = {
+-    ...existingConfig,
+-    ...(skipPermissions ? { permission: "allow" } : {}),
+-  };
+-  if (Object.keys(nextProvider).length > 0) {
+-    nextConfig.provider = nextProvider;
+-  }
  
 -  if (runtimeMcpServers.length > 0) {
 -    const existingMcp = isPlainObject(existingConfig.mcp) ? existingConfig.mcp : {};
 -    nextConfig.mcp = buildRuntimeMcpConfig(existingMcp, runtimeMcpServers);
 -    notes.push(`Injected ${runtimeMcpServers.length} run-scoped Paperclip MCP server(s) into OpenCode.`);
 -  }
-+    const nextConfig: Record<string, unknown> = { ...existingConfig };
-+    if (skipPermissions) nextConfig.permission = "allow";
-+    if ((skipPermissions || targetIsRemote) && Object.keys(nextProvider).length > 0) {
-+      nextConfig.provider = nextProvider;
-+    }
++    const inlineContent = input.env.OPENCODE_CONFIG_CONTENT ?? process.env.OPENCODE_CONFIG_CONTENT;
++    const inlineConfig = parseConfigContent(inlineContent);
++    const inlineProvider = isPlainObject(inlineConfig?.provider) ? inlineConfig.provider : {};
++    nextProvider = attributeOpenCodeProviders(mergeConfigObjects(nextProvider, inlineProvider));
  
 -  // Pin OpenCode's auxiliary "small" model (used for session-title generation and
 -  // other helper tasks) via PAPERCLIP_OPENCODE_SMALL_MODEL. OpenCode otherwise
@@ -2461,9 +2710,25 @@ index c03ee30c8..2712aa328 100644
 -  }
 -  await fs.writeFile(runtimeConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
 -  await fs.chmod(runtimeConfigPath, 0o600);
++    const nextConfig: Record<string, unknown> = { ...existingConfig };
++    if (skipPermissions) nextConfig.permission = "allow";
++    if (skipPermissions && Object.keys(nextProvider).length > 0) {
++      nextConfig.provider = nextProvider;
++    }
+ 
+-  const runtimeEnv = preserveExplicitModelModalities(input.env, nextProvider, input.config.model);
+-  return {
+-    env: {
+-      ...runtimeEnv,
+-      XDG_CONFIG_HOME: runtimeConfigHome,
+-      ...(inlineContent
+-        ? {
+-            OPENCODE_CONFIG_CONTENT: inlineConfig
+-              ? JSON.stringify({ ...inlineConfig, provider: nextProvider })
+-              : inlineContent,
 +    let timeoutPluginInstalled = false;
 +    let timeoutAuthContent: string | undefined;
-+    if (!targetIsRemote && selectedModel) {
++    if (!input.targetIsRemote && selectedModel) {
 +      const fileProvider = isPlainObject(nextProvider[selectedModel.provider])
 +        ? nextProvider[selectedModel.provider] as Record<string, unknown>
 +        : {};
@@ -2492,18 +2757,7 @@ index c03ee30c8..2712aa328 100644
 +        : DEFAULT_OPEN_CODE_MODEL_TIMEOUT_MS;
 +      const timeoutSupported = timeoutMs <= MAX_NODE_TIMEOUT_MS;
 +      const compatibleProvider = effectiveProvider.npm === "@ai-sdk/openai-compatible";
- 
--  return {
--    env: {
--      ...preserveExplicitModelModalities(input.env, nextProvider, input.config.model),
--      XDG_CONFIG_HOME: runtimeConfigHome,
--    },
--    notes,
--    runtimeConfigHome,
--    cleanup: async () => {
--      await fs.rm(runtimeConfigHome, { recursive: true, force: true });
--    },
--  };
++
 +      if (compatibleProvider && !hasTimeoutOptOut && !timeoutSupported) {
 +        notes.push(
 +          `OpenCode model-step timeout recovery was not enabled for provider ${selectedModel.provider}: the configured timeout exceeds the supported Node.js timer range.`,
@@ -2565,7 +2819,13 @@ index c03ee30c8..2712aa328 100644
 +            notes.push(
 +              `OpenCode model-step timeout recovery was not enabled for provider ${selectedModel.provider}: ${error instanceof Error && error.message.includes("symlink") ? "the plugins directory is a symlink" : error instanceof Error && error.message.toLowerCase().includes("plugin") ? "existing plugins prevent safe fetch-hook composition" : "private runtime setup failed"}.`,
 +            );
-+          }
+           }
+-        : {}),
+-    },
+-    notes,
+-    runtimeConfigHome,
+-    cleanup,
+-  };
 +        }
 +      }
 +    }
@@ -2576,7 +2836,7 @@ index c03ee30c8..2712aa328 100644
 +    // for the anthropic provider); when that provider is repointed at a gateway that
 +    // does not serve that exact model, the title-gen call fails and aborts the run.
 +    // Setting small_model to a gateway-served model keeps every call on supported models.
-+    const smallModel = skipPermissions || targetIsRemote
++    const smallModel = skipPermissions
 +      ? (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim()
 +      : undefined;
 +    if (smallModel) {
@@ -2588,39 +2848,7 @@ index c03ee30c8..2712aa328 100644
 +      if (existingMcp !== undefined && !isPlainObject(existingMcp)) {
 +        throw new Error("OpenCode MCP configuration must be an object to add assigned servers.");
 +      }
-+      const nextMcp: Record<string, unknown> = isPlainObject(existingMcp) ? { ...existingMcp } : {};
-+      for (const [index, server] of runtimeMcpServers.entries()) {
-+        let endpoint: URL;
-+        try {
-+          endpoint = new URL(server.url);
-+        } catch {
-+          throw new Error("A Paperclip runtime MCP server has an invalid URL.");
-+        }
-+        if (!(["http:", "https:"].includes(endpoint.protocol)) || endpoint.username || endpoint.password ||
-+            !server.connectionId.trim() || !server.token.trim() || /[\r\n]/.test(server.token)) {
-+          throw new Error("A Paperclip runtime MCP server has an invalid HTTP binding.");
-+        }
-+        const identity = `${server.connectionId}\0${index}`;
-+        const hash = createHash("sha256").update(identity).digest("hex").toUpperCase();
-+        const prefix = "paperclip_";
-+        let collision = 0;
-+        let name: string;
-+        do {
-+          const collisionSuffix = collision === 0 ? "" : `_${collision}`;
-+          const hashLength = MAX_RUNTIME_MCP_SERVER_NAME_LENGTH - prefix.length - collisionSuffix.length;
-+          name = `${prefix}${hash.slice(0, hashLength)}${collisionSuffix}`;
-+          collision += 1;
-+        } while (Object.hasOwn(nextMcp, name));
-+        nextMcp[name] = {
-+          type: "remote",
-+          url: server.url,
-+          enabled: true,
-+          oauth: false,
-+          headers: { Authorization: `Bearer ${server.token}` },
-+          timeout: 30_000,
-+        };
-+      }
-+      nextConfig.mcp = nextMcp;
++      nextConfig.mcp = buildRuntimeMcpConfig(isPlainObject(existingMcp) ? existingMcp : {}, runtimeMcpServers);
 +      notes.push(`Injected ${runtimeMcpServers.length} Paperclip-managed MCP server(s) into the private OpenCode runtime config.`);
 +    }
 +    // Write a new regular file and rename it over any copied symlink/config.
@@ -2634,13 +2862,20 @@ index c03ee30c8..2712aa328 100644
 +    await fs.chmod(temporaryConfigPath, 0o600);
 +    await fs.rename(temporaryConfigPath, runtimeConfigPath);
 +
-+    const taskToolsPath = targetIsRemote ? undefined : path.join(runtimeConfigHome, "paperclip-task-tools.mjs");
-+    if (taskToolsPath) {
-+      await fs.writeFile(taskToolsPath, PAPERCLIP_TASK_TOOLS_SOURCE, { encoding: "utf8", mode: 0o600, flag: "wx" });
-+    }
++    const taskToolsPath = path.join(runtimeConfigHome, "paperclip-task-tools.mjs");
++    await fs.writeFile(taskToolsPath, PAPERCLIP_TASK_TOOLS_SOURCE, { encoding: "utf8", mode: 0o600, flag: "wx" });
 +
++    const attributedEnv = preserveExplicitModelModalities({
++      ...input.env,
++      ...(inlineContent && inlineConfig ? {
++        OPENCODE_CONFIG_CONTENT: JSON.stringify({
++          ...inlineConfig,
++          provider: attributeOpenCodeProviders(mergeConfigObjects(nextProvider, inlineProvider)),
++        }),
++      } : {}),
++    }, nextProvider, input.config.model);
 +    const preparedEnv = {
-+        ...preserveExplicitModelModalities(input.env, nextProvider, input.config.model),
++        ...attributedEnv,
 +        XDG_CONFIG_HOME: runtimeConfigHome,
 +        ...(timeoutPluginInstalled && timeoutAuthContent ? { OPENCODE_AUTH_CONTENT: timeoutAuthContent } : {}),
 +      };
@@ -2653,13 +2888,80 @@ index c03ee30c8..2712aa328 100644
 +        await fs.rm(runtimeConfigHome, { recursive: true, force: true });
 +      },
 +    };
-+  } catch (error) {
+   } catch (error) {
+-    await cleanup();
 +    await fs.rm(runtimeConfigHome, { recursive: true, force: true }).catch(() => undefined);
-+    throw error;
+     throw error;
+   }
+ }
+ 
+-/** Managed credentials must never leave host-only homes in a remote process. */
+-export function prepareManagedOpenCodeRemoteHomes(input: {
+-  env: Record<string, string>;
+-  config: Record<string, unknown>;
+-  runtimeRootDir: string | null | undefined;
+-  runId: string;
+-  configDir?: string;
+-}): void {
+-  if (!input.config.managedAiConnection) return;
+-  if (!input.runtimeRootDir) throw new Error("Managed OpenCode authentication requires an isolated remote runtime directory.");
+-  const home = path.posix.join(input.runtimeRootDir, "managed-auth", input.runId);
+-  Object.assign(input.env, {
+-    HOME: home,
+-    XDG_CONFIG_HOME: input.configDir ?? path.posix.join(home, "config"),
+-    XDG_DATA_HOME: path.posix.join(home, "data"),
+-    XDG_CACHE_HOME: path.posix.join(home, "cache"),
+-    XDG_STATE_HOME: path.posix.join(home, "state"),
+-  });
++/** Carry declared model modalities into inline config when it leaves them implicit. */
++function preserveExplicitModelModalities(
++  env: Record<string, string>, providers: unknown, model: unknown,
++): Record<string, string> {
++  const ref = configuredModelRef(model);
++  if (!ref || !isPlainObject(providers)) return env;
++  const provider = providers[ref.provider];
++  if (!isPlainObject(provider) || !isPlainObject(provider.models)) return env;
++  const definition = provider.models[ref.model];
++  if (!isPlainObject(definition) || definition.modalities === undefined) return env;
++  try {
++    const inline = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}");
++    const entry = inline?.provider?.[ref.provider]?.models?.[ref.model];
++    if (!isPlainObject(entry) || entry.modalities !== undefined) return env;
++    entry.modalities = definition.modalities;
++    return { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify(inline) };
++  } catch {
++    return env;
 +  }
  }
  
- /** Managed credentials must never leave host-only homes in a remote process. */
+-/** Native provider defaults and per-model headers can both carry harness attribution. */
+ function attributeOpenCodeProviders(providers: Record<string, unknown>): Record<string, unknown> {
+   const result: Record<string, unknown> = { openrouter: {}, ...providers };
+   for (const [name, value] of Object.entries(result)) {
+@@ -396,3 +746,23 @@ function mergeConfigObjects(base: Record<string, unknown>, override: Record<stri
+   });
+   return { ...base, ...Object.fromEntries(entries) };
+ }
++
++/** Managed credentials must never leave host-only homes in a remote process. */
++export function prepareManagedOpenCodeRemoteHomes(input: {
++  env: Record<string, string>;
++  config: Record<string, unknown>;
++  runtimeRootDir: string | null | undefined;
++  runId: string;
++  configDir?: string;
++}): void {
++  if (!input.config.managedAiConnection) return;
++  if (!input.runtimeRootDir) throw new Error("Managed OpenCode authentication requires an isolated remote runtime directory.");
++  const home = path.posix.join(input.runtimeRootDir, "managed-auth", input.runId);
++  Object.assign(input.env, {
++    HOME: home,
++    XDG_CONFIG_HOME: input.configDir ?? path.posix.join(home, "config"),
++    XDG_DATA_HOME: path.posix.join(home, "data"),
++    XDG_CACHE_HOME: path.posix.join(home, "cache"),
++    XDG_STATE_HOME: path.posix.join(home, "state"),
++  });
++}
 diff --git a/packages/adapters/opencode-local/src/server/task-tools.test.ts b/packages/adapters/opencode-local/src/server/task-tools.test.ts
 new file mode 100644
 index 000000000..6df353600
@@ -3187,10 +3489,10 @@ index 000000000..7a713dbbf
 +  });
 +});
 diff --git a/server/src/__tests__/heartbeat-process-recovery.test.ts b/server/src/__tests__/heartbeat-process-recovery.test.ts
-index 4b8a38f3e..1b0d2629d 100644
+index d0d98e6a5..cf2d0b2cd 100644
 --- a/server/src/__tests__/heartbeat-process-recovery.test.ts
 +++ b/server/src/__tests__/heartbeat-process-recovery.test.ts
-@@ -1731,6 +1731,86 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+@@ -1738,6 +1738,86 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
      },
    );
  
@@ -3277,7 +3579,7 @@ index 4b8a38f3e..1b0d2629d 100644
    it.each(["timeout", "upstream", "cleanup_pending", "cleanup_pending_edited", "cleanup_pending_exhausted", "edited", "exhausted", "new_message", "no_claim", "reassigned", "superseded", "stopped"])(
      "settles explicit retry admission through real executor cleanup: %s", async scenario => {
        const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
-@@ -10166,11 +10246,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+@@ -10239,11 +10319,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
        retryReason: "execution_review_participant_recovery",
        source: "issue.execution_review_recovery",
        retryOfRunId: runId,
@@ -3299,7 +3601,7 @@ index 4b8a38f3e..1b0d2629d 100644
      });
      expect(
        retryRun?.contextSnapshot as Record<string, unknown>,
-@@ -10494,6 +10579,42 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+@@ -10567,6 +10652,42 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
    });
  
    it("retries a pending execution-review participant once before blocking with a recovery action", async () => {
@@ -3342,7 +3644,7 @@ index 4b8a38f3e..1b0d2629d 100644
      const { companyId, agentId, issueId, runId, stageId } =
        await seedInReviewParticipantRunFixture();
      const heartbeat = heartbeatService(db);
-@@ -10525,16 +10646,18 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+@@ -10598,16 +10719,18 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
        retryReason: "execution_review_participant_recovery",
        source: "issue.execution_review_recovery",
        retryOfRunId: runId,
@@ -3368,10 +3670,10 @@ index 4b8a38f3e..1b0d2629d 100644
        const row = await selectRecoveryIssueById(issueId);
        return row?.status === "blocked" ? row : null;
 diff --git a/server/src/__tests__/heartbeat-run-summary.test.ts b/server/src/__tests__/heartbeat-run-summary.test.ts
-index 4b4391686..968b21897 100644
+index c47eeef0c..cb6f73b55 100644
 --- a/server/src/__tests__/heartbeat-run-summary.test.ts
 +++ b/server/src/__tests__/heartbeat-run-summary.test.ts
-@@ -304,6 +304,15 @@ describe("buildHeartbeatRunIssueComment", () => {
+@@ -355,6 +355,15 @@ describe("buildHeartbeatRunIssueComment", () => {
  });
  
  describe("resolveHeartbeatRunResponse", () => {
@@ -3388,10 +3690,10 @@ index 4b4391686..968b21897 100644
      nativeResult: {
        schema: "paperclip.run_result.v1",
 diff --git a/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts b/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
-index 45c95d9a7..757c0eb55 100644
+index 826fe78ec..24f8f5d63 100644
 --- a/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
 +++ b/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
-@@ -2885,6 +2885,127 @@ describe("agent issue mutation checkout ownership", () => {
+@@ -2979,6 +2979,127 @@ describe("agent issue mutation checkout ownership", () => {
      });
    });
  
@@ -3590,17 +3892,17 @@ index 743c248ef..08faf7294 100644
      const companyId = randomUUID();
      const issueId = randomUUID();
 diff --git a/server/src/__tests__/issue-execution-policy.test.ts b/server/src/__tests__/issue-execution-policy.test.ts
-index abcae2239..b0ddce1ab 100644
+index 7a796ba7a..4fbdf5e41 100644
 --- a/server/src/__tests__/issue-execution-policy.test.ts
 +++ b/server/src/__tests__/issue-execution-policy.test.ts
 @@ -1,5 +1,5 @@
  import { describe, expect, it } from "vitest";
--import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy, parseIssueExecutionState } from "../services/issue-execution-policy.ts";
-+import { applyIssueExecutionPolicyTransition, buildExecutionStageWakeContext, normalizeIssueExecutionPolicy, parseIssueExecutionState } from "../services/issue-execution-policy.ts";
+-import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy, parseIssueExecutionState, stripMonitorFromExecutionPolicy } from "../services/issue-execution-policy.ts";
++import { applyIssueExecutionPolicyTransition, buildExecutionStageWakeContext, normalizeIssueExecutionPolicy, parseIssueExecutionState, stripMonitorFromExecutionPolicy } from "../services/issue-execution-policy.ts";
  import type { IssueExecutionPolicy, IssueExecutionState } from "@paperclipai/shared";
  import { buildExecutionPolicy } from "../../../ui/src/lib/issue-execution-policy.ts";
  
-@@ -179,6 +179,66 @@ describe("parseIssueExecutionState", () => {
+@@ -201,6 +201,66 @@ describe("parseIssueExecutionState", () => {
    });
  });
  
@@ -3704,7 +4006,7 @@ index 1de34cb03..abda05ac5 100644
      const company = await seedCompany(db);
      const project = await seedProject(db, company.id, "Core");
 diff --git a/server/src/__tests__/issues-service.test.ts b/server/src/__tests__/issues-service.test.ts
-index 1ce0000dd..6445bbfad 100644
+index f335f6628..eadd41ab6 100644
 --- a/server/src/__tests__/issues-service.test.ts
 +++ b/server/src/__tests__/issues-service.test.ts
 @@ -189,6 +189,53 @@ describeEmbeddedPostgres("issueService run attachment artifacts", () => {
@@ -3761,7 +4063,7 @@ index 1ce0000dd..6445bbfad 100644
  describe("readIssueCommentRunLogText", () => {
    it("cancels timed-out storage reads so later listings can recover", async () => {
      let active = 0;
-@@ -6610,6 +6657,57 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
+@@ -6716,6 +6763,57 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
        .toHaveLength(0);
    });
  
@@ -3820,10 +4122,10 @@ index 1ce0000dd..6445bbfad 100644
      const seeded = await seedOwnershipIssue({ checkoutStatus: "failed" });
  
 diff --git a/server/src/__tests__/tool-gateway.test.ts b/server/src/__tests__/tool-gateway.test.ts
-index 5004ab2bc..656946597 100644
+index 2633130a1..8ef82209a 100644
 --- a/server/src/__tests__/tool-gateway.test.ts
 +++ b/server/src/__tests__/tool-gateway.test.ts
-@@ -4497,6 +4497,61 @@ rl.on("line", (line) => {
+@@ -4470,6 +4470,61 @@ rl.on("line", (line) => {
      });
    }
  
@@ -3886,7 +4188,7 @@ index 5004ab2bc..656946597 100644
      return {
        headers: { "mcp-session-id": sessionId },
 diff --git a/server/src/agent-run-cancellation.ts b/server/src/agent-run-cancellation.ts
-index 7ae25021f..5f51b4f19 100644
+index b49e71558..e46be0f37 100644
 --- a/server/src/agent-run-cancellation.ts
 +++ b/server/src/agent-run-cancellation.ts
 @@ -20,6 +20,7 @@ export async function assertAgentRunWriteAllowed(tx: Db, companyId: string, acto
@@ -4258,10 +4560,10 @@ index 242309899..28c6ebb48 100644
      it(`plans conversation recovery during owner cleanup without draining messages (queued=${hasDeferredMessage})`, async () => {
        const companyId = await seedCompany();
 diff --git a/server/src/modules/wake-queue/adapters/postgres.ts b/server/src/modules/wake-queue/adapters/postgres.ts
-index d147c3042..43742a6e7 100644
+index c4929f482..c25218693 100644
 --- a/server/src/modules/wake-queue/adapters/postgres.ts
 +++ b/server/src/modules/wake-queue/adapters/postgres.ts
-@@ -35,7 +35,10 @@ import { issueService } from "../../../services/issues.js";
+@@ -36,7 +36,10 @@ import { issueService } from "../../../services/issues.js";
  import { issueRecoveryActionService } from "../../../services/issue-recovery-actions.js";
  import { readContinuationAttempt } from "../../../services/recovery/run-liveness-continuations.js";
  import { withRecoveryContext } from "../../../services/recovery/status-only-context.js";
@@ -4273,7 +4575,7 @@ index d147c3042..43742a6e7 100644
  import {
    queuedCommentIdsFromWakePayload,
    withQueuedCommentIdsInWakePayload,
-@@ -600,6 +603,15 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
+@@ -601,6 +604,15 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
  
      async queueReviewParticipantRecoveryRun({ companyId, issue, finishingRun, recoveryAgent, sessionBefore, now }) {
        const executionState = parseIssueExecutionState(issue.executionState);
@@ -4289,7 +4591,7 @@ index d147c3042..43742a6e7 100644
        const wakeupRequest = await tx
          .insert(agentWakeupRequests)
          .values({
-@@ -613,8 +625,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
+@@ -614,8 +626,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
                issueId: issue.id,
                retryOfRunId: finishingRun.id,
                retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON,
@@ -4299,7 +4601,7 @@ index d147c3042..43742a6e7 100644
              },
              "normal_model",
            ),
-@@ -643,10 +654,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
+@@ -644,10 +655,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
                retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON,
                source: "issue.execution_review_recovery",
                retryOfRunId: finishingRun.id,
@@ -4311,7 +4613,7 @@ index d147c3042..43742a6e7 100644
              },
              "normal_model",
            ),
-@@ -1043,7 +1051,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
+@@ -1050,7 +1058,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
      async withIssueExecutionLock(input, fn): Promise<ReleaseTransactionResult & { run: RunSnapshot }> {
        return db.transaction(async (rawTx) => {
          const tx = rawTx as unknown as Db;
@@ -4320,42 +4622,54 @@ index d147c3042..43742a6e7 100644
            .select()
            .from(heartbeatRuns)
            .where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId)))
-@@ -1051,9 +1059,8 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
+@@ -1058,10 +1066,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
          if (!run) {
            throw new Error(`wake-queue: run ${input.runId} was not found while releasing issue execution`);
          }
 -        const runSnapshot = toRunSnapshot(run);
-         if (input.resumeStrandedQueue && (!run.finishedAt || !["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status))) {
+-        if (input.resumeStrandedQueue && (!run.finishedAt || !["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status))) {
 -          return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
-+          return { outcome: { kind: "released" }, postCommitEffects: [], run: toRunSnapshot(run) };
-         }
+-        }
++
          const contextIssueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
  
-@@ -1082,6 +1089,22 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
+         // Lock the context issue (if any) and every issue that still references this
+@@ -1089,6 +1094,17 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
                `,
          );
  
-+        // A terminal status is written before the legacy controller has
-+        // finished its resource cleanup. Keep the issue lock and deferred
-+        // queue intact until that same controller settles its renewable lease.
-+        // Lock in issue -> run order, matching issue writes and terminalization.
++        // Re-read under the run lock after taking issue locks. The run may have
++        // settled or been cleaned up since the initial lookup.
 +        const [currentRun] = await tx.select().from(heartbeatRuns).where(and(
 +          eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),
 +        )).for("update");
 +        if (!currentRun) throw new Error(`wake-queue: run ${input.runId} disappeared while releasing issue execution`);
 +        run = currentRun;
++        const runSnapshot = toRunSnapshot(run);
++        if (input.resumeStrandedQueue && (!run.finishedAt || !["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status))) {
++          return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
++        }
+         if (input.resumeStrandedQueue && run.runtimeMode === "native") {
+           const [finalized] = contextIssueId && run.nativeIssueId === contextIssueId
+             ? await tx.select({ runId: nativeRunFinalizations.runId }).from(nativeRunFinalizations).where(and(
+@@ -1101,6 +1117,15 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
+         if (input.resumeStrandedQueue && await hasPendingRunCleanup(tx, input.companyId, run.id)) {
+           return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
+         }
++        // A terminal status is written before the legacy controller has
++        // finished its resource cleanup. Keep the issue lock and deferred
++        // queue intact until that same controller settles its renewable lease.
 +        if (run.runtimeMode === "legacy" && run.executionStage === "settling" &&
 +            run.controllerBootId && run.controllerLeaseExpiresAt &&
 +            run.controllerLeaseExpiresAt > new Date() &&
 +            ["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status)) {
-+          return { outcome: { kind: "released" }, postCommitEffects: [], run: toRunSnapshot(run) };
++          return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
 +        }
-+        const runSnapshot = toRunSnapshot(run);
-         if (input.resumeStrandedQueue && run.runtimeMode === "native") {
-           const [finalized] = contextIssueId && run.nativeIssueId === contextIssueId
-             ? await tx.select({ runId: nativeRunFinalizations.runId }).from(nativeRunFinalizations).where(and(
+ 
+         const candidateIssues = await tx
+           .select()
 diff --git a/server/src/modules/wake-queue/application/use-cases.ts b/server/src/modules/wake-queue/application/use-cases.ts
-index d1b0b326f..317ea5b18 100644
+index 1e3ffa936..47d4e0a28 100644
 --- a/server/src/modules/wake-queue/application/use-cases.ts
 +++ b/server/src/modules/wake-queue/application/use-cases.ts
 @@ -82,6 +82,39 @@ function currentAgentParticipant(issue: IssueSnapshot): { agentId: string } | nu
@@ -4415,10 +4729,10 @@ index d1b0b326f..317ea5b18 100644
      !workingCandidate.authorizedFailedChatRetry &&
      workingCandidate.deferredCommentIds.length > 0 &&
 diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
-index 6852b4228..209dd1ea2 100644
+index 7ea94ad54..2f802ce59 100644
 --- a/server/src/routes/issues.ts
 +++ b/server/src/routes/issues.ts
-@@ -325,6 +325,7 @@ import {
+@@ -328,6 +328,7 @@ import {
  } from "../services/company-search-rate-limit.js";
  import {
    applyIssueExecutionPolicyTransition,
@@ -4426,7 +4740,7 @@ index 6852b4228..209dd1ea2 100644
    normalizeIssueExecutionPolicy,
    parseIssueExecutionState,
    redactIssueMonitorExternalRef,
-@@ -514,16 +515,6 @@ type ActivityExecutionParticipant = Pick<
+@@ -470,16 +471,6 @@ type ActivityExecutionParticipant = Pick<
    NormalizedExecutionPolicy["stages"][number]["participants"][number],
    "type" | "agentId" | "userId"
  >;
@@ -4443,7 +4757,7 @@ index 6852b4228..209dd1ea2 100644
  type SuccessfulRunHandoffActivityRow = {
    entityId: string;
    action: string;
-@@ -1432,6 +1423,7 @@ const ISSUE_WAKE_DIAGNOSTIC_KNOWN_SOURCES = new Set([
+@@ -1388,6 +1379,7 @@ const ISSUE_WAKE_DIAGNOSTIC_KNOWN_SOURCES = new Set([
  
  const ISSUE_WAKE_DIAGNOSTIC_KNOWN_REASONS = new Set([
    "issue_execution_deferred",
@@ -4451,7 +4765,7 @@ index 6852b4228..209dd1ea2 100644
    "chat_task_completed",
    "issue_assigned",
    "issue_blockers_resolved",
-@@ -1619,6 +1611,9 @@ function buildIssueWakeDiagnosis(input: {
+@@ -1575,6 +1567,9 @@ function buildIssueWakeDiagnosis(input: {
      )} was deferred by an active issue-tree hold.`;
    }
    if (latest?.kind === "wake_request") {
@@ -4461,7 +4775,7 @@ index 6852b4228..209dd1ea2 100644
      if (latest.status === "deferred_issue_execution") {
        return `The most recent wake for ${blockerDiagnosticLabel(input.issue)} is deferred${wakeDiagnosticReasonPhrase(
          latest.reason,
-@@ -2119,23 +2114,6 @@ function isApprovalReviewComment(body: string) {
+@@ -2075,23 +2070,6 @@ function isApprovalReviewComment(body: string) {
    );
  }
  
@@ -4485,7 +4799,7 @@ index 6852b4228..209dd1ea2 100644
  function summarizeIssueRelationForActivity(relation: {
    id: string;
    identifier: string | null;
-@@ -2828,7 +2806,6 @@ function buildExecutionStageWakeup(input: {
+@@ -2784,7 +2762,6 @@ function buildExecutionStageWakeup(input: {
        state: nextState,
        wakeRole:
          nextState.currentStageType === "approval" ? "approver" : "reviewer",
@@ -4493,7 +4807,7 @@ index 6852b4228..209dd1ea2 100644
      });
  
      return {
-@@ -2874,7 +2851,6 @@ function buildExecutionStageWakeup(input: {
+@@ -2830,7 +2807,6 @@ function buildExecutionStageWakeup(input: {
      const executionStage = buildExecutionStageWakeContext({
        state: nextState,
        wakeRole: "executor",
@@ -4501,7 +4815,7 @@ index 6852b4228..209dd1ea2 100644
      });
  
      return {
-@@ -5640,8 +5616,7 @@ export function issueRoutes(
+@@ -5601,8 +5577,7 @@ export function issueRoutes(
        res.status(403).json({ error: "Agent authentication required" });
        return false;
      }
@@ -4511,7 +4825,7 @@ index 6852b4228..209dd1ea2 100644
        const run = await heartbeat.getRun(req.actor.runId);
        if (run?.agentId === actorAgentId) assertLegacyRunTaskOwnership(run, issue);
      }
-@@ -14289,6 +14264,7 @@ export function issueRoutes(
+@@ -14352,6 +14327,7 @@ export function issueRoutes(
        // Only this request may finish a mutation that intentionally stops its
        // own run (for example handing work to a signoff reviewer).
        const issueMutationStopId = randomUUID();
@@ -4519,7 +4833,7 @@ index 6852b4228..209dd1ea2 100644
        if (req.actor.source !== "mcp_oauth" && assigneeWillChange && existing.assigneeAgentId) {
          await stopRunnerGoalForOwnershipChange({
            companyId: existing.companyId,
-@@ -14307,7 +14283,36 @@ export function issueRoutes(
+@@ -14370,7 +14346,36 @@ export function issueRoutes(
            runToStopForReassignment.agentId === req.actor.agentId &&
            runToStopForReassignment.companyId === existing.companyId &&
            runToStopForReassignment.contextSnapshot?.issueId === existing.id;
@@ -4557,7 +4871,7 @@ index 6852b4228..209dd1ea2 100644
            const cancelled = await heartbeat.cancelRun(
              runToStopForReassignment.id,
              "Cancelled before issue reassignment",
-@@ -14410,6 +14415,7 @@ export function issueRoutes(
+@@ -14474,6 +14479,7 @@ export function issueRoutes(
          actorAgentId: actor.agentId ?? null,
          actorRunId: actor.agentId ? actor.runId : null,
          actorRunStopId: actor.agentId && interruptedRunId === actor.runId ? issueMutationStopId : null,
@@ -4566,7 +4880,7 @@ index 6852b4228..209dd1ea2 100644
        };
        const shouldCollectCompletionPublication =
 diff --git a/server/src/routes/tool-gateway.ts b/server/src/routes/tool-gateway.ts
-index 53c277bbb..86ac73c19 100644
+index 91becb88b..1f97282c2 100644
 --- a/server/src/routes/tool-gateway.ts
 +++ b/server/src/routes/tool-gateway.ts
 @@ -14,6 +14,7 @@ import {
@@ -4577,7 +4891,7 @@ index 53c277bbb..86ac73c19 100644
  import { forbidden, HttpError } from "../errors.js";
  import { accessService } from "../services/index.js";
  import { listConnectionLifecycleEvents } from "../services/tool-connection-activity.js";
-@@ -224,11 +225,10 @@ async function handleMcpGatewayProtocol(
+@@ -198,11 +199,10 @@ async function handleMcpGatewayProtocol(
        res.json({
          jsonrpc: "2.0",
          id,
@@ -4594,10 +4908,10 @@ index 53c277bbb..86ac73c19 100644
        return;
      }
 diff --git a/server/src/services/ai-connection-runtime.ts b/server/src/services/ai-connection-runtime.ts
-index 36e7704a4..86aaa3a96 100644
+index 2620e8cbb..9020b3209 100644
 --- a/server/src/services/ai-connection-runtime.ts
 +++ b/server/src/services/ai-connection-runtime.ts
-@@ -11,6 +11,7 @@ import {
+@@ -14,6 +14,7 @@ import {
    type AiConnectionBinding,
  } from "@paperclipai/shared";
  import { managedProviderRouting } from "./ai-provider-routing.js";
@@ -4605,7 +4919,7 @@ index 36e7704a4..86aaa3a96 100644
  import { aiConnectionService } from "./ai-connections.js";
  import { subscriptionService } from "./subscriptions.js";
  import { refreshSubscriptionConnection } from "./subscription-refresh.js";
-@@ -350,7 +351,11 @@ export async function prepareManagedAiRuntime(
+@@ -364,7 +365,11 @@ export async function prepareManagedAiRuntime(
          security: { auth: { selectedType: "gemini-api-key" } },
        }), { mode: 0o600 });
      }
@@ -4616,8 +4930,8 @@ index 36e7704a4..86aaa3a96 100644
 +      : undefined;
 +    const projected = routing ? managedProviderRouting(routing, harness, value, routedModel, imageInput) : undefined;
      if (projected) {
+       const customHeaders = env.ANTHROPIC_CUSTOM_HEADERS ?? process.env.ANTHROPIC_CUSTOM_HEADERS;
        Object.assign(env, projected.env);
-       if (projected.hermesConfig) await writeFile(path.join(providerHome, "config.yaml"), projected.hermesConfig, { mode: 0o600 });
 diff --git a/server/src/services/ai-model-input-capabilities.ts b/server/src/services/ai-model-input-capabilities.ts
 new file mode 100644
 index 000000000..1b73c48dc
@@ -4680,10 +4994,10 @@ index 000000000..1b73c48dc
 +  return vision;
 +}
 diff --git a/server/src/services/ai-provider-routing.ts b/server/src/services/ai-provider-routing.ts
-index 33ceffb33..3a5ed04d2 100644
+index 5efc70561..7bb94d59e 100644
 --- a/server/src/services/ai-provider-routing.ts
 +++ b/server/src/services/ai-provider-routing.ts
-@@ -10,6 +10,7 @@ export function managedProviderRouting(
+@@ -11,6 +11,7 @@ export function managedProviderRouting(
    harness: string,
    credential: string,
    model: string,
@@ -4691,10 +5005,10 @@ index 33ceffb33..3a5ed04d2 100644
  ) {
    const env: Record<string, string> = {};
    const config: Record<string, unknown> = {};
-@@ -55,7 +56,9 @@ export function managedProviderRouting(
+@@ -62,7 +63,9 @@ export function managedProviderRouting(
              ? { npm: "@ai-sdk/openai-compatible", name: "Paperclip connection" }
              : {}),
-           options: { baseURL: baseUrl, apiKey: credential },
+           options: { baseURL: baseUrl, apiKey: credential, ...(openrouter ? { headers: OPENROUTER_ATTRIBUTION_HEADERS } : {}) },
 -          models: id ? { [id]: { name: id } } : {},
 +          models: id ? { [id]: { name: id, ...(imageInput === undefined ? {} : {
 +            modalities: { input: imageInput ? ["text", "image"] : ["text"], output: ["text"] },
@@ -4703,10 +5017,10 @@ index 33ceffb33..3a5ed04d2 100644
        },
        enabled_providers: [provider],
 diff --git a/server/src/services/heartbeat-run-summary.ts b/server/src/services/heartbeat-run-summary.ts
-index 84b233f21..0fa8fdb6c 100644
+index eec171112..290b39945 100644
 --- a/server/src/services/heartbeat-run-summary.ts
 +++ b/server/src/services/heartbeat-run-summary.ts
-@@ -376,6 +376,8 @@ function decision(
+@@ -401,6 +401,8 @@ function decision(
   */
  export function resolveHeartbeatRunResponse(input: {
    resultJson: Record<string, unknown> | null | undefined;
@@ -4715,7 +5029,7 @@ index 84b233f21..0fa8fdb6c 100644
    /** Server-owned conversation finalization, after normal governance checks. */
    conversationTurnFinished?: boolean;
    existingComment?: { id: string; body?: string | null } | null;
-@@ -392,6 +394,12 @@ export function resolveHeartbeatRunResponse(input: {
+@@ -418,6 +420,12 @@ export function resolveHeartbeatRunResponse(input: {
      reasonCode?: string;
    } | null;
  }): ResolvedHeartbeatRunResponse {
@@ -4726,13 +5040,13 @@ index 84b233f21..0fa8fdb6c 100644
 +    };
 +  }
    const resultJson = record(input.resultJson);
-   const finalAgentText = readCommentText(input.finalAgentMessage?.text);
-   const explicitProviderFinal = input.finalAgentMessage?.channel === "final";
+   const continuationSummary = readAcceptedTaskContinuationSummary(resultJson);
+   if (continuationSummary) {
 diff --git a/server/src/services/heartbeat.ts b/server/src/services/heartbeat.ts
-index 31c26160a..351df1e1d 100644
+index 0d2d33e61..9470fd173 100644
 --- a/server/src/services/heartbeat.ts
 +++ b/server/src/services/heartbeat.ts
-@@ -542,6 +542,7 @@ export { isNonAssigneeWorkspaceBusyRetry };
+@@ -548,6 +548,7 @@ export { isNonAssigneeWorkspaceBusyRetry };
  // Routes and the scheduler construct separate heartbeatService instances, but
  // they must agree on in-process adapter executions when reaping stale runs.
  const activeRunExecutions = new Set<string>();
@@ -4740,7 +5054,7 @@ index 31c26160a..351df1e1d 100644
  // A legacy process adapter's signal exit can race the operator cancellation CAS while
  // its owned process group is still being joined. Keep that exit from becoming
  // a successful result (or a competing failure) before Stop settles. This is an
-@@ -1397,6 +1398,14 @@ export function heartbeatService(
+@@ -1413,6 +1414,14 @@ export function heartbeatService(
    }
  
    function releaseIssueExecutionAndPromote(...args: Parameters<typeof runControl.releaseIssueExecutionAndPromote>) {
@@ -4755,7 +5069,7 @@ index 31c26160a..351df1e1d 100644
      return runControl.releaseIssueExecutionAndPromote(...args);
    }
  
-@@ -3879,7 +3888,7 @@ export function heartbeatService(
+@@ -3846,7 +3855,7 @@ export function heartbeatService(
            }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
          }
          await db.update(heartbeatRuns).set({
@@ -4764,8 +5078,8 @@ index 31c26160a..351df1e1d 100644
            controllerLeaseExpiresAt: null,
          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.runtimeMode, "legacy"),
            eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
-@@ -3906,12 +3915,16 @@ export function heartbeatService(
-       if (latestRun) await reconcileMuseNativeTerminalRun(db, latestRun);
+@@ -3883,12 +3892,16 @@ export function heartbeatService(
+       }
        // Terminalization precedes lease and adapter cleanup. Only now is the
        // owner gone; retry pending input for ordinary completions as well as Stop.
 +      let issueExecutionReleasedAfterCleanup = false;
@@ -4782,7 +5096,7 @@ index 31c26160a..351df1e1d 100644
            logger.error({ err, runId: run.id }, "failed to settle explicit continuation after cleanup");
          });
        }
-@@ -3921,10 +3934,25 @@ export function heartbeatService(
+@@ -3898,10 +3911,25 @@ export function heartbeatService(
            eq(agentWakeupRequests.status, "deferred_issue_execution"),
            sql`${agentWakeupRequests.payload}->>'issueId' = ${String(latestRun.contextSnapshot?.issueId)}`,
          )).limit(1);
@@ -4813,10 +5127,10 @@ index 31c26160a..351df1e1d 100644
        }
        if (
 diff --git a/server/src/services/heartbeat/queue.ts b/server/src/services/heartbeat/queue.ts
-index 758910670..72e14da35 100644
+index a0ff4a085..ad8e99cee 100644
 --- a/server/src/services/heartbeat/queue.ts
 +++ b/server/src/services/heartbeat/queue.ts
-@@ -3133,6 +3133,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -3285,6 +3285,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
              }
              if (durableRequest || wakeCommentId ||
                  hasInteractionContinuationWakeContext(enrichedContextSnapshot) ||
@@ -4828,10 +5142,10 @@ index 758910670..72e14da35 100644
                await tx.insert(agentWakeupRequests).values({
                  ...durableReceiptFields,
 diff --git a/server/src/services/heartbeat/run-completion.test.ts b/server/src/services/heartbeat/run-completion.test.ts
-index 38b8946d7..9eb3986a3 100644
+index 39df53e1d..f32a9e622 100644
 --- a/server/src/services/heartbeat/run-completion.test.ts
 +++ b/server/src/services/heartbeat/run-completion.test.ts
-@@ -267,6 +267,21 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
+@@ -294,6 +294,21 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
      expect(f.deps.finalizeAgentStatus).toHaveBeenCalledOnce();
    });
  
@@ -4854,13 +5168,13 @@ index 38b8946d7..9eb3986a3 100644
      const f = await fixture();
      f.input.adapterResult.clearSession = true;
 diff --git a/server/src/services/heartbeat/run-completion.ts b/server/src/services/heartbeat/run-completion.ts
-index bef970a1e..18fb378ab 100644
+index 7f2b486df..d84a90c30 100644
 --- a/server/src/services/heartbeat/run-completion.ts
 +++ b/server/src/services/heartbeat/run-completion.ts
-@@ -751,6 +751,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
-         );
-         const resolved = resolveHeartbeatRunResponse({
+@@ -806,6 +806,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
            resultJson: persistedResultJson,
+           interactionOwnsResponse: Boolean(issueId && readAcceptedTaskContinuationSummary(persistedResultJson) &&
+             await hasChatRunOwnedProviderInteraction(db, { companyId: livenessRun.companyId, issueId, runId: livenessRun.id })),
 +          runSucceeded: livenessRun.status === "succeeded",
            conversationTurnFinished: isConversation(issueContext) && livenessRun.status === "succeeded"
              && persistedResultJson?.finalizationReasonCode === "conversation_turn_finished",
@@ -4958,10 +5272,10 @@ index 10a447e1a..fa9350352 100644
      expect(first.scopes[0]).toEqual(expect.arrayContaining(["company-one", "issue-one"]));
      expect(second.scopes[0]).toEqual(expect.arrayContaining(["company-two", "issue-two"]));
 diff --git a/server/src/services/heartbeat/run-preparation.ts b/server/src/services/heartbeat/run-preparation.ts
-index ff4e1f265..013681167 100644
+index 7c635e5cb..5706bd7b3 100644
 --- a/server/src/services/heartbeat/run-preparation.ts
 +++ b/server/src/services/heartbeat/run-preparation.ts
-@@ -2651,8 +2651,23 @@ export async function buildPaperclipWakePayload(input: {
+@@ -2659,8 +2659,23 @@ export async function buildPaperclipWakePayload(input: {
            notice: externalAttachmentOmissionNotice(omission),
          }))
      : [];
@@ -4985,7 +5299,7 @@ index ff4e1f265..013681167 100644
      executionContinuation: input.contextSnapshot.executionContinuation ?? null,
      chatCompletionUpdates: input.contextSnapshot.chatCompletionUpdates ?? null,
      attachmentOmissions,
-@@ -2908,6 +2923,7 @@ export function createHeartbeatRunPreparation(db: Db) {
+@@ -2920,6 +2935,7 @@ export function createHeartbeatRunPreparation(db: Db) {
          executionWorkspaceId: issues.executionWorkspaceId,
          executionWorkspacePreference: issues.executionWorkspacePreference,
          assigneeAgentId: issues.assigneeAgentId,
@@ -5252,7 +5566,7 @@ index 000000000..beb952c61
 +  });
 +});
 diff --git a/server/src/services/heartbeat/task-context.ts b/server/src/services/heartbeat/task-context.ts
-index 257eb6844..25721a8e4 100644
+index b6565d6b1..982005905 100644
 --- a/server/src/services/heartbeat/task-context.ts
 +++ b/server/src/services/heartbeat/task-context.ts
 @@ -4,6 +4,7 @@ import { FAST_RESPONSE_AGENT_GUIDANCE, fastResponseHistoryBody } from "@papercli
@@ -5263,7 +5577,7 @@ index 257eb6844..25721a8e4 100644
  import { chatCompletionInstruction } from "../chat-completion-delivery.js";
  import { getConversationConfirmationContext } from "../conversation-confirmation-context.js";
  import { buildExecutionContinuation } from "../execution-continuation.js";
-@@ -48,12 +49,74 @@ function readNonEmptyString(value: unknown): string | null {
+@@ -49,12 +50,74 @@ function readNonEmptyString(value: unknown): string | null {
    return typeof value === "string" && value.trim().length > 0 ? value : null;
  }
  
@@ -5397,7 +5711,7 @@ index 554c8313b..29de4d0c1 100644
      "## Objective",
      "",
 diff --git a/server/src/services/issue-execution-policy.ts b/server/src/services/issue-execution-policy.ts
-index 109b8c4eb..2869b5a36 100644
+index d2fe9c834..bdd9d8fc3 100644
 --- a/server/src/services/issue-execution-policy.ts
 +++ b/server/src/services/issue-execution-policy.ts
 @@ -61,6 +61,67 @@ type TransitionResult = {
@@ -5469,10 +5783,10 @@ index 109b8c4eb..2869b5a36 100644
   * Consecutive agent-initiated changes-requested rounds tolerated on one stage
   * before the pending review escalates to the responsible human. Policies can
 diff --git a/server/src/services/issues.ts b/server/src/services/issues.ts
-index 1cf5a02ee..f96c32495 100644
+index c25ee30f3..257ccab4b 100644
 --- a/server/src/services/issues.ts
 +++ b/server/src/services/issues.ts
-@@ -17,6 +17,7 @@ import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
+@@ -21,6 +21,7 @@ import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
  import { retryIdempotentDatabaseOperation } from "../database-retry.js";
  import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
  import { documentService } from "./documents.js";
@@ -5480,7 +5794,7 @@ index 1cf5a02ee..f96c32495 100644
  import { parseTaskSearch, taskSearchCtes, taskSearchScore } from "./task-search.js";
  import { createdFromIssueCondition } from "./issue-creation-origin.js";
  import { executionProjectionsForRuns } from "./execution-projection.js";
-@@ -7529,6 +7530,7 @@ export function issueService(db: Db) {
+@@ -7570,6 +7571,7 @@ export function issueService(db: Db) {
      actorAgentId: string;
      actorRunId: string;
      expectedCheckoutRunId: string;
@@ -5488,7 +5802,7 @@ index 1cf5a02ee..f96c32495 100644
    }) {
      return db.transaction(async (tx) => {
        const lockedIssue = await tx
-@@ -7549,7 +7551,7 @@ export function issueService(db: Db) {
+@@ -7590,7 +7592,7 @@ export function issueService(db: Db) {
        }
  
        if (
@@ -5497,7 +5811,7 @@ index 1cf5a02ee..f96c32495 100644
          lockedIssue.assigneeAgentId !== input.actorAgentId ||
          lockedIssue.checkoutRunId !== input.expectedCheckoutRunId
        ) {
-@@ -7607,7 +7609,7 @@ export function issueService(db: Db) {
+@@ -7648,7 +7650,7 @@ export function issueService(db: Db) {
          .where(
            and(
              eq(issues.id, input.issueId),
@@ -5506,23 +5820,23 @@ index 1cf5a02ee..f96c32495 100644
              eq(issues.assigneeAgentId, input.actorAgentId),
              eq(issues.checkoutRunId, input.expectedCheckoutRunId),
            ),
-@@ -10789,6 +10791,7 @@ export function issueService(db: Db) {
-         actorAgentId?: string | null;
-         actorRunId?: string | null;
+@@ -10827,6 +10829,7 @@ export function issueService(db: Db) {
+         /** Server-owned transfer being applied; never accepted from HTTP input. */
+         caseHandoffId?: string;
          actorRunStopId?: string | null;
 +        actorRunHandoffId?: string | null;
          actorUserId?: string | null;
          companyGuard?: string;
          workspaceSelectionActor?: AuthorizationActor;
-@@ -10838,6 +10841,7 @@ export function issueService(db: Db) {
-         actorAgentId,
+@@ -10878,6 +10881,7 @@ export function issueService(db: Db) {
          actorRunId,
+         caseHandoffId,
          actorRunStopId,
 +        actorRunHandoffId,
          actorUserId,
          companyGuard,
          workspaceSelectionActor,
-@@ -10911,6 +10915,19 @@ export function issueService(db: Db) {
+@@ -10958,6 +10962,19 @@ export function issueService(db: Db) {
          ...issueData,
          updatedAt: new Date(),
        };
@@ -5542,7 +5856,7 @@ index 1cf5a02ee..f96c32495 100644
        if (issueData.visibility === "private") {
          patch.privacyRootIssueId = existing.privacyRootIssueId ?? existing.id;
        } else if (issueData.visibility === "open") {
-@@ -11065,17 +11082,18 @@ export function issueService(db: Db) {
+@@ -11112,17 +11129,18 @@ export function issueService(db: Db) {
        if (issueData.status && issueData.status !== "cancelled") {
          patch.cancelledAt = null;
        }
@@ -5565,7 +5879,7 @@ index 1cf5a02ee..f96c32495 100644
        ) {
          patch.checkoutRunId = null;
          patch.executionRunId = null;
-@@ -11143,6 +11161,20 @@ export function issueService(db: Db) {
+@@ -11217,6 +11235,20 @@ export function issueService(db: Db) {
              agentId: actorAgentId, runId: actorRunId, stopId: actorRunStopId,
            });
            assertLegacyRunTaskOwnership(actorRun, receiptExisting);
@@ -5586,7 +5900,7 @@ index 1cf5a02ee..f96c32495 100644
          }
          if (actorAgentId && patch.status === "done") {
            const [review] = await tx.select({ id: toolActionRequests.id }).from(toolActionRequests).where(and(eq(toolActionRequests.companyId, existing.companyId), eq(toolActionRequests.issueId, id), inArray(toolActionRequests.status, ["pending", "approved", "executing"]))).limit(1);
-@@ -11745,8 +11777,8 @@ export function issueService(db: Db) {
+@@ -11830,8 +11862,8 @@ export function issueService(db: Db) {
            assigneeUserId: null,
            checkoutRunId,
            executionRunId: checkoutRunId,
@@ -5597,7 +5911,7 @@ index 1cf5a02ee..f96c32495 100644
            updatedAt: now,
          })
          .where(
-@@ -11781,7 +11813,7 @@ export function issueService(db: Db) {
+@@ -11866,7 +11898,7 @@ export function issueService(db: Db) {
  
        if (
          current.assigneeAgentId === agentId &&
@@ -5606,7 +5920,7 @@ index 1cf5a02ee..f96c32495 100644
          current.checkoutRunId == null &&
          (current.executionRunId == null ||
            current.executionRunId === checkoutRunId) &&
-@@ -11797,7 +11829,7 @@ export function issueService(db: Db) {
+@@ -11882,7 +11914,7 @@ export function issueService(db: Db) {
            .where(
              and(
                eq(issues.id, id),
@@ -5615,7 +5929,7 @@ index 1cf5a02ee..f96c32495 100644
                eq(issues.assigneeAgentId, agentId),
                isNull(issues.checkoutRunId),
                or(
-@@ -11814,7 +11846,7 @@ export function issueService(db: Db) {
+@@ -11899,7 +11931,7 @@ export function issueService(db: Db) {
        if (
          checkoutRunId &&
          current.assigneeAgentId === agentId &&
@@ -5624,7 +5938,7 @@ index 1cf5a02ee..f96c32495 100644
          current.checkoutRunId &&
          current.checkoutRunId !== checkoutRunId
        ) {
-@@ -11823,6 +11855,7 @@ export function issueService(db: Db) {
+@@ -11908,6 +11940,7 @@ export function issueService(db: Db) {
            actorAgentId: agentId,
            actorRunId: checkoutRunId,
            expectedCheckoutRunId: current.checkoutRunId,
@@ -5632,7 +5946,7 @@ index 1cf5a02ee..f96c32495 100644
          });
          if (staleAdoption.adopted) {
            const row = await db
-@@ -11856,12 +11889,10 @@ export function issueService(db: Db) {
+@@ -11941,12 +11974,10 @@ export function issueService(db: Db) {
              executionRunId: checkoutRunId,
              executionAgentNameKey: null,
              executionLockedAt: now,
@@ -5647,7 +5961,7 @@ index 1cf5a02ee..f96c32495 100644
            const adopted = await db
              .update(issues)
              .set(adoptionSet)
-@@ -11888,7 +11919,7 @@ export function issueService(db: Db) {
+@@ -11973,7 +12004,7 @@ export function issueService(db: Db) {
        // If this run already owns it and it's in_progress, return it (no self-409)
        if (
          current.assigneeAgentId === agentId &&
@@ -5656,7 +5970,7 @@ index 1cf5a02ee..f96c32495 100644
          sameRunLock(current.checkoutRunId, checkoutRunId)
        ) {
          const row = await db
-@@ -12446,7 +12477,7 @@ export function issueService(db: Db) {
+@@ -12531,7 +12562,7 @@ export function issueService(db: Db) {
        },
        dbOrTx: any = db,
      ): Promise<IssueComment> {
@@ -5665,7 +5979,7 @@ index 1cf5a02ee..f96c32495 100644
          const append = () =>
            measureRunTransaction(db, "response", async (tx) => {
              // Serialize run-authored comments on the issue so a provider retry
-@@ -12468,13 +12499,13 @@ export function issueService(db: Db) {
+@@ -12553,13 +12584,13 @@ export function issueService(db: Db) {
        // The query below locks human comments on caller-owned transactions too,
        // sharing the fence with both question creation and Slack settlement.
        const issueQuery = dbOrTx
@@ -5682,7 +5996,7 @@ index 1cf5a02ee..f96c32495 100644
  
        if (!issue) throw notFound("Issue not found");
  
-@@ -12489,6 +12520,7 @@ export function issueService(db: Db) {
+@@ -12574,6 +12605,7 @@ export function issueService(db: Db) {
            .censorUsernameInLogs,
        };
        const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
@@ -5690,7 +6004,7 @@ index 1cf5a02ee..f96c32495 100644
        if (actor.userId && options?.clientRequestId) {
          const [existing] = await dbOrTx.select().from(issueComments).where(and(eq(issueComments.issueId, issueId),
            eq(issueComments.authorUserId, actor.userId), eq(issueComments.clientRequestId, options.clientRequestId)));
-@@ -12649,7 +12681,7 @@ export function issueService(db: Db) {
+@@ -12734,7 +12766,7 @@ export function issueService(db: Db) {
                actor.agentId
                  ? eq(issueComments.authorAgentId, actor.agentId)
                  : isNull(issueComments.authorAgentId),
@@ -5699,16 +6013,7 @@ index 1cf5a02ee..f96c32495 100644
                isNull(issueComments.deletedAt),
              ),
            )
-@@ -12729,7 +12761,7 @@ export function issueService(db: Db) {
-             onBehalfOfUserId,
-             authorType,
-             createdByRunId,
--            body: redactedBody,
-+            body: publishedBody,
-             clientRequestId: options?.clientRequestId ?? null,
-             presentation,
-             metadata,
-@@ -13006,7 +13038,7 @@ export function issueService(db: Db) {
+@@ -13088,7 +13120,7 @@ export function issueService(db: Db) {
                  payload: projectSafeChatPublication({
                    classification: "external",
                    source: "agent_comment",
@@ -5718,10 +6023,10 @@ index 1cf5a02ee..f96c32495 100644
                  state: "pending",
                  createdAt: publicationCreatedAt,
 diff --git a/server/src/services/legacy-controller-lease.test.ts b/server/src/services/legacy-controller-lease.test.ts
-index 354d88923..ec43081b6 100644
+index da5483570..f1e36f839 100644
 --- a/server/src/services/legacy-controller-lease.test.ts
 +++ b/server/src/services/legacy-controller-lease.test.ts
-@@ -113,6 +113,19 @@ const support = await getEmbeddedPostgresTestSupport();
+@@ -121,6 +121,19 @@ const support = await getEmbeddedPostgresTestSupport();
      expect(await renewLegacyControllerLease(db, run)).toBe(false);
      expect(await revokeExpiredLegacyController(db, run)).toBe(false);
    });
@@ -5740,16 +6045,16 @@ index 354d88923..ec43081b6 100644
 +  );
    it("rejects dispatch at the lease deadline even if the database query never settles", async () => {
      const run = await seed();
-     const hungDb = { update: () => ({ set: () => ({ where: () => ({ returning: () => new Promise(() => {}) }) }) }) } as unknown as typeof db;
+     const hungDb = fakeRenewalDb(() => new Promise(() => {}));
 diff --git a/server/src/services/legacy-controller-lease.ts b/server/src/services/legacy-controller-lease.ts
-index fe6b7e68f..1a34bbd8f 100644
+index 55a8439de..79daf1cf6 100644
 --- a/server/src/services/legacy-controller-lease.ts
 +++ b/server/src/services/legacy-controller-lease.ts
 @@ -1,5 +1,5 @@
  import { randomUUID } from "node:crypto";
 -import { and, eq, gt, lte, sql } from "drizzle-orm";
 +import { and, eq, gt, inArray, lte, or, sql } from "drizzle-orm";
- import { heartbeatRuns, type Db } from "@paperclipai/db";
+ import { heartbeatRuns, livenessDb, type Db } from "@paperclipai/db";
  import type { LegacyControllerLeaseLossCause, LegacyControllerLeaseLossTiming } from "./run-cancellation.js";
  
 @@ -45,7 +45,11 @@ export async function renewLegacyControllerLease(
@@ -5766,10 +6071,10 @@ index fe6b7e68f..1a34bbd8f 100644
      gt(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`),
    )).returning({ id: heartbeatRuns.id });
 diff --git a/server/src/services/legacy-execution-recovery.ts b/server/src/services/legacy-execution-recovery.ts
-index b3b3609f3..2b2cfd8e1 100644
+index f1b16bd0e..f8d477cad 100644
 --- a/server/src/services/legacy-execution-recovery.ts
 +++ b/server/src/services/legacy-execution-recovery.ts
-@@ -101,6 +101,11 @@ export async function terminalizeLegacyExecution(input: {
+@@ -105,6 +105,11 @@ export async function terminalizeLegacyExecution(input: {
      )).for("update");
      if (!current || (current.runtimeMode !== "legacy" && !(input.recordRestoreFailureOnly && current.runtimeMode === "native")) ||
          (!input.recordRestoreFailureOnly && !(input.fromStatuses ?? [run.status]).includes(current.status))) return null;
@@ -5781,7 +6086,7 @@ index b3b3609f3..2b2cfd8e1 100644
      if (patch?.resultJson !== undefined) patch = { ...patch,
        resultJson: preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,
          input.recordRestoreFailureOnly ? { ...current.resultJson, ...patch.resultJson } : patch.resultJson),
-@@ -110,6 +115,7 @@ export async function terminalizeLegacyExecution(input: {
+@@ -115,6 +120,7 @@ export async function terminalizeLegacyExecution(input: {
        .set({
          status: input.recordRestoreFailureOnly ? current.status : status,
          ...patch,
@@ -5790,7 +6095,7 @@ index b3b3609f3..2b2cfd8e1 100644
          updatedAt: new Date(),
        })
 diff --git a/server/src/services/native-runtime/native-session-handoff.test.ts b/server/src/services/native-runtime/native-session-handoff.test.ts
-index 256a691d8..e100b08c6 100644
+index c55b633b6..9545fc49f 100644
 --- a/server/src/services/native-runtime/native-session-handoff.test.ts
 +++ b/server/src/services/native-runtime/native-session-handoff.test.ts
 @@ -1,4 +1,7 @@
@@ -5801,7 +6106,7 @@ index 256a691d8..e100b08c6 100644
  import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
  import { agents, companies, createDb, documents, heartbeatRunEvents, heartbeatRuns, issueComments, issueDocuments, issues, issueThreadInteractions } from "@paperclipai/db";
  import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
-@@ -139,6 +142,131 @@ const support = await getEmbeddedPostgresTestSupport();
+@@ -177,6 +180,131 @@ const support = await getEmbeddedPostgresTestSupport();
      } finally { select.mockRestore(); }
    });
  
@@ -5934,7 +6239,7 @@ index 256a691d8..e100b08c6 100644
      const runId = randomUUID();
      await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "succeeded", nativeIssueId: issueId,
 diff --git a/server/src/services/native-runtime/native-session-handoff.ts b/server/src/services/native-runtime/native-session-handoff.ts
-index 4817ea912..6c3d5b481 100644
+index 2cf178e76..cf7f21f3b 100644
 --- a/server/src/services/native-runtime/native-session-handoff.ts
 +++ b/server/src/services/native-runtime/native-session-handoff.ts
 @@ -4,6 +4,8 @@ import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
@@ -5979,15 +6284,15 @@ index 4817ea912..6c3d5b481 100644
      db.select(commentFields).from(issueComments).where(and(commentScope, isNull(issueComments.authorAgentId)))
        .orderBy(asc(issueComments.createdAt), asc(issueComments.id)).limit(1),
      db.select(commentFields).from(issueComments).where(commentScope)
-@@ -116,6 +127,7 @@ export async function buildNativeSessionHandoff(input: {
-         cutoff ? and(lte(heartbeatRuns.createdAt, cutoff.createdAt), lte(heartbeatRunEvents.createdAt, cutoff.createdAt)) : undefined,
-       )).orderBy(desc(heartbeatRunEvents.createdAt), desc(heartbeatRunEvents.id)).limit(5),
+@@ -118,6 +129,7 @@ export async function buildNativeSessionHandoff(input: {
      db.select({ id: documents.id, key: issueDocuments.key, revisionId: documents.latestRevisionId,
+       // Workflow instructions have one on-demand document source. Never copy
+       // their body into fresh-history packets as another prompt instruction.
 +      updatedByAgentId: documents.updatedByAgentId, updatedByUserId: documents.updatedByUserId,
-       body: excerpt(sql`${documents.latestBody}`),
-       truncated: sql<boolean>`length(${documents.latestBody}) > ${ENTRY_MAX_CHARS}`, sourceTrust: documents.sourceTrust,
-     }).from(issueDocuments).innerJoin(documents, and(eq(documents.id, issueDocuments.documentId), eq(documents.companyId, companyId)))
-@@ -131,6 +143,22 @@ export async function buildNativeSessionHandoff(input: {
+       body: sql<string>`case when ${issueDocuments.key} = 'workflow'
+         then ${'Read this task\'s workflow instructions with read_document using key "workflow" before choosing the next phase.'}
+         else ${excerpt(sql`${documents.latestBody}`)} end`,
+@@ -136,6 +148,22 @@ export async function buildNativeSessionHandoff(input: {
        issue.conversationAgentId ? sql`${heartbeatRuns.contextSnapshot}->>'conversationSessionGeneration' = ${String(issue.generation)}` : undefined,
        cutoff ? and(lte(heartbeatRuns.createdAt, cutoff.createdAt), lte(heartbeatRuns.finishedAt, cutoff.createdAt)) : undefined,
      )).orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.id)).limit(3),
@@ -6010,7 +6315,7 @@ index 4817ea912..6c3d5b481 100644
    ]);
    const entries: HandoffEntry[] = [];
    // Historical output inherits its dispatch policy. Later agent/project/task
-@@ -146,26 +174,41 @@ export async function buildNativeSessionHandoff(input: {
+@@ -151,28 +179,41 @@ export async function buildNativeSessionHandoff(input: {
        author: row.origin === "fast_response" ? "paperclip_receipt" : row.authorAgentId ? "agent" : "user" });
    };
    if (origin[0]) addComment(origin[0], "original_request");
@@ -6030,14 +6335,13 @@ index 4817ea912..6c3d5b481 100644
 -    entries.push({ ...sanitizeQuarantinedCommentForHigherTrust({ ...entry, sourceTrust }), kind: "agent_reply" });
 +    entries.push({ ...sanitizeQuarantinedCommentForHigherTrust({ ...entry, sourceTrust }), kind: "agent_reply", author: "agent", verification: "not_established_by_handoff" });
    }
--  savedDocuments.slice(0, 3).forEach(row => entries.push({ ...redactQuarantinedBodyForHigherTrust(row), kind: "document" }));
-+  savedDocuments.slice(0, 3).forEach(row => entries.push({
-+    ...redactQuarantinedBodyForHigherTrust(row), kind: "document",
+   savedDocuments.slice(0, 3).forEach(row => entries.push({ ...redactQuarantinedBodyForHigherTrust(row), kind: "document",
+     ...(row.key === "workflow" ? { readPath: `/api/issues/${issueId}/documents/workflow` } : {}),
 +    // Only the latest editor describes the delivered revision. A user-created
 +    // document subsequently rewritten by an agent must not retain user authority.
 +    author: row.updatedByAgentId ? "agent" : row.updatedByUserId ? "user" : "unknown",
 +    verification: "not_established_by_handoff",
-+  }));
+   }));
    for (const row of runSummaries.slice(0, 2)) {
      if (!row.body) continue;
      const { executionPolicy, ...entry } = row;
@@ -6166,10 +6470,10 @@ index 000000000..1b5da5e76
 +    .map(({ tool }) => tool);
 +}
 diff --git a/server/src/services/recovery/service.ts b/server/src/services/recovery/service.ts
-index e0264f92e..fdb27289b 100644
+index aa44265bb..b6e9a1966 100644
 --- a/server/src/services/recovery/service.ts
 +++ b/server/src/services/recovery/service.ts
-@@ -116,6 +116,7 @@ import {
+@@ -117,6 +117,7 @@ import {
    type IssuePostCommitAction,
  } from "../issues.js";
  import {
@@ -6177,7 +6481,7 @@ index e0264f92e..fdb27289b 100644
    applyIssueMonitorPolicyTransition,
    normalizeIssueExecutionPolicy,
    parseIssueExecutionState,
-@@ -210,6 +211,7 @@ type RecoveryWakeupOptions = {
+@@ -214,6 +215,7 @@ type RecoveryWakeupOptions = {
    issueStateGuard?: {
      statuses: string[];
      assigneeAgentId: string;
@@ -6185,7 +6489,7 @@ index e0264f92e..fdb27289b 100644
    };
  };
  
-@@ -1975,6 +1977,11 @@ export function recoveryService(
+@@ -1979,6 +1981,11 @@ export function recoveryService(
      source: string;
      retryOfRunId?: string | null;
      extraContext?: Record<string, unknown>;
@@ -6197,7 +6501,7 @@ index e0264f92e..fdb27289b 100644
      /**
       * Out-parameter: set `retryExhausted` when no successor was queued
       * because the failed predecessor has spent its bounded transient retry
-@@ -2066,6 +2073,9 @@ export function recoveryService(
+@@ -2070,6 +2077,9 @@ export function recoveryService(
              },
            }
          : {}),
@@ -6207,7 +6511,7 @@ index e0264f92e..fdb27289b 100644
        payload: withRecoveryContext(
          {
            issueId: input.issueId,
-@@ -5166,10 +5176,20 @@ export function recoveryService(
+@@ -5243,10 +5253,20 @@ export function recoveryService(
            source: "issue.execution_review_recovery",
            retryOfRunId: participantLatestRun.id,
            extraContext: {
@@ -6410,18 +6714,18 @@ index 000000000..34d4066f6
 +  };
 +}
 diff --git a/server/src/services/tool-gateway.ts b/server/src/services/tool-gateway.ts
-index a3ec07b4c..a43545d55 100644
+index 169e4a4a6..b3f2fa5c1 100644
 --- a/server/src/services/tool-gateway.ts
 +++ b/server/src/services/tool-gateway.ts
-@@ -22,6 +22,7 @@ import { captureRunIdentity } from "./run-identity.js";
+@@ -28,6 +28,7 @@ import { captureRunIdentity } from "./run-identity.js";
  import { emitConnectionInvoked } from "./connector-telemetry.js";
  import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
  import { extractRemoteMcpPending } from "./remote-mcp-pending.js";
 +import { searchOnDemandTools } from "./on-demand-tool-search.js";
  import { logger } from "../middleware/logger.js";
- import { spawn } from "node:child_process";
- import { createHash, randomBytes, randomUUID } from "node:crypto";
-@@ -2998,20 +2999,11 @@ export function createToolGatewayService(
+ import { getAppDefinitionForApplicationKey, isConnectorFeatureEnabled } from "@paperclipai/shared";
+ import { instanceSettingsService } from "./instance-settings.js";
+@@ -3043,20 +3044,11 @@ export function createToolGatewayService(
      const query =
        typeof params.query === "string" ? params.query.trim().toLowerCase() : "";
      const limit = Math.max(1, Math.min(50, Number(params.limit ?? 10) || 10));
@@ -6447,7 +6751,7 @@ index a3ec07b4c..a43545d55 100644
        .map((tool) => ({
          name: tool.name,
          displayName: tool.displayName ?? tool.name,
-@@ -6374,6 +6366,23 @@ export function createToolGatewayService(
+@@ -6469,6 +6461,23 @@ export function createToolGatewayService(
        );
        return { result, headerSummary, execution };
      } catch (error) {
@@ -6528,18 +6832,18 @@ index e61adbbb9..00691f0ff 100644
    // A lane with no path left must not keep advertising a retry that will never run — whether
    // the budget ran out or the scheduled attempt simply never fired.
 diff --git a/ui/src/components/TaskChatThread.test.tsx b/ui/src/components/TaskChatThread.test.tsx
-index 59bf338da..f8533fa35 100644
+index c84e2edc5..e4f0a4a1a 100644
 --- a/ui/src/components/TaskChatThread.test.tsx
 +++ b/ui/src/components/TaskChatThread.test.tsx
-@@ -9,6 +9,7 @@ import { ThemeProvider } from "@/context/ThemeContext";
- import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
- import { TaskChatThread } from "./TaskChatThread";
+@@ -11,6 +11,7 @@ import { TaskChatThread } from "./TaskChatThread";
+ import { IssueChatThread } from "./IssueChatThread";
  import type {
+   Agent,
 +  IssueRecoveryAction,
    IssueDocument,
    IssueQueuedCommentQueue,
    IssueThreadInteraction,
-@@ -46,6 +47,31 @@ const DIRECT_ADAPTER_TYPES = [
+@@ -50,6 +51,31 @@ const DIRECT_ADAPTER_TYPES = [
  const editorCallbacks = vi.hoisted(() => ({ change: (_value: string) => {} }));
  const streamlinedState = vi.hoisted(() => ({ enabled: true }));
  
@@ -6571,7 +6875,7 @@ index 59bf338da..f8533fa35 100644
  vi.mock("@/components/transcript/useLiveRunTranscripts", () => ({
    useLiveRunTranscripts: ({ runs }: { runs: unknown[] }) => {
      transcriptHookRuns.legacy.push(runs);
-@@ -134,6 +160,50 @@ beforeEach(() => {
+@@ -142,6 +168,50 @@ beforeEach(() => {
    });
  });
  
@@ -6623,10 +6927,10 @@ index 59bf338da..f8533fa35 100644
    flushSync(() => root?.unmount());
    queryClient.clear();
 diff --git a/ui/src/components/TaskChatThread.tsx b/ui/src/components/TaskChatThread.tsx
-index d41d9f609..63d370363 100644
+index e33b7194e..a6866e810 100644
 --- a/ui/src/components/TaskChatThread.tsx
 +++ b/ui/src/components/TaskChatThread.tsx
-@@ -132,6 +132,7 @@ import { issuesApi } from "@/api/issues";
+@@ -135,6 +135,7 @@ import { issuesApi } from "@/api/issues";
  import { queryKeys } from "@/lib/queryKeys";
  import { useQueryClient } from "@tanstack/react-query";
  import { TaskChatPresentationProvider } from "@/components/task-chat/presentation-mode";
@@ -6634,7 +6938,7 @@ index d41d9f609..63d370363 100644
  
  const EMPTY_BROWSERS: TaskBrowser[] = [];
  
-@@ -797,7 +798,8 @@ export function TaskChatThread(props: TaskChatThreadProps) {
+@@ -800,7 +801,8 @@ export function TaskChatThread(props: TaskChatThreadProps) {
    );
  
    const threadHeaderWithBlockers =
@@ -6644,7 +6948,7 @@ index d41d9f609..63d370363 100644
        <>
          {threadHeader}
          {liveWorkLinks ? (
-@@ -809,6 +811,23 @@ export function TaskChatThread(props: TaskChatThreadProps) {
+@@ -812,6 +814,23 @@ export function TaskChatThread(props: TaskChatThreadProps) {
              placement="top"
            />
          ) : null}
