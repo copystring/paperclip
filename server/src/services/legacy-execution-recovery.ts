@@ -112,18 +112,24 @@ export async function terminalizeLegacyExecution(input: {
     // when this transaction still owns the queued row and the exact pending
     // case handoff that requested the cancellation, with no runtime or lease
     // ownership having been acquired.
-    if (!input.recordRestoreFailureOnly && status === "cancelled" && run.status === "queued" &&
+    if (!input.recordRestoreFailureOnly && issueId && status === "cancelled" && run.status === "queued" &&
         current.status === "queued" && current.runtimeMode === "legacy" && input.patch?.errorCode === "issue_reassigned") {
       const result = { ...current.resultJson, ...patch?.resultJson };
       const cancellation = result.cancellation as Record<string, unknown> | undefined;
       const startupCancellation = result.startupCancellation as Record<string, unknown> | undefined;
-      const [handoff] = await tx.select({ id: caseHandoffs.id }).from(caseHandoffs).where(and(
-        eq(caseHandoffs.companyId, current.companyId),
-        eq(caseHandoffs.sourceRunId, current.id),
-        eq(caseHandoffs.issueId, issueId ?? ""),
-        eq(caseHandoffs.destinationKind, "agent"),
-        eq(caseHandoffs.state, "awaiting_release"),
-      )).limit(1);
+      const caseHandoffId = typeof result.caseHandoffId === "string"
+        ? canonicalExecutionUuid(sql`${result.caseHandoffId}`)
+        : null;
+      const [handoff] = caseHandoffId
+        ? await tx.select({ id: caseHandoffs.id }).from(caseHandoffs).where(and(
+            eq(caseHandoffs.companyId, current.companyId),
+            eq(caseHandoffs.sourceRunId, current.id),
+            eq(caseHandoffs.issueId, issueId),
+            eq(caseHandoffs.id, caseHandoffId),
+            eq(caseHandoffs.destinationKind, "agent"),
+            eq(caseHandoffs.state, "awaiting_release"),
+          )).limit(1)
+        : [];
       const [activeLease] = await tx.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
         eq(environmentLeases.companyId, current.companyId), eq(environmentLeases.heartbeatRunId, current.id),
         or(isNull(environmentLeases.releasedAt), eq(environmentLeases.status, "pending_cleanup"),
@@ -137,7 +143,7 @@ export async function terminalizeLegacyExecution(input: {
         ...current,
         resultJson: current.resultJson ? { ...current.resultJson, startupCancellation: undefined } : null,
       });
-      if (issueId && handoff && handoff.id === result.caseHandoffId &&
+      if (handoff && handoff.id === result.caseHandoffId &&
           !activeLease && hasNoExecutionIdentity &&
           unclaimedWithoutStartupFence &&
           result.caseHandoffYieldStop === true && result.reassignmentStopRequested === true &&
