@@ -14,9 +14,6 @@ const EXPECTED_OLD_VERSION = '2026.1017.0-canary.6';
 const EXPECTED_OLD_SRI = 'sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg==';
 const EXPECTED_OLD_INVENTORY_COUNT = 354;
 const EXPECTED_OLD_INVENTORY_SHA256 = '9cec6945b6dd1c38b80940e5246d500da8b5d506a4be68db20ab89136fc11ed9';
-const EXPECTED_CANDIDATE_SOURCE_COMMIT = '9c442cf48e633002fb9600ff0c137550889fdb08';
-const CANDIDATE_PACKAGE_VERSION = '2026.1023.0-canary.13';
-const CANDIDATE_PACKAGE_SRI = 'sha512-Ub4gzp005JhteAMeDsOxUXDjbSA7OUg+dqiQ1CGaqqxB+xZpJS+x5ke5N/GkqL3f/a+DOQMDp/ZJzNC6//Uo3Q==';
 const EXPECTED_CANDIDATE_INVENTORY_COUNT = 375;
 const EXPECTED_CANDIDATE_INVENTORY_SHA256 = '89cd5c4305633ac9eeabbb04a9d0584adce53afe0b2d06a6f7dab983dfe34174';
 const EXPECTED_ADDED_SQL_COUNT = 21;
@@ -35,12 +32,15 @@ export function verifySRI(bytes, sri) {
   if (actual !== m[1]) throw new Error('Tarball SRI did not match the pinned package');
   return actual;
 }
-export function makeReceipt({ oldVersion, oldSRI, oldJournalHash, oldMigrationInventoryHash, candidateVersion, candidateSRI, candidateJournalHash, candidateMigrationHash, assertions }) {
+export function makeReceipt({ oldVersion, oldSRI, oldJournalHash, oldMigrationInventoryHash, candidateVersion, candidateSRI, candidateJournalHash, candidateMigrationHash, sourceMigrationHash, sourceMigrationCount, sourceCommit, patchCommit, patchTree, assertions }) {
   if (oldVersion !== EXPECTED_OLD_VERSION || oldSRI !== EXPECTED_OLD_SRI) throw new Error('Unapproved old package identity');
-  if (candidateVersion !== CANDIDATE_PACKAGE_VERSION || candidateSRI !== CANDIDATE_PACKAGE_SRI) throw new Error('Unapproved candidate package identity');
-  if (![oldJournalHash, oldMigrationInventoryHash, candidateJournalHash, candidateMigrationHash].every((h) => /^[a-f0-9]{64}$/.test(h))) throw new Error('Receipt requires SHA-256 migration identities');
+  if (typeof candidateVersion !== 'string' || !/^\d{4}\.\d+\.0-canary\.\d+$/.test(candidateVersion) || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(candidateSRI ?? '')) throw new Error('Invalid prepared candidate package identity');
+  if (![oldJournalHash, oldMigrationInventoryHash, candidateJournalHash, candidateMigrationHash, sourceMigrationHash].every((h) => /^[a-f0-9]{64}$/.test(h))) throw new Error('Receipt requires SHA-256 migration identities');
+  if (sourceMigrationCount !== EXPECTED_CANDIDATE_INVENTORY_COUNT || ![sourceCommit, patchCommit, patchTree].every((value) => /^[a-f0-9]{40}$/.test(value))) throw new Error('Receipt requires exact prepared source identity and migration count');
+  if (!/^[a-f0-9]{40}$/.test(sourceCommit)) throw new Error('Prepared source commit is invalid');
+  if (sourceMigrationHash !== candidateMigrationHash) throw new Error('Prepared source migration inventory differs from the pinned candidate package');
   if (!Array.isArray(assertions) || assertions.length !== REQUIRED_ASSERTIONS.length || assertions.some((a) => a.passed !== true) || REQUIRED_ASSERTIONS.some((id) => !assertions.some((a) => a.id === id))) throw new Error('Receipt must contain every successful migration invariant');
-  const body = { schema: 1, candidateSourceCommit: EXPECTED_CANDIDATE_SOURCE_COMMIT, oldPackage: { name: '@paperclipai/db', version: oldVersion, integrity: oldSRI, migrationInventoryCount: EXPECTED_OLD_INVENTORY_COUNT, migrationInventorySha256: oldMigrationInventoryHash, journalSha256: oldJournalHash }, candidate: { name: '@paperclipai/db', version: candidateVersion, integrity: candidateSRI, migrationInventoryCount: EXPECTED_CANDIDATE_INVENTORY_COUNT, migrationInventorySha256: candidateMigrationHash, journalSha256: candidateJournalHash }, assertions };
+  const body = { schema: 1, candidateSourceCommit: sourceCommit, preparedSource: { sourceCommit, patchCommit, patchTree, migrationInventoryCount: sourceMigrationCount, migrationInventorySha256: sourceMigrationHash }, oldPackage: { name: '@paperclipai/db', version: oldVersion, integrity: oldSRI, migrationInventoryCount: EXPECTED_OLD_INVENTORY_COUNT, migrationInventorySha256: oldMigrationInventoryHash, journalSha256: oldJournalHash }, candidate: { name: '@paperclipai/db', version: candidateVersion, integrity: candidateSRI, migrationInventoryCount: EXPECTED_CANDIDATE_INVENTORY_COUNT, migrationInventorySha256: candidateMigrationHash, journalSha256: candidateJournalHash }, assertions };
   return { ...body, receiptSha256: sha256(Buffer.from(JSON.stringify(body))) };
 }
 export function canonicalInventoryHash(inventory) {
@@ -50,6 +50,11 @@ export function canonicalInventoryHash(inventory) {
 export function assertInventoryBinding(inventory, { expectedCount, expectedSha256, pathPrefix }) {
   const files = Object.keys(inventory);
   if (files.length !== expectedCount || files.some((name) => !name.startsWith(pathPrefix)) || canonicalInventoryHash(inventory) !== expectedSha256) throw new Error('Migration inventory does not match its bound prefix, count, and hash');
+  return true;
+}
+export function assertSourceInventoryMatchesCandidate(sourceInventory, candidateInventory, { expectedCount = EXPECTED_CANDIDATE_INVENTORY_COUNT, expectedSha256 = EXPECTED_CANDIDATE_INVENTORY_SHA256 } = {}) {
+  assertInventoryBinding(sourceInventory, { expectedCount, expectedSha256, pathPrefix: MIGRATION_INVENTORY_PREFIX });
+  if (canonicalInventoryHash(sourceInventory) !== canonicalInventoryHash(candidateInventory)) throw new Error('Prepared source migrations differ from the pinned candidate npm package');
   return true;
 }
 export function resolvePackageDependency(packageEntryPath, dependency) {
@@ -199,24 +204,57 @@ async function migrationIdentity(dir) {
   inventory[`${MIGRATION_INVENTORY_PREFIX}meta/_journal.json`] = sha256(journal);
   return { journalHash: sha256(journal), inventory, journal: JSON.parse(journal.toString('utf8')) };
 }
+async function sourceMigrationIdentity(sourceRoot) {
+  const dir = path.join(sourceRoot, 'packages', 'db', 'src', 'migrations');
+  const fs = await import('node:fs/promises');
+  const names = await fs.readdir(dir);
+  const inventory = {};
+  for (const name of names.filter((entry) => entry.endsWith('.sql')).sort()) inventory[`${MIGRATION_INVENTORY_PREFIX}${name}`] = sha256(await readFile(path.join(dir, name)));
+  const journalPath = path.join(dir, 'meta', '_journal.json');
+  inventory[`${MIGRATION_INVENTORY_PREFIX}meta/_journal.json`] = sha256(await readFile(journalPath));
+  return { inventory, journal: JSON.parse((await readFile(journalPath)).toString('utf8')) };
+}
+function gitValue(sourceRoot, ...args) {
+  return run('git', ['-C', sourceRoot, ...args], sourceRoot).trim().toLowerCase();
+}
+export async function assertPreparedSource(sourceRoot, provenancePath, candidateInventory, { expectedSourceCommit, expectedInventoryCount = EXPECTED_CANDIDATE_INVENTORY_COUNT, expectedInventorySha256 = EXPECTED_CANDIDATE_INVENTORY_SHA256 } = {}) {
+  const root = path.resolve(sourceRoot);
+  const provenance = JSON.parse(await readFile(provenancePath, 'utf8'));
+  const marker = JSON.parse(await readFile(path.join(root, '.canary-train.json'), 'utf8'));
+  const head = gitValue(root, 'rev-parse', 'HEAD');
+  const tree = gitValue(root, 'rev-parse', 'HEAD^{tree}');
+  const status = run('git', ['-C', root, 'status', '--porcelain'], root).trim();
+  const markerPatches = provenance.patches?.map(({ number, repository, head: patchHead, state, integrationPatch }) => ({ number, repository, head: patchHead, state, ...(integrationPatch ? { integrationPatch } : {}) }));
+  const sourceCommitIsValid = /^[a-f0-9]{40}$/.test(provenance.sourceCommit ?? '');
+  if (status || provenance.schemaVersion !== 1 || !sourceCommitIsValid || head !== provenance.patchCommit || tree !== provenance.patchTree || gitValue(root, 'rev-parse', `${provenance.sourceCommit}^{tree}`) !== provenance.sourceTree || (expectedSourceCommit !== undefined && provenance.sourceCommit !== expectedSourceCommit) || marker.sourceCommit !== provenance.sourceCommit || !/^\d{4}\.\d+\.0-canary\.\d+$/.test(provenance.version ?? '') || marker.version !== provenance.version || provenance.branch !== 'deploy/canary-patched' || JSON.stringify(marker.patches) !== JSON.stringify(markerPatches)) throw new Error('Prepared candidate source does not match its clean immutable provenance');
+  const packagePin = provenance.npmPackages?.['@paperclipai/db'];
+  if (packagePin?.version !== provenance.version || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(packagePin?.integrity ?? '')) throw new Error('Prepared source provenance does not pin the exact database package for this candidate version');
+  const sourceIdentity = await sourceMigrationIdentity(root);
+  assertSourceInventoryMatchesCandidate(sourceIdentity.inventory, candidateInventory, { expectedCount: expectedInventoryCount, expectedSha256: expectedInventorySha256 });
+  return { sourceCommit: provenance.sourceCommit, patchCommit: provenance.patchCommit, patchTree: provenance.patchTree, migrationInventoryCount: Object.keys(sourceIdentity.inventory).length, migrationInventorySha256: canonicalInventoryHash(sourceIdentity.inventory) };
+}
 async function main() {
-  const [receiptPath] = process.argv.slice(2);
+  const [receiptPath, sourceRoot, provenancePath] = process.argv.slice(2);
   const stage = (name) => process.stderr.write(`[migration-compat] ${name}\n`);
-  if (!receiptPath) throw new Error('Usage: node verify-migration-compatibility.mjs <receipt-output>');
+  if (!receiptPath || !sourceRoot || !provenancePath) throw new Error('Usage: node verify-migration-compatibility.mjs <receipt-output> <prepared-source> <provenance.json>');
+  const provenance = JSON.parse(await readFile(provenancePath, 'utf8'));
+  const candidateVersion = provenance.npmPackages?.['@paperclipai/db']?.version;
+  const candidateSRI = provenance.npmPackages?.['@paperclipai/db']?.integrity;
+  if (candidateVersion !== provenance.version || !/^\d{4}\.\d+\.0-canary\.\d+$/.test(candidateVersion ?? '') || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(candidateSRI ?? '')) throw new Error('Prepared provenance does not contain the exact candidate database package identity');
   const tempParent = await realpath(os.tmpdir());
   const temp = await mkdtemp(path.join(tempParent, 'paperclip-migration-compat-'));
   await assertPrivateTempRoot(temp, tempParent);
   let database; let client; let restoreCandidateJournal; let restoreCandidateBoundary;
   try {
-    stage('fetch and verify pinned old and canary.13 npm packages');
+    stage(`fetch pinned old and prepared Canary ${candidateVersion} database packages`);
     const oldPack = JSON.parse(run('npm', ['pack', `@paperclipai/db@${EXPECTED_OLD_VERSION}`, '--json', '--pack-destination', temp], temp))[0];
     if (oldPack.version !== EXPECTED_OLD_VERSION || oldPack.integrity !== EXPECTED_OLD_SRI) throw new Error('Registry metadata did not match the reviewed old package pin');
     const oldTarball = path.join(temp, oldPack.filename);
     verifySRI(await readFile(oldTarball), EXPECTED_OLD_SRI);
-    const candidatePack = JSON.parse(run('npm', ['pack', `@paperclipai/db@${CANDIDATE_PACKAGE_VERSION}`, '--json', '--pack-destination', temp], temp))[0];
-    if (candidatePack.version !== CANDIDATE_PACKAGE_VERSION || candidatePack.integrity !== CANDIDATE_PACKAGE_SRI) throw new Error('Registry metadata did not match the reviewed candidate package pin');
+    const candidatePack = JSON.parse(run('npm', ['pack', `@paperclipai/db@${candidateVersion}`, '--json', '--pack-destination', temp], temp))[0];
+    if (candidatePack.version !== candidateVersion || candidatePack.integrity !== candidateSRI) throw new Error('Registry metadata did not match the prepared candidate package identity');
     const candidateTarball = path.join(temp, candidatePack.filename);
-    verifySRI(await readFile(candidateTarball), CANDIDATE_PACKAGE_SRI);
+    verifySRI(await readFile(candidateTarball), candidateSRI);
     const oldInstall = path.join(temp, 'old');
     const candidateInstall = path.join(temp, 'candidate');
     await (await import('node:fs/promises')).mkdir(oldInstall);
@@ -240,6 +278,8 @@ async function main() {
     const oldIdentity = await migrationIdentity(oldMigrations);
     const candidateIdentity = await migrationIdentity(candidateMigrations);
     const extension = assertMigrationExtension(oldIdentity.inventory, candidateIdentity.inventory, oldIdentity.journal, candidateIdentity.journal);
+    stage('bind actual prepared source migrations to the pinned npm package and provenance');
+    const sourceBinding = await assertPreparedSource(sourceRoot, provenancePath, candidateIdentity.inventory, { expectedSourceCommit: provenance.sourceCommit });
     stage('load old migration engine');
     const oldDb = await import(pathToFileURL(oldIndex));
     stage('start disposable database with the pinned package test harness');
@@ -345,7 +385,7 @@ async function main() {
     await restoreCandidateBoundary();
     restoreCandidateBoundary = undefined;
     restoreCandidateJournal = undefined;
-    const receipt = makeReceipt({ oldVersion: EXPECTED_OLD_VERSION, oldSRI: EXPECTED_OLD_SRI, oldJournalHash: oldIdentity.journalHash, oldMigrationInventoryHash: extension.oldInventorySha256, candidateVersion: CANDIDATE_PACKAGE_VERSION, candidateSRI: CANDIDATE_PACKAGE_SRI, candidateJournalHash: candidateIdentity.journalHash, candidateMigrationHash: extension.candidateInventorySha256, assertions });
+    const receipt = makeReceipt({ oldVersion: EXPECTED_OLD_VERSION, oldSRI: EXPECTED_OLD_SRI, oldJournalHash: oldIdentity.journalHash, oldMigrationInventoryHash: extension.oldInventorySha256, candidateVersion, candidateSRI, candidateJournalHash: candidateIdentity.journalHash, candidateMigrationHash: extension.candidateInventorySha256, sourceMigrationHash: sourceBinding.migrationInventorySha256, sourceMigrationCount: sourceBinding.migrationInventoryCount, sourceCommit: sourceBinding.sourceCommit, patchCommit: sourceBinding.patchCommit, patchTree: sourceBinding.patchTree, assertions });
     await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx' });
     stage('migration receipt written');
     process.stdout.write(`${JSON.stringify(receipt)}\n`);

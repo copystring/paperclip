@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
   verify-upgrade:
     runs-on: ubuntu-24.04
@@ -15,14 +16,38 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      - name: Validate receipt contracts and execute isolated Canary 6 to 13 upgrade
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: 12530487274
+          github-token: ${{ github.token }}
+          repository: copystring/paperclip
+          run-id: 40020825993
+          path: ${{ runner.temp }}/prepared-source
+      - name: Verify and extract the immutable prepared Canary source
+        env:
+          EXPECTED_SOURCE_SHA256: 0c482dcad50cb30ed1d5995c4776a2c097cd51081c98c208cc1b56c60d6b5e36
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, os, pathlib
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'prepared-source/canary-source.tgz'
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != os.environ['EXPECTED_SOURCE_SHA256']:
+              raise SystemExit('Prepared source archive digest mismatch')
+          PY
+          tar -xzf "$RUNNER_TEMP/prepared-source/canary-source.tgz" -C "$RUNNER_TEMP"
+          test -f "$RUNNER_TEMP/paperclip-source/.canary-train.json"
+          test -f "$RUNNER_TEMP/paperclip-output/provenance.json"
+      - name: Validate receipt contracts and verify Canary 6 to prepared candidate migration
         run: |
           set -euo pipefail
           node --test ops/canary-train/verify-migration-compatibility.test.mjs
-          node ops/canary-train/verify-migration-compatibility.mjs "$RUNNER_TEMP/migration-preparation.json"
+          node ops/canary-train/verify-migration-compatibility.mjs \
+            "$RUNNER_TEMP/migration-preparation.json" \
+            "$RUNNER_TEMP/paperclip-source" \
+            "$RUNNER_TEMP/paperclip-output/provenance.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: migration-preparation-proof-canary6-to-canary13
+          name: migration-preparation-proof-canary6-to-prepared-candidate
           path: ${{ runner.temp }}/migration-preparation.json
           retention-days: 1
           if-no-files-found: error

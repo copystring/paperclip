@@ -1,16 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { assertInventoryBinding, assertMigrationExtension, assertMigrationExtensionShape, canonicalInventoryHash, makeReceipt, MIGRATION_INVENTORY_PREFIX, resolvePackageDependency, tarEntry, verifySRI } from './verify-migration-compatibility.mjs';
+import { assertInventoryBinding, assertMigrationExtension, assertMigrationExtensionShape, assertPreparedSource, assertSourceInventoryMatchesCandidate, canonicalInventoryHash, makeReceipt, MIGRATION_INVENTORY_PREFIX, resolvePackageDependency, tarEntry, verifySRI } from './verify-migration-compatibility.mjs';
 
 const oldSRI = 'sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg==';
 const candidateSRI = 'sha512-Ub4gzp005JhteAMeDsOxUXDjbSA7OUg+dqiQ1CGaqqxB+xZpJS+x5ke5N/GkqL3f/a+DOQMDp/ZJzNC6//Uo3Q==';
-const hashes = { oldJournalHash: 'a'.repeat(64), oldMigrationInventoryHash: 'd'.repeat(64), candidateJournalHash: 'b'.repeat(64), candidateMigrationHash: 'c'.repeat(64) };
+const candidateVersion = '2026.1024.0-canary.14';
+const hashes = { oldJournalHash: 'a'.repeat(64), oldMigrationInventoryHash: 'd'.repeat(64), candidateJournalHash: 'b'.repeat(64), candidateMigrationHash: 'c'.repeat(64), sourceMigrationHash: 'c'.repeat(64), sourceMigrationCount: 375, sourceCommit: 'a'.repeat(40), patchCommit: 'f'.repeat(40), patchTree: 'e'.repeat(40) };
 const assertionIds = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'restore-point-checkout-migrations', 'migration-inventory-extension'];
 
 test('SRI verifier accepts the exact tarball and rejects altered bytes', () => {
@@ -34,14 +35,65 @@ test('verified tar reader extracts the exact packaged hydration script path', ()
 
 test('receipt is bound to exact package, migration hashes, and passing evidence', () => {
   const assertions = assertionIds.map((id) => ({ id, passed: true }));
-  const receipt = makeReceipt({ oldVersion: '2026.1017.0-canary.6', oldSRI, candidateVersion: '2026.1023.0-canary.13', candidateSRI, ...hashes, assertions });
+  const receipt = makeReceipt({ oldVersion: '2026.1017.0-canary.6', oldSRI, candidateVersion, candidateSRI, ...hashes, assertions });
   assert.match(receipt.receiptSha256, /^[a-f0-9]{64}$/);
   assert.equal(receipt.candidate.migrationInventorySha256, hashes.candidateMigrationHash);
-  assert.throws(() => makeReceipt({ oldVersion: 'other', oldSRI, candidateVersion: '2026.1023.0-canary.13', candidateSRI, ...hashes, assertions }), /Unapproved old package/);
-  assert.throws(() => makeReceipt({ oldVersion: '2026.1017.0-canary.6', oldSRI, candidateVersion: '2026.1023.0-canary.13', candidateSRI, ...hashes, assertions: assertions.map((a, i) => ({ ...a, passed: i !== 2 })) }), /every successful migration invariant/);
-  assert.throws(() => makeReceipt({ oldVersion: '2026.1017.0-canary.6', oldSRI, candidateVersion: '2026.1023.0-canary.13', candidateSRI, ...hashes, candidateMigrationHash: 'bad', assertions }), /SHA-256/);
-  assert.throws(() => makeReceipt({ oldVersion: '2026.1017.0-canary.6', oldSRI, candidateVersion: '2026.1023.0-canary.13', candidateSRI, ...hashes, assertions: [{ id: 'unrelated', passed: true }] }), /every successful migration invariant/);
-  assert.throws(() => makeReceipt({ oldVersion: '2026.1017.0-canary.6', oldSRI, candidateVersion: 'other', candidateSRI, ...hashes, assertions }), /Unapproved candidate package/);
+  assert.throws(() => makeReceipt({ oldVersion: 'other', oldSRI, candidateVersion, candidateSRI, ...hashes, assertions }), /Unapproved old package/);
+  assert.throws(() => makeReceipt({ oldVersion: '2026.1017.0-canary.6', oldSRI, candidateVersion, candidateSRI, ...hashes, assertions: assertions.map((a, i) => ({ ...a, passed: i !== 2 })) }), /every successful migration invariant/);
+  assert.throws(() => makeReceipt({ oldVersion: '2026.1017.0-canary.6', oldSRI, candidateVersion, candidateSRI, ...hashes, candidateMigrationHash: 'bad', assertions }), /SHA-256/);
+  assert.throws(() => makeReceipt({ oldVersion: '2026.1017.0-canary.6', oldSRI, candidateVersion, candidateSRI, ...hashes, assertions: [{ id: 'unrelated', passed: true }] }), /every successful migration invariant/);
+  assert.throws(() => makeReceipt({ oldVersion: '2026.1017.0-canary.6', oldSRI, candidateVersion: 'other', candidateSRI, ...hashes, assertions }), /Invalid prepared candidate package identity/);
+});
+
+test('prepared source migration files must exactly match the pinned npm candidate', () => {
+  const source = { [`${MIGRATION_INVENTORY_PREFIX}0001_init.sql`]: 'a'.repeat(64) };
+  assert.equal(assertSourceInventoryMatchesCandidate(source, { ...source }, { expectedCount: 1, expectedSha256: canonicalInventoryHash(source) }), true);
+  assert.throws(() => assertSourceInventoryMatchesCandidate(source, { ...source, [`${MIGRATION_INVENTORY_PREFIX}0002_extra.sql`]: 'b'.repeat(64) }, { expectedCount: 1, expectedSha256: canonicalInventoryHash(source) }), /differ from the pinned candidate/);
+  assert.throws(() => assertSourceInventoryMatchesCandidate({ 'outside.sql': 'a'.repeat(64) }, { 'outside.sql': 'a'.repeat(64) }, { expectedCount: 1, expectedSha256: canonicalInventoryHash({ 'outside.sql': 'a'.repeat(64) }) }), /prefix, count, and hash/);
+});
+
+test('prepared source must be a clean provenance-bound patch commit', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'paperclip-prepared-source-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  git('init', '-b', 'deploy/canary-patched');
+  git('config', 'user.name', 'Migration test');
+  git('config', 'user.email', 'migration-test@example.invalid');
+  const migrations = path.join(root, 'packages', 'db', 'src', 'migrations');
+  await mkdir(path.join(migrations, 'meta'), { recursive: true });
+  await writeFile(path.join(migrations, '0001_base.sql'), 'select 1;\n');
+  await writeFile(path.join(migrations, 'meta', '_journal.json'), '{"entries":[]}\n');
+  git('add', '.'); git('commit', '-m', 'upstream');
+  const sourceCommit = git('rev-parse', 'HEAD');
+  const sourceTree = git('rev-parse', 'HEAD^{tree}');
+  const sourceInventory = {
+    [`${MIGRATION_INVENTORY_PREFIX}0001_base.sql`]: createHash('sha256').update('select 1;\n').digest('hex'),
+    [`${MIGRATION_INVENTORY_PREFIX}meta/_journal.json`]: createHash('sha256').update('{"entries":[]}\n').digest('hex'),
+  };
+  const marker = { schemaVersion: 1, version: candidateVersion, sourceCommit, patches: [] };
+  await writeFile(path.join(root, '.canary-train.json'), JSON.stringify(marker));
+  git('add', '.canary-train.json'); git('commit', '-m', 'canary-train: assemble candidate');
+  const provenance = {
+    schemaVersion: 1, version: marker.version, sourceCommit, sourceTree,
+    branch: 'deploy/canary-patched', patchCommit: git('rev-parse', 'HEAD'), patchTree: git('rev-parse', 'HEAD^{tree}'), patches: [],
+    npmPackages: { '@paperclipai/db': { version: marker.version, integrity: candidateSRI } },
+  };
+  const provenancePath = path.join(path.dirname(root), `${path.basename(root)}.provenance.json`);
+  t.after(() => rm(provenancePath, { force: true }));
+  await writeFile(provenancePath, JSON.stringify(provenance));
+  assert.deepEqual(await assertPreparedSource(root, provenancePath, sourceInventory, {
+    expectedInventoryCount: 2, expectedInventorySha256: canonicalInventoryHash(sourceInventory),
+  }), {
+    sourceCommit, patchCommit: provenance.patchCommit, patchTree: provenance.patchTree,
+    migrationInventoryCount: 2, migrationInventorySha256: canonicalInventoryHash(sourceInventory),
+  });
+  await assert.rejects(assertPreparedSource(root, provenancePath, sourceInventory, {
+    expectedSourceCommit: 'f'.repeat(40), expectedInventoryCount: 2, expectedInventorySha256: canonicalInventoryHash(sourceInventory),
+  }), /clean immutable provenance/);
+  await writeFile(path.join(root, 'untracked.txt'), 'dirty');
+  await assert.rejects(assertPreparedSource(root, provenancePath, sourceInventory, {
+    expectedSourceCommit: sourceCommit, expectedInventoryCount: 2, expectedInventorySha256: canonicalInventoryHash(sourceInventory),
+  }), /clean immutable provenance/);
 });
 
 test('migration inventory hash is canonical and package path prefixes are part of its binding', () => {
