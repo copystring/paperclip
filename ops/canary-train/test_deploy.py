@@ -519,6 +519,8 @@ class CandidateTests(unittest.TestCase):
                 d = deployer(root, hooks=[hook])
                 d._verify_active_fingerprint = lambda *args: {"active": "fingerprint"}
                 d._protected_inventory = lambda *args: {"candidate": "fingerprint"}
+                d._production_probe_context = lambda probe: {"productionServerPid": 42,
+                    "paperclipHome": str(root), "apiBase": "http://localhost:3100"}
                 diff = {"baselineInventorySha256": "a" * 64, "candidateInventorySha256": "b" * 64}
                 item = manifest()
                 item["packageMap"] = {"@paperclipai/server#dist": "node_modules/@paperclipai/server/dist"}
@@ -552,6 +554,31 @@ class CandidateTests(unittest.TestCase):
                 else:
                     with self.assertRaises(deploy.DeployError):
                         d._run_migration_precondition_probe(root, root, item, diff, {})
+
+    def test_production_probe_context_requires_registered_paths_and_running_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, env = root / "config.json", root / ".env"
+            config.write_text("{}")
+            env.write_text("")
+            hook = {"productionConfigPath": str(config), "productionEnvFilePath": str(env)}
+            calls = []
+            def command(args, **kwargs):
+                calls.append(args)
+                return SimpleNamespace(returncode=0, stdout="1234\n")
+            d = deployer(root, command=command)
+            context = d._production_probe_context(hook)
+            self.assertEqual(context["productionServerPid"], 1234)
+            self.assertEqual(context["productionConfigPath"], str(config.resolve()))
+            self.assertEqual(context["apiBase"], "http://localhost:3100")
+            self.assertEqual(calls, [["systemctl", "show", "paperclip", "-p", "MainPID", "--value"]])
+            for invalid in ({}, {**hook, "productionConfigPath": str(root.parent / "outside")},
+                            {**hook, "productionEnvFilePath": "relative.env"}):
+                with self.assertRaises(deploy.DeployError):
+                    d._production_probe_context(invalid)
+            d.command = lambda *a, **k: SimpleNamespace(returncode=0, stdout="0\n")
+            with self.assertRaisesRegex(deploy.DeployError, "running production process"):
+                d._production_probe_context(hook)
 
     def test_migration_probe_hook_rejects_unregistered_readonly_declaration(self):
         with tempfile.TemporaryDirectory() as tmp:

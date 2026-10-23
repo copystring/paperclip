@@ -1077,12 +1077,13 @@ class Deployer:
             "activePayloadPath": str(old_target),
             "candidatePayloadPath": str(candidate),
         }
+        context = {**expected, **self._production_probe_context(probe)}
         # The registered script owns its read-only production query and its
         # isolated migration/boot fixture. The deployer passes only this
         # hash-bound context; it never executes SQL from a release manifest.
         with tempfile.TemporaryDirectory(prefix="paperclip-migration-precondition-") as directory:
             context_path = Path(directory) / "context.json"
-            context_path.write_text(self._canonical_json(expected) + "\n", encoding="utf-8")
+            context_path.write_text(self._canonical_json(context) + "\n", encoding="utf-8")
             context_path.chmod(0o600)
             result = self.command(["/usr/bin/node", "--experimental-vm-modules", str(path), str(context_path)],
                                   check=True, capture_output=True, text=True, timeout=180)
@@ -1104,6 +1105,28 @@ class Deployer:
                 candidate_boot.get("databaseInventorySha256") != migration_diff["candidateInventorySha256"]):
             raise DeployError("Migration probe did not prove live preconditions and both runtime boots")
         return receipt
+
+    def _production_probe_context(self, probe: dict):
+        # These are locally registered configuration paths, never release data.
+        paths = {}
+        for key in ("productionConfigPath", "productionEnvFilePath"):
+            value = probe.get(key)
+            if not isinstance(value, str) or not Path(value).is_absolute():
+                raise DeployError("Migration probe production configuration is not registered")
+            path = Path(value)
+            if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(self.home.resolve()):
+                raise DeployError("Migration probe production configuration is outside the registered home")
+            paths[key] = str(path.resolve())
+        service = self.c.get("serviceName", "paperclip")
+        if not isinstance(service, str) or not re.fullmatch(r"[A-Za-z0-9_.@-]+", service):
+            raise DeployError("Migration probe service identity is invalid")
+        result = self.command(["systemctl", "show", service, "-p", "MainPID", "--value"],
+                              check=True, capture_output=True, text=True, timeout=10)
+        pid = (result.stdout or "").strip()
+        if not re.fullmatch(r"[1-9][0-9]*", pid):
+            raise DeployError("Migration probe requires a running production process")
+        return {**paths, "productionServerPid": int(pid), "paperclipHome": str(self.home.resolve()),
+                "apiBase": self.api}
 
     def load_token(self):
         auth_path = Path(self.c.get("authFile", str(self.home / ".paperclip/auth.json")))
