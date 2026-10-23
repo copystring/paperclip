@@ -8570,7 +8570,10 @@ describeEmbeddedPostgres("tool access service", () => {
       const fixture = await connectWorkspace("customer");
       const gmail = (await fixture.gateway.listToolsForSession(fixture.session.token)).find((tool) => tool.upstreamToolName === "gmail__get_message")!;
       fixture.unavailable.add("gmailmcp.googleapis.com");
-      await expect(fixture.gateway.executeTool({ sessionToken: fixture.session.token, tool: gmail.name, parameters: {} })).rejects.toMatchObject({ reasonCode: "mcp_remote_status" });
+      await expect(fixture.gateway.executeTool({ sessionToken: fixture.session.token, tool: gmail.name, parameters: {} })).rejects.toMatchObject({
+        reasonCode: "mcp_remote_status",
+        details: { status: 503, execution: { response: { httpStatus: 503 } } },
+      });
       expect((await fixture.service.getConnection(fixture.connected.connectionId)).healthStatus).toBe("ok");
       const doc = (await fixture.gateway.listToolsForSession(fixture.session.token)).find((tool) => tool.upstreamToolName === "docs__read_doc")!;
       expect(doc).toBeTruthy();
