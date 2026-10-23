@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "../errors.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { mcpDiscoveryHttpFailure, retainMcpConnectionFailure } from "../services/mcp-connection-failure.js";
+import { ToolGatewayHttpError } from "../services/tool-gateway.js";
 
 const recordResponsibleUserDenialOnActiveRunMock = vi.hoisted(() => vi.fn());
 const captureExceptionMock = vi.hoisted(() => vi.fn());
@@ -395,5 +396,67 @@ describe("errorHandler", () => {
         code: "RESPONSIBLE_USER_UNAUTHORIZED",
       },
     );
+  });
+
+  it("returns ToolGatewayHttpError status and reason code without reporting a client rejection as a crash", () => {
+    const req = makeReq();
+    const res = makeRes() as any;
+    const err = new ToolGatewayHttpError(
+      409,
+      "Tool action request requires formal board approval before execution",
+      "formal_approval_required",
+      { approvalId: "approval-1" },
+    );
+
+    errorHandler(err, req, res, vi.fn() as unknown as NextFunction);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({
+      error: "Tool action request requires formal board approval before execution",
+      reasonCode: "formal_approval_required",
+      details: { approvalId: "approval-1" },
+    });
+    expect(res.err).toBeUndefined();
+    expect(res.__errorContext).toBeUndefined();
+    expect(captureExceptionMock).not.toHaveBeenCalled();
+    expect(telemetryMocks.trackErrorHandlerCrash).not.toHaveBeenCalled();
+  });
+
+  it("still reports a ToolGatewayHttpError as a server error when its status is >= 500", () => {
+    const req = makeReq();
+    const res = makeRes() as any;
+    const err = new ToolGatewayHttpError(502, "Remote MCP tool call timed out", "tool_timeout");
+
+    errorHandler(err, req, res, vi.fn() as unknown as NextFunction);
+
+    expect(res.status).toHaveBeenCalledWith(502);
+    expect(res.err).toBe(err);
+    expect(res.__errorContext?.error?.message).toBe("Remote MCP tool call timed out");
+    expect(captureExceptionMock).toHaveBeenCalledWith(err);
+  });
+
+  it("sanitizes a ToolGatewayHttpError reason code on secret-sensitive setup routes", () => {
+    const req = {
+      ...makeReq(),
+      method: "POST",
+      originalUrl: "/api/chat-endpoints/endpoint-1/setup",
+      body: { credentials: { botToken: "setup-reason-token" } },
+    } as unknown as Request;
+    const res = makeRes() as any;
+    const err = new ToolGatewayHttpError(
+      409,
+      "Rejected setup-reason-token",
+      "setup-reason-token",
+      { explanation: "Rejected setup-reason-token" },
+    );
+
+    errorHandler(err, req, res, vi.fn() as unknown as NextFunction);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({
+      error: "Rejected [REDACTED]",
+      reasonCode: "[REDACTED]",
+      details: { explanation: "Rejected [REDACTED]" },
+    });
   });
 });
