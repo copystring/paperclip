@@ -109,7 +109,12 @@
     {
       "number": 25,
       "repository": "copystring/paperclip",
-      "head": "ce28fe3ff5fcf5c65baa49e037583e8bec77fbc4"
+      "head": "1e6cfb3bbe1276e5991920fe19fdbb63ed589ae3"
+    },
+    {
+      "number": 17393,
+      "repository": "paperclipai/paperclip",
+      "head": "2ee4f9e7a9c8cca1642f58deac9174d420757ee7"
     }
   ]
 }
