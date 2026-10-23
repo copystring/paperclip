@@ -1,5 +1,5 @@
 diff --git a/server/src/__tests__/heartbeat-case-handoff.test.ts b/server/src/__tests__/heartbeat-case-handoff.test.ts
-index 9faa3946f..eac726d6e 100644
+index 9faa3946f..58894833d 100644
 --- a/server/src/__tests__/heartbeat-case-handoff.test.ts
 +++ b/server/src/__tests__/heartbeat-case-handoff.test.ts
 @@ -5,7 +5,7 @@ import { rm } from "node:fs/promises";
@@ -33,16 +33,26 @@ index 9faa3946f..eac726d6e 100644
      expect(source.resultJson).not.toHaveProperty("caseHandoffExecutionReleased");
      expect(await isCaseHandoffSourceReleased(db, { runId: sourceRunId, issueId: f.issueId })).toBe(true);
      const [releasedSource] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId));
-@@ -354,6 +358,34 @@ describe("durable case handoff queue admission", () => {
+@@ -354,6 +358,46 @@ describe("durable case handoff queue admission", () => {
      expect(handoff.state).toBe("awaiting_release");
      expect(handoff.nextAttemptAt.getTime()).toBeLessThanOrEqual(Date.now());
    });
 +  it.each(["dispatch_claimed", "runtime_identity", "active_lease", "foreign_handoff", "operator_stop",
-+    "wrong_cancellation_initiator", "malformed_cancellation"] as const)(
++    "wrong_cancellation_initiator", "malformed_cancellation", "stale_patch_erases_provider_evidence",
++    "current_operator_cancellation", "current_wrong_startup_cancellation"] as const)(
 +    "does not record queued case-handoff bootstrap evidence after %s", async scenario => {
 +      const f = await fixture(), sourceRunId = randomUUID(), startedAt = new Date();
 +      const [source] = await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId: f.companyId, agentId: f.agentId,
-+        status: "queued", runtimeMode: "legacy", contextSnapshot: { issueId: f.issueId }, responsibleUserId: f.userId }).returning();
++        status: "queued", runtimeMode: "legacy", contextSnapshot: { issueId: f.issueId }, responsibleUserId: f.userId,
++        resultJson: scenario === "stale_patch_erases_provider_evidence"
++          ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: true } }
++          : scenario === "current_operator_cancellation"
++            ? { cancellation: { source: "operator", expected: true, initiator: { type: "user" }, reason: "operator stop",
++                recordedAt: startedAt.toISOString() } }
++            : scenario === "current_wrong_startup_cancellation"
++              ? { startupCancellation: { errorCode: "agent_paused" } }
++              : null,
++      }).returning();
 +      await db.update(issues).set({ executionRunId: sourceRunId }).where(eq(issues.id, f.issueId));
 +      await db.update(caseHandoffs).set({ sourceRunId, state: "awaiting_release", createdAt: new Date(Date.now() - 31_000) })
 +        .where(eq(caseHandoffs.id, f.handoffId));
@@ -57,6 +67,8 @@ index 9faa3946f..eac726d6e 100644
 +        cancellation: { source: scenario === "operator_stop" ? "operator" : "control_plane", expected: true,
 +          initiator: { type: scenario === "wrong_cancellation_initiator" ? "user" : "system" },
 +          reason: "fixture stop", recordedAt: scenario === "malformed_cancellation" ? "invalid" : startedAt.toISOString() },
++        ...(scenario === "stale_patch_erases_provider_evidence"
++          ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } : {}),
 +        startupCancellation: { errorCode: "issue_reassigned", requestedAt: startedAt.toISOString() } };
 +      const terminal = await terminalizeLegacyExecution({ db, run: source!, status: "cancelled",
 +        fromStatuses: ["queued", "running"], patch: { finishedAt: startedAt,
@@ -91,7 +103,7 @@ index 675f46d1e..11d734d96 100644
            : [];
          const confirmedAssignmentHandoffWakeId = assignmentHandoffWake?.id ?? null;
 diff --git a/server/src/services/legacy-execution-recovery.ts b/server/src/services/legacy-execution-recovery.ts
-index cec15ef9b..c82c6cce0 100644
+index cec15ef9b..c10e88ba7 100644
 --- a/server/src/services/legacy-execution-recovery.ts
 +++ b/server/src/services/legacy-execution-recovery.ts
 @@ -1,5 +1,5 @@
@@ -110,7 +122,7 @@ index cec15ef9b..c82c6cce0 100644
  import { issueRecoveryActionService } from "./issue-recovery-actions.js";
  import { parseIssueExecutionState } from "./issue-execution-policy.js";
  import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
-@@ -107,6 +107,62 @@ export async function terminalizeLegacyExecution(input: {
+@@ -107,6 +107,71 @@ export async function terminalizeLegacyExecution(input: {
      )).for("update");
      if (!current || (current.runtimeMode !== "legacy" && !(input.recordRestoreFailureOnly && current.runtimeMode === "native")) ||
          (!input.recordRestoreFailureOnly && !(input.fromStatuses ?? [run.status]).includes(current.status))) return null;
@@ -146,21 +158,30 @@ index cec15ef9b..c82c6cce0 100644
 +        current.processPid, current.processGroupId, current.nativeIssueId, current.nativeSessionId,
 +        current.sessionIdAfter, current.controllerBootId, current.controllerLeaseExpiresAt,
 +        current.executionStage, current.runnerInstanceId, current.logRef].every(value => value === null);
-+      const cancellationInitiator = cancellation?.initiator as Record<string, unknown> | undefined;
-+      const cancellationRecordedAt = typeof cancellation?.recordedAt === "string"
-+        ? Date.parse(cancellation.recordedAt)
-+        : Number.NaN;
-+      const validControlPlaneCancellation = cancellation?.source === "control_plane" &&
-+        cancellation.expected === true && cancellationInitiator?.type === "system" &&
-+        typeof cancellation.reason === "string" && cancellation.reason.trim().length > 0 &&
-+        Number.isFinite(cancellationRecordedAt);
-+      const unclaimedWithoutStopFences = isUnclaimedRun({
++      const isValidControlPlaneCancellation = (value: unknown) => {
++        const candidate = value as Record<string, unknown> | undefined;
++        const initiator = candidate?.initiator as Record<string, unknown> | undefined;
++        const recordedAt = typeof candidate?.recordedAt === "string" ? Date.parse(candidate.recordedAt) : Number.NaN;
++        return candidate?.source === "control_plane" && candidate.expected === true &&
++          initiator?.type === "system" && typeof candidate.reason === "string" &&
++          candidate.reason.trim().length > 0 && Number.isFinite(recordedAt);
++      };
++      const currentCancellation = current.resultJson?.cancellation;
++      const currentStartupCancellation = current.resultJson?.startupCancellation as Record<string, unknown> | undefined;
++      const mergedStartupCancellation = result.startupCancellation as Record<string, unknown> | undefined;
++      const validControlPlaneCancellation = isValidControlPlaneCancellation(cancellation) &&
++        (!currentCancellation || isValidControlPlaneCancellation(currentCancellation)) &&
++        (!currentStartupCancellation || currentStartupCancellation.errorCode === "issue_reassigned") &&
++        mergedStartupCancellation?.errorCode === "issue_reassigned";
++      const hasNoProviderWork = (resultJson: typeof current.resultJson) => isUnclaimedRun({
 +        ...current,
-+        resultJson: { ...result, startupCancellation: undefined, cancellation: undefined },
++        resultJson: { ...resultJson, startupCancellation: undefined, cancellation: undefined },
 +      });
++      const unclaimedCurrent = hasNoProviderWork(current.resultJson);
++      const unclaimedMerged = hasNoProviderWork(result);
 +      if (handoff && handoff.id === result.caseHandoffId &&
 +          !activeLease && hasNoExecutionIdentity &&
-+          unclaimedWithoutStopFences && validControlPlaneCancellation &&
++          unclaimedCurrent && unclaimedMerged && validControlPlaneCancellation &&
 +          result.caseHandoffYieldStop === true && result.reassignmentStopRequested === true &&
 +          result.reassignmentStopConfirmed === true && startupCancellation?.errorCode === "issue_reassigned" &&
 +          cancellation?.source === "control_plane" && cancellation.expected === true &&
