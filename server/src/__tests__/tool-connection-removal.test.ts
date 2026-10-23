@@ -45,6 +45,7 @@ import { toolAccessRoutes } from "../routes/tool-access.js";
 import { secretService } from "../services/secrets.js";
 import { localEncryptedProvider } from "../secrets/local-encrypted-provider.js";
 import { errorHandler } from "../middleware/index.js";
+import { mcpHttpHandshakeResponse } from "./helpers/mcp-http-handshake.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -95,9 +96,8 @@ function headerRecord(init: RequestInit | undefined): Record<string, string> {
 }
 
 /**
- * The narrowest endpoint that satisfies a header-authenticated connect: it lists
- * tools when the expected header arrives and 401s otherwise, which is all the
- * catalog refresh and health check need.
+ * A header-authenticated MCP endpoint: initialization precedes discovery, and
+ * every protocol phase rejects the wrong credential.
  */
 function installMcpFixture(requiredHeader: { name: string; value: string }) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
@@ -108,7 +108,10 @@ function installMcpFixture(requiredHeader: { name: string; value: string }) {
       if (headers[requiredHeader.name.toLowerCase()] !== requiredHeader.value) {
         return jsonResponse({ error: "unauthorized" }, 401);
       }
-      return jsonResponse({ jsonrpc: "2.0", id: "paperclip-catalog-refresh", result: { tools: FIXTURE_TOOLS } });
+      const payload = JSON.parse(String(init?.body ?? "{}"));
+      const handshake = mcpHttpHandshakeResponse(payload);
+      if (handshake) return handshake;
+      return jsonResponse({ jsonrpc: "2.0", id: payload.id, result: { tools: FIXTURE_TOOLS } });
     }
     return jsonResponse({ error: "not_found" }, 404);
   });
