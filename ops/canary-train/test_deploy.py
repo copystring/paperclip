@@ -815,7 +815,7 @@ class CandidateRetentionTests(unittest.TestCase):
         }))
         return cli, candidates
 
-    def test_zero_retention_prunes_history_only_after_active_health_readback(self):
+    def test_run_with_no_release_keeps_existing_stage_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _, candidates = self.make_candidates(root)
@@ -829,10 +829,67 @@ class CandidateRetentionTests(unittest.TestCase):
             result = d.run("check")
 
             self.assertEqual(result["state"], "waiting")
+            self.assertTrue(all(path.exists() for path in candidates))
+
+    def test_run_up_to_date_prunes_history_but_preserves_exact_reuse_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cli, candidates = self.make_candidates(root)
+            install_path = cli / "install.json"
+            install = json.loads(install_path.read_text())
+            install["patchedRelease"] = {"tag": "current-tag", "patchedCommit": "1" * 40}
+            install_path.write_text(json.dumps(install))
+            target = candidates[4]
+            target.rename(root / ".paperclip/cli/installs/npm/candidate-v-patched-77-1")
+            target = root / ".paperclip/cli/installs/npm/candidate-v-patched-77-1"
+            d = deployer(root, retainedInactiveCandidates=0)
+            d._verify_active_fingerprint = lambda current, install: None
+            d._verify_active = lambda version: None
+            d.find_release = lambda: ({"tag_name": "current-tag"}, {
+                "version": "candidate-v", "runId": "77", "runAttempt": 1,
+            }, {})
+            d._write_status = lambda data: None
+
+            result = d.run("check")
+
+            self.assertTrue(result["current"])
             self.assertTrue(candidates[0].exists())
-            self.assertTrue(all(not path.exists() for path in candidates[1:]))
-            install = json.loads((root / ".paperclip/cli/install.json").read_text())
-            self.assertEqual(install["previous"], [{"payloadPath": str(candidates[1])}])
+            self.assertTrue(target.exists(), "up-to-date prune must preserve the exact reusable target")
+            self.assertFalse(candidates[1].exists())
+            self.assertFalse(candidates[2].exists())
+            self.assertFalse(candidates[3].exists())
+
+    def test_run_keeps_history_if_pointer_or_manifest_changes_after_health(self):
+        for mutation in ("pointer", "manifest"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                cli, candidates = self.make_candidates(root)
+                install_path = cli / "install.json"
+                install = json.loads(install_path.read_text())
+                install["patchedRelease"] = {"tag": "current-tag", "patchedCommit": "1" * 40}
+                install_path.write_text(json.dumps(install))
+                d = deployer(root, retainedInactiveCandidates=0)
+                d._verify_active_fingerprint = lambda current, install: None
+
+                def change_after_health(version):
+                    if mutation == "pointer":
+                        current = cli / "current"
+                        current.unlink()
+                        current.symlink_to(candidates[2])
+                    else:
+                        changed = json.loads(install_path.read_text())
+                        changed["patchedRelease"]["patchedCommit"] = "2" * 40
+                        install_path.write_text(json.dumps(changed))
+
+                d._verify_active = change_after_health
+                d.find_release = lambda: ({"tag_name": "current-tag"}, {
+                    "version": "candidate-v", "runId": "77", "runAttempt": 1,
+                }, {})
+                d._write_status = lambda data: None
+
+                d.run("check")
+
+                self.assertTrue(candidates[1].exists(), "history is the rollback copy if active identity changed")
 
     def test_zero_retention_preserves_history_after_failed_health_readback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1254,7 +1311,6 @@ class ActivationTests(unittest.TestCase):
             _, old, candidate, _, _ = self.make_install(root)
             d = self.configured(root, lambda *a, **k: SimpleNamespace(returncode=1))
             d.retained_inactive_candidates = 0
-            d._active_health_verified_for_prune = True
             item = self.manifest()
             item.update({"runId": "42", "runAttempt": 1, "archiveSha256": "a" * 64})
             # A deterministic receipt covers post-hook file bytes and all

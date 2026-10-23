@@ -234,7 +234,7 @@ class Deployer:
         if type(retained_inactive) is not int or retained_inactive < 0:
             raise DeployError("Inactive candidate retention must be a non-negative integer")
         self.retained_inactive_candidates = retained_inactive
-        self._active_health_verified_for_prune = False
+        self._active_health_verified_identity = None
         self.http = http or Http()
         self.command = command
         self.clock = clock
@@ -626,8 +626,20 @@ class Deployer:
             # the exact active install has passed its version/commit health
             # readback. Until then, an interrupted prior cutover may still need
             # one of those payloads for rollback.
+            active_identity = None
+            install_payload = install.get("payloadPath")
+            if isinstance(install_payload, str):
+                try:
+                    if Path(install_payload).resolve(strict=True) == current:
+                        active_identity = (
+                            str(current), install.get("version"),
+                            (install.get("patchedRelease") or {}).get("patchedCommit"),
+                        )
+                except OSError:
+                    pass
             preserve_history = (self.retained_inactive_candidates != 0 or
-                                not self._active_health_verified_for_prune)
+                                active_identity is None or
+                                active_identity != self._active_health_verified_identity)
             if preserve_history:
                 for entry in install.get("previous", []):
                     if isinstance(entry, dict) and isinstance(entry.get("payloadPath"), str):
@@ -1523,23 +1535,43 @@ class Deployer:
         if not self._wait_health(expected_version, receipt.get("patchedCommit"), timeout=5):
             raise DeployError("Paperclip health readback failed")
 
+    def _active_install_identity(self):
+        install = self._read_install()
+        current = self.current_link.resolve(strict=True)
+        payload = install.get("payloadPath")
+        if not isinstance(payload, str) or Path(payload).resolve(strict=True) != current:
+            raise DeployError("Active symlink and install manifest disagree")
+        receipt = install.get("patchedRelease") or {}
+        version = install.get("version")
+        commit = receipt.get("patchedCommit")
+        if (not isinstance(version, str) or not version or not isinstance(commit, str) or
+                not re.fullmatch(r"[0-9a-f]{40}", commit)):
+            raise DeployError("Active install has no exact version and patched-commit identity")
+        return (str(current), version, commit)
+
+    def _verify_active_for_prune(self, expected_version: str):
+        self._active_health_verified_identity = None
+        before = self._active_install_identity()
+        self._verify_active(expected_version)
+        after = self._active_install_identity()
+        if before != after:
+            raise DeployError("Active install changed during health verification")
+        self._active_health_verified_identity = after
+
     def run(self, mode="check"):
         install = self._read_install()
         current = self.current_link.resolve(strict=True)
         self._verify_active_fingerprint(current, install)
-        self._active_health_verified_for_prune = False
+        self._active_health_verified_identity = None
         if self.retained_inactive_candidates == 0:
             # Health must attest the install manifest's version and patched
             # commit before recorded rollback payloads become eligible for
             # retention cleanup. A failed/unavailable health read is fail-safe:
             # keep history and continue through the existing update path.
             try:
-                self._verify_active(install.get("version"))
+                self._verify_active_for_prune(install.get("version"))
             except Exception:
-                pass
-            else:
-                self._active_health_verified_for_prune = True
-                self._prune_owned_candidates()
+                self._active_health_verified_identity = None
         try:
             release, manifest, assets = self.find_release()
         except DeployError as exc:
@@ -1551,6 +1583,11 @@ class Deployer:
         manifest["tag"] = release["tag_name"]
         current_tag = (install.get("patchedRelease") or {}).get("tag")
         if current_tag == release["tag_name"]:
+            if self.retained_inactive_candidates == 0:
+                stem = f"{manifest['version']}-patched-{manifest['runId']}-{manifest['runAttempt']}"
+                target = self.installs / stem
+                reusable_target = target if target.is_dir() and not target.is_symlink() else None
+                self._prune_owned_candidates(reusable_target)
             self._write_status({"state": "current", "tag": release["tag_name"], "version": manifest["version"]})
             return {"available": True, "current": True, "tag": release["tag_name"], "version": manifest["version"]}
         if mode == "check":
@@ -1567,7 +1604,10 @@ class Deployer:
             # activate() returned only after candidate health verification and
             # its rollback window closed. Preserve the active target; release
             # older history payloads while retaining their install metadata.
-            self._active_health_verified_for_prune = True
+            try:
+                self._verify_active_for_prune(manifest["version"])
+            except Exception:
+                self._active_health_verified_identity = None
             self._prune_owned_candidates(candidate)
         return result
 
