@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { sql } from "drizzle-orm";
 import {
@@ -13,6 +13,7 @@ import {
   environments,
   executionWorkspaces,
   goals,
+  heartbeatRunEvents,
   heartbeatRuns,
   instanceSettings,
   issueComments,
@@ -39,6 +40,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { instanceSettingsService } from "../services/instance-settings.ts";
+import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
 import {
   clampIssueListLimit,
   deriveIssueCommentRunLogAttribution,
@@ -6611,6 +6613,7 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
@@ -6812,6 +6815,93 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
       status: "in_review",
       assigneeAgentId: reviewerAgentId,
     });
+  });
+
+  it("durably revokes the current run on a board handoff without blocking a fresh run", async () => {
+    const seeded = await seedOwnershipIssue({ checkoutStatus: "running" });
+    const original = await svc.getById(seeded.issueId);
+    const reviewerAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: reviewerAgentId,
+      companyId: original!.companyId,
+      name: "Board handoff reviewer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.update(heartbeatRuns).set({
+      // The issue's execution/checkout pointers prove this run's association
+      // even when its lagging context snapshot has already lost issueId.
+      contextSnapshot: { preservedContext: "keep-me" },
+    }).where(eq(heartbeatRuns.id, seeded.staleRunId));
+
+    await svc.update(seeded.issueId, {
+      assigneeAgentId: reviewerAgentId,
+      assigneeUserId: null,
+      actorUserId: "local-board",
+    });
+    const [revokedRun] = await db.select().from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, seeded.staleRunId));
+    expect(revokedRun!.contextSnapshot).toMatchObject({ preservedContext: "keep-me" });
+    const [revocationEvent] = await db.select().from(heartbeatRunEvents).where(and(
+      eq(heartbeatRunEvents.companyId, original!.companyId),
+      eq(heartbeatRunEvents.runId, seeded.staleRunId),
+      eq(heartbeatRunEvents.agentId, seeded.assigneeAgentId),
+      eq(heartbeatRunEvents.eventType, "issue.legacy_run_ownership_revoked"),
+    ));
+    expect(revocationEvent?.payload).toMatchObject({
+      issueId: seeded.issueId,
+      ownerAgentId: seeded.assigneeAgentId,
+    });
+    await expect(assertLegacyRunTaskOwnership(db, {
+      id: seeded.staleRunId,
+      companyId: original!.companyId,
+      runtimeMode: "legacy",
+      agentId: seeded.assigneeAgentId,
+    }, {
+      id: randomUUID(),
+      companyId: original!.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      assigneeUserId: null,
+    })).resolves.toBeUndefined();
+
+    // A delayed writer can replace the entire context with its stale in-memory
+    // copy. The event is independent of that snapshot and remains authoritative.
+    await db.update(heartbeatRuns).set({
+      contextSnapshot: { issueId: seeded.issueId, preservedContext: "stale-snapshot" },
+    }).where(eq(heartbeatRuns.id, seeded.staleRunId));
+
+    // Returning the assignment to the original agent must not restore a run
+    // whose write authority was revoked by the earlier board handoff.
+    await svc.update(seeded.issueId, {
+      assigneeAgentId: seeded.assigneeAgentId,
+      assigneeUserId: null,
+      actorUserId: "local-board",
+    });
+    await expect(svc.update(seeded.issueId, {
+      title: "Stale run after reassignment back",
+      actorAgentId: seeded.assigneeAgentId,
+      actorRunId: seeded.staleRunId,
+    })).rejects.toMatchObject({ status: 403, details: { code: "issue_handed_off" } });
+
+    const freshRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: freshRunId,
+      companyId: original!.companyId,
+      agentId: seeded.assigneeAgentId,
+      status: "running",
+      invocationSource: "manual",
+      startedAt: new Date(),
+      contextSnapshot: { issueId: seeded.issueId },
+    });
+    await expect(svc.update(seeded.issueId, {
+      title: "Fresh run can write",
+      actorAgentId: seeded.assigneeAgentId,
+      actorRunId: freshRunId,
+    })).resolves.toMatchObject({ title: "Fresh run can write" });
   });
 
   it("lets the current assignee adopt a stale terminal checkout owner", async () => {

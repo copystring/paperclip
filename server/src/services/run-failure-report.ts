@@ -72,13 +72,22 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function isPreDispatchSetupSnapshot(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
+  // Legacy terminalization marks a run `settling` before this async reporter
+  // observes the row. Preserve setup classification across that lifecycle
+  // transition while rejecting executing/settled snapshots without fresh
+  // pre-provider evidence.
+  return options.phase === "setup" &&
+    (run.executionStage === "preparing" || run.executionStage === "settling");
+}
+
 /** An owned AI selection rejection before dispatch, not its broad catch wrapper. */
 function isAiConnectionSelectionBlocker(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
   // Resumed native input may already have provider effects, even during preparation.
   if (run.runtimeMode === "native" && asRecord(run.runnerProfileJson)?.nativeExecutionInput !== undefined) return false;
   if (
     run.status !== "failed" || run.errorCode !== "configuration_incomplete" ||
-    run.executionStage !== "preparing" || options.phase !== "setup" ||
+    !isPreDispatchSetupSnapshot(run, options) ||
     run.exitCode != null || run.signal != null
   ) return false;
   const configuration = asRecord(run.resultJson?.configurationIncomplete);
@@ -93,8 +102,7 @@ function isMissingSecretConfigurationBlocker(run: HeartbeatRun, options: RunFail
   if (
     run.status !== "failed" ||
     run.errorCode !== "configuration_incomplete" ||
-    run.executionStage !== "preparing" ||
-    options.phase !== "setup" ||
+    !isPreDispatchSetupSnapshot(run, options) ||
     run.exitCode != null ||
     run.signal != null
   ) return false;
@@ -130,7 +138,7 @@ function isMissingSecretConfigurationBlocker(run: HeartbeatRun, options: RunFail
 function isLocalPathWorkspaceConfigurationBlocker(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
   if (
     run.status !== "failed" || run.errorCode !== "workspace_validation_failed" ||
-    run.executionStage !== "preparing" || options.phase !== "setup" ||
+    !isPreDispatchSetupSnapshot(run, options) ||
     run.exitCode != null || run.signal != null
   ) return false;
 
@@ -149,7 +157,7 @@ function isLocalPathWorkspaceConfigurationBlocker(run: HeartbeatRun, options: Ru
 function isRestrictedWorkspaceSourceBlocker(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
   if (
     run.status !== "failed" || run.errorCode !== "configuration_incomplete" ||
-    run.executionStage !== "preparing" || options.phase !== "setup" ||
+    !isPreDispatchSetupSnapshot(run, options) ||
     run.exitCode != null || run.signal != null
   ) return false;
   const configuration = asRecord(run.resultJson?.configurationIncomplete);
@@ -161,8 +169,8 @@ function isRestrictedWorkspaceSourceBlocker(run: HeartbeatRun, options: RunFailu
 /** Only the managed-clone producer can attach this bounded pre-dispatch evidence. */
 function isGitConnectionFailure(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
   const connection = readConnectionFailure(run.resultJson?.connectionFailure);
-  if (connection?.provider !== "git" || run.status !== "failed" || run.executionStage !== "preparing" ||
-      options.phase !== "setup" || run.exitCode != null || run.signal != null) return false;
+  if (connection?.provider !== "git" || run.status !== "failed" ||
+      !isPreDispatchSetupSnapshot(run, options) || run.exitCode != null || run.signal != null) return false;
   const recovery = asRecord(run.resultJson?.executionRecovery);
   if (recovery?.kind !== "bootstrap" || recovery.providerWorkStarted !== false) return false;
   const validation = asRecord(run.resultJson?.workspaceValidation);

@@ -720,13 +720,16 @@ describe("OpenCode runtime MCP handoff", () => {
 
     expect(result.exitCode).toBe(0);
     expect(configAtExecution?.permission).toBeUndefined();
-    expect(configAtExecution?.mcp).toMatchObject({
-      PowerShell_on_Felix_PC: {
-        type: "remote",
-        url: "https://paperclip.example/api/mcp/run-1",
-        headers: { Authorization: `Bearer ${secret}` },
-        oauth: false,
-      },
+    const assignedMcp = Object.entries(configAtExecution?.mcp as Record<string, unknown> | undefined ?? {}).find(([, server]) =>
+      typeof server === "object" && server !== null && "url" in server && server.url === "https://paperclip.example/api/mcp/run-1",
+    );
+    expect(assignedMcp).toBeDefined();
+    expect(assignedMcp?.[0]).toMatch(/^paperclip_[A-F0-9]{12}$/);
+    expect(assignedMcp?.[1]).toMatchObject({
+      type: "remote",
+      url: "https://paperclip.example/api/mcp/run-1",
+      headers: { Authorization: `Bearer ${secret}` },
+      oauth: false,
     });
     expect(JSON.stringify({ result, logs: logOutput })).not.toContain(secret);
     await expect(fs.access(configPath)).rejects.toThrow();
