@@ -12927,7 +12927,7 @@ export function issueService(db: Db) {
           onBehalfOfUserId,
           authorType,
           createdByRunId,
-          body: redactedBody,
+          body: publishedBody,
           clientRequestId: options?.clientRequestId ?? null,
           presentation,
           metadata,
