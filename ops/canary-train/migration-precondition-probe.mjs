@@ -398,7 +398,7 @@ async function readProductionDatabaseTarget(context, activeRoot) {
 
   const databaseUrl = resolveDatabaseUrl({
     processEnv: server.env,
-    fileEnv: registeredEnv,
+    fileEnv: runtimeEnv,
     config: config.database ?? {},
   });
   if (databaseUrl) {
