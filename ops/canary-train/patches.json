@@ -34,12 +34,17 @@
     {
       "number": 16520,
       "repository": "paperclipai/paperclip",
-      "head": "a45ef0064d66ed6d90f22d0f1aa1e5b49b75706e"
+      "head": "a45ef0064d66ed6d90f22d0f1aa1e5b49b75706e",
+      "integrationPatch": {
+        "sha256": "a6144d3bc53be9a89d8f934dcde0a872434db56de95a34787004ab34e91f4acb",
+        "path": "backport-16520.patch",
+        "number": 16520
+      }
     },
     {
-      "number": 16680,
-      "repository": "paperclipai/paperclip",
-      "head": "e6803bf0c84e341de6701b15835042064aaf692d"
+      "number": 22,
+      "repository": "copystring/paperclip",
+      "head": "c9a56cb20c10dd28357c60b6af87f863b9e1f7e4"
     },
     {
       "number": 16678,
@@ -48,23 +53,18 @@
       "integrationPatch": {
         "number": 16678,
         "path": "backport-16678.patch",
-        "sha256": "84dd8cdf6498c510c1a01edc7d505e9271e1ea36c696cfbdc40c0b9aadb62e10"
+        "sha256": "6923ac8f7a57bdac5eecbe41ebfc66a38563061ea855e0251e9fa3b40d46dd88"
       }
     },
     {
-      "number": 16718,
-      "repository": "paperclipai/paperclip",
-      "head": "db2c0b20152300fb558f8a1ca0234fa668559a08"
+      "number": 24,
+      "repository": "copystring/paperclip",
+      "head": "39fa2ca6f8c81422e8da11a3ae9b63f145e33581"
     },
     {
       "number": 16719,
       "repository": "paperclipai/paperclip",
       "head": "dd04986e7110d4d8a5ad409532c5fdbcf9ce225e"
-    },
-    {
-      "number": 16723,
-      "repository": "paperclipai/paperclip",
-      "head": "903ba6dc792ba52525e125c153677370d1601b0b"
     },
     {
       "number": 8,
@@ -73,23 +73,43 @@
       "integrationPatch": {
         "number": 8,
         "path": "backport-installed-recovery.patch",
-        "sha256": "965f2cc8b277f3b4687ccbba4ac808ba5fbfb674d87bcd1d297f0b07ee581160"
+        "sha256": "e04dc205e6bc5be79ba74abdf91aae7cc8e6bf378f3a25d8eec5ec4a2c96e414"
       }
     },
     {
       "number": 11,
       "repository": "copystring/paperclip",
-      "head": "1b88cd4a939d1cac00941029b2646c891aba4e65"
+      "head": "1b88cd4a939d1cac00941029b2646c891aba4e65",
+      "integrationPatch": {
+        "number": 11,
+        "path": "backport-11.patch",
+        "sha256": "b7fd57bd6cad6de1651b4a3cc59be96c3446cf4b83d26fefdab9c3a226dd560b"
+      }
     },
     {
       "number": 17018,
       "repository": "paperclipai/paperclip",
-      "head": "a71fe4b329bacac4ee9cc5f8eb258d2458eceae5"
+      "head": "a71fe4b329bacac4ee9cc5f8eb258d2458eceae5",
+      "integrationPatch": {
+        "number": 17018,
+        "path": "backport-17018.patch",
+        "sha256": "ec53273c226de9aeeb791e5b135d33a29ccf85d186561d149484bc05bc7b33de"
+      }
     },
     {
       "number": 19,
       "repository": "copystring/paperclip",
-      "head": "22b12376cc7ab14f9708e03260c1d252a42ca425"
+      "head": "22b12376cc7ab14f9708e03260c1d252a42ca425",
+      "integrationPatch": {
+        "number": 19,
+        "path": "backport-19.patch",
+        "sha256": "f4385879d02d3353411ffa16cd8f8c167fa3e776d9d62a73e861104f2ba891a8"
+      }
+    },
+    {
+      "number": 25,
+      "repository": "copystring/paperclip",
+      "head": "f7ee6b9d0ff6f2e8fea0986d3cfdd65d0aef4c42"
     }
   ]
 }

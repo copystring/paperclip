@@ -1,0 +1,106 @@
+diff --git a/server/src/__tests__/routines-service.test.ts b/server/src/__tests__/routines-service.test.ts
+index 22c40d25aa..c268b71188 100644
+--- a/server/src/__tests__/routines-service.test.ts
++++ b/server/src/__tests__/routines-service.test.ts
+@@ -1327,7 +1327,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
+           payload: { issueId: run.linkedIssueId, mutation: "create" },
+           requestedByActorType: undefined,
+           requestedByActorId: null,
+-          contextSnapshot: { issueId: run.linkedIssueId, source: "routine.dispatch" },
++          contextSnapshot: { issueId: run.linkedIssueId, source: "routine.dispatch", responsibleUserId: run.responsibleUserId },
+         },
+       },
+     ]);
+@@ -1365,6 +1365,30 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
+     expect(inboxIssues.map((issue) => issue.id)).not.toContain(run.linkedIssueId);
+   });
+ 
++  it("pins the resolved execution owner before the routine transaction is visible to the wakeup", async () => {
++    const userId = randomUUID();
++    let wakeOwner: unknown;
++    let routineRunVisible: boolean | undefined;
++    const { routine, svc } = await seedFixture({
++      wakeup: async (_agentId, opts) => {
++        const [issue] = await db.select().from(issues).where(eq(issues.id, String(opts.payload?.issueId)));
++        expect(issue.responsibleUserId).toBe(userId);
++        const [visibleRun] = await db.select().from(routineRuns).where(eq(routineRuns.id, issue.originRunId!));
++        routineRunVisible = Boolean(visibleRun);
++        wakeOwner = opts.contextSnapshot?.responsibleUserId;
++        return null;
++      },
++    });
++
++    const run = await svc.runRoutine(routine.id, { source: "manual" }, { userId });
++
++    expect(run.status).toBe("issue_created");
++    expect(routineRunVisible).toBe(false);
++    expect(wakeOwner).toBe(userId);
++    const [committedRun] = await db.select().from(routineRuns).where(eq(routineRuns.id, run.id));
++    expect(committedRun.responsibleUserId).toBe(userId);
++  });
++
+   it("uses the routine revision responsible-user snapshot for automatic runs", async () => {
+     const { companyId, agentId, projectId, svc } = await seedFixture();
+     const responsibleUserId = randomUUID();
+diff --git a/server/src/services/issue-assignment-wakeup.test.ts b/server/src/services/issue-assignment-wakeup.test.ts
+new file mode 100644
+index 0000000000..b3aa4a41ea
+--- /dev/null
++++ b/server/src/services/issue-assignment-wakeup.test.ts
+@@ -0,0 +1,22 @@
++import { describe, expect, it, vi } from "vitest";
++import { queueIssueAssignmentWakeup } from "./issue-assignment-wakeup.js";
++
++describe("assignment execution identity", () => {
++  it.each([undefined, null, "resolved-user"])("preserves the server-resolved owner %s", async (responsibleUserId) => {
++    const wakeup = vi.fn().mockResolvedValue(null);
++    await queueIssueAssignmentWakeup({
++      heartbeat: { wakeup },
++      issue: { id: "issue", assigneeAgentId: "agent", status: "todo" },
++      reason: "issue_assigned",
++      mutation: "create",
++      contextSource: "test",
++      responsibleUserId,
++    });
++    const context = wakeup.mock.calls[0][1].contextSnapshot;
++    expect(context).toEqual({
++      issueId: "issue",
++      source: "test",
++      ...(responsibleUserId ? { responsibleUserId } : {}),
++    });
++  });
++});
+diff --git a/server/src/services/issue-assignment-wakeup.ts b/server/src/services/issue-assignment-wakeup.ts
+index 96ec5d9631..0887fec431 100644
+--- a/server/src/services/issue-assignment-wakeup.ts
++++ b/server/src/services/issue-assignment-wakeup.ts
+@@ -28,6 +28,9 @@ export function queueIssueAssignmentWakeup(input: {
+   reason: string;
+   mutation: string;
+   contextSource: string;
++  /** Server-resolved execution identity, which may not be visible to a
++   * separate queue connection until the caller's transaction commits. */
++  responsibleUserId?: string | null;
+   requestedByActorType?: "user" | "agent" | "system";
+   requestedByActorId?: string | null;
+   taskKey?: string | null;
+@@ -64,6 +67,7 @@ export function queueIssueAssignmentWakeup(input: {
+       contextSnapshot: {
+         issueId: input.issue.id,
+         source: input.contextSource,
++        ...(input.responsibleUserId ? { responsibleUserId: input.responsibleUserId } : {}),
+         ...(input.taskKey ? { taskKey: input.taskKey } : {}),
+         ...(input.wakeCommentId ? { wakeCommentId: input.wakeCommentId } : {}),
+         ...(input.chatConversationId ? { chatConversationId: input.chatConversationId } : {}),
+diff --git a/server/src/services/routines.ts b/server/src/services/routines.ts
+index a5384e1fc7..c60a33fae7 100644
+--- a/server/src/services/routines.ts
++++ b/server/src/services/routines.ts
+@@ -1946,6 +1946,7 @@ export function routineService(
+           reason: "issue_assigned",
+           mutation: "create",
+           contextSource: "routine.dispatch",
++          responsibleUserId,
+           requestedByActorType: input.source === "schedule" ? "system" : undefined,
+           rethrowOnError: true,
+         });

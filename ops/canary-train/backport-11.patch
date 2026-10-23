@@ -1,0 +1,1695 @@
+diff --git a/packages/adapters/opencode-local/src/server/execute.remote.test.ts b/packages/adapters/opencode-local/src/server/execute.remote.test.ts
+index e6c590b7d..53699142b 100644
+--- a/packages/adapters/opencode-local/src/server/execute.remote.test.ts
++++ b/packages/adapters/opencode-local/src/server/execute.remote.test.ts
+@@ -260,12 +260,17 @@ describe("opencode remote execution", () => {
+       },
+     });
+     expect(stagedMcpConfigs).toHaveLength(1);
+-    expect(stagedMcpConfigs[0]?.mcp).toMatchObject({
+-      Remote_MCP_fixture: {
+-        url: "https://paperclip.example/api/mcp/remote-run",
+-        headers: { Authorization: "Bearer remote-run-secret" },
+-        oauth: false,
+-      },
++    const stagedMcpConfig = stagedMcpConfigs[0]?.mcp as Record<string, unknown> | undefined;
++    const remoteAssignedMcp = Object.entries(stagedMcpConfig ?? {}).find(([, server]) =>
++      typeof server === "object" && server !== null && "url" in server &&
++      server.url === "https://paperclip.example/api/mcp/remote-run",
++    );
++    expect(remoteAssignedMcp).toBeDefined();
++    expect(remoteAssignedMcp?.[0]).toMatch(/^paperclip_[A-F0-9]{12}$/);
++    expect(remoteAssignedMcp?.[1]).toMatchObject({
++      url: "https://paperclip.example/api/mcp/remote-run",
++      headers: { Authorization: "Bearer remote-run-secret" },
++      oauth: false,
+     });
+     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledTimes(1);
+     expect(syncDirectoryToSsh).toHaveBeenCalledTimes(2);
+diff --git a/packages/adapters/opencode-local/src/server/execute.test.ts b/packages/adapters/opencode-local/src/server/execute.test.ts
+index 0836f0b14..ef0149c1e 100644
+--- a/packages/adapters/opencode-local/src/server/execute.test.ts
++++ b/packages/adapters/opencode-local/src/server/execute.test.ts
+@@ -720,13 +720,16 @@ describe("OpenCode runtime MCP handoff", () => {
+ 
+     expect(result.exitCode).toBe(0);
+     expect(configAtExecution?.permission).toBeUndefined();
+-    expect(configAtExecution?.mcp).toMatchObject({
+-      PowerShell_on_Felix_PC: {
+-        type: "remote",
+-        url: "https://paperclip.example/api/mcp/run-1",
+-        headers: { Authorization: `Bearer ${secret}` },
+-        oauth: false,
+-      },
++    const assignedMcp = Object.entries(configAtExecution?.mcp as Record<string, unknown> | undefined ?? {}).find(([, server]) =>
++      typeof server === "object" && server !== null && "url" in server && server.url === "https://paperclip.example/api/mcp/run-1",
++    );
++    expect(assignedMcp).toBeDefined();
++    expect(assignedMcp?.[0]).toMatch(/^paperclip_[A-F0-9]{12}$/);
++    expect(assignedMcp?.[1]).toMatchObject({
++      type: "remote",
++      url: "https://paperclip.example/api/mcp/run-1",
++      headers: { Authorization: `Bearer ${secret}` },
++      oauth: false,
+     });
+     expect(JSON.stringify({ result, logs: logOutput })).not.toContain(secret);
+     await expect(fs.access(configPath)).rejects.toThrow();
+diff --git a/packages/adapters/opencode-local/src/server/runtime-config.test.ts b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
+index 2bb1c96b7..618af224e 100644
+--- a/packages/adapters/opencode-local/src/server/runtime-config.test.ts
++++ b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
+@@ -975,4 +975,212 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+     expect(prepared.notes).toEqual([]);
+     await prepared.cleanup();
+   });
++
++  it.each([false, true])("adds run-scoped MCP servers without changing permission policy (skip=%s)", async (skip) => {
++    const configHome = await makeConfigHome({
++      permission: { bash: "ask", "mcp__existing__write": "deny" },
++      mcp: {
++        "paperclip-assigned": { type: "remote", url: "https://user.example/mcp", enabled: true },
++        existing: { type: "remote", url: "https://existing.example/mcp", enabled: true },
++      },
++      provider: { custom: { models: { "example/model": {} } } },
++      small_model: "example/model",
++    });
++    const token = "run-scoped-fixture-secret";
++    const prepared = await prepareOpenCodeRuntimeConfig({
++      env: { XDG_CONFIG_HOME: configHome },
++      config: { dangerouslySkipPermissions: skip },
++      runtimeMcp: [
++        { name: "paperclip-assigned", connectionId: `assignment:${"a".repeat(64)}`, url: "https://paperclip.example/mcp/one", token },
++        { name: "paperclip-assigned", connectionId: `assignment:${"b".repeat(64)}`, url: "https://paperclip.example/mcp/two", token: "second-run-token" },
++      ],
++    });
++    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
++
++    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
++    const runtimeConfig = JSON.parse(await fs.readFile(runtimeConfigPath, "utf8")) as {
++      mcp: Record<string, unknown>;
++      permission?: unknown;
++      provider?: unknown;
++      small_model?: unknown;
++    };
++    expect(runtimeConfig.mcp).toMatchObject({
++      "paperclip-assigned": { url: "https://user.example/mcp" },
++      existing: { url: "https://existing.example/mcp" },
++    });
++    const assignedEntries = Object.entries(runtimeConfig.mcp).filter(([, server]) =>
++      typeof server === "object" && server !== null && "url" in server &&
++      (server.url === "https://paperclip.example/mcp/one" || server.url === "https://paperclip.example/mcp/two"),
++    );
++    expect(assignedEntries).toHaveLength(2);
++    const firstServer = assignedEntries.find(([, server]) =>
++      typeof server === "object" && server !== null && "url" in server && server.url === "https://paperclip.example/mcp/one",
++    );
++    const secondServer = assignedEntries.find(([, server]) =>
++      typeof server === "object" && server !== null && "url" in server && server.url === "https://paperclip.example/mcp/two",
++    );
++    expect(firstServer?.[1]).toMatchObject({
++      type: "remote", enabled: true, oauth: false, timeout: 30_000,
++      url: "https://paperclip.example/mcp/one",
++      headers: { Authorization: `Bearer ${token}` },
++    });
++    expect(secondServer?.[1]).toMatchObject({
++      type: "remote", url: "https://paperclip.example/mcp/two",
++      headers: { Authorization: "Bearer second-run-token" },
++    });
++    const generatedNames = assignedEntries.map(([name]) => name);
++    expect(generatedNames).toHaveLength(2);
++    expect(generatedNames.every((name) => /^paperclip-assigned(?:_\d+)?$/.test(name) && name.length <= 22)).toBe(true);
++    expect(new Set(generatedNames).size).toBe(generatedNames.length);
++    const gatewayMetaActionNames = [
++      `mcp.app-gallery-files:${"read_sensitive_metadata".padEnd(103 - "mcp.app-gallery-files:".length, "x")}`,
++      `mcp.app-gallery-files:${"update_sensitive_metadata".padEnd(104 - "mcp.app-gallery-files:".length, "y")}`,
++    ];
++    const composedToolNames = generatedNames.flatMap((serverName) =>
++      gatewayMetaActionNames.map((toolName) => `${serverName}__${toolName}`),
++    );
++    expect(gatewayMetaActionNames.map((name) => name.length)).toEqual([103, 104]);
++    expect(generatedNames.every((name) => name.length <= 22)).toBe(true);
++    expect(composedToolNames.every((name) => name.length <= 128)).toBe(true);
++    expect(new Set(composedToolNames).size).toBe(composedToolNames.length);
++    expect(JSON.stringify(runtimeConfig.mcp)).not.toContain("a".repeat(64));
++    expect(JSON.stringify(runtimeConfig.mcp)).not.toContain("b".repeat(64));
++    expect(runtimeConfig.permission).toEqual(skip ? "allow" : { bash: "ask", "mcp__existing__write": "deny" });
++    expect(runtimeConfig.provider).toMatchObject({ custom: { models: { "example/model": {} } } });
++    if (skip) {
++      expect(runtimeConfig.provider).toHaveProperty("openrouter.options.headers", OPENROUTER_ATTRIBUTION_HEADERS);
++    } else {
++      expect(runtimeConfig.provider).not.toHaveProperty("openrouter");
++    }
++    expect(runtimeConfig.small_model).toBe("example/model");
++    if (process.platform !== "win32") {
++      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
++    }
++    expect(JSON.stringify(prepared.notes)).not.toContain(token);
++    expect(JSON.parse(await fs.readFile(path.join(configHome, "opencode", "opencode.json"), "utf8"))).toMatchObject({
++      permission: { bash: "ask" },
++      mcp: { "paperclip-assigned": { url: "https://user.example/mcp" } },
++    });
++
++    await prepared.cleanup();
++    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
++    await expect(fs.access(prepared.env.XDG_CONFIG_HOME)).rejects.toThrow();
++  });
++
++
++  it("injects run-scoped MCP servers into an isolated remote runtime config", async () => {
++    const configHome = await makeConfigHome({
++      theme: "host-only-theme",
++      permission: { bash: "deny" },
++      mcp: { hostOnly: { type: "remote", url: "https://host.example/mcp", headers: { Authorization: "Bearer host-only-secret" } } },
++    });
++    const token = "remote-run-scoped-fixture-secret";
++    const url = "https://paperclip.example/api/mcp/remote-run";
++    const prepared = await prepareOpenCodeRuntimeConfig({
++      env: { XDG_CONFIG_HOME: configHome },
++      config: { dangerouslySkipPermissions: false },
++      runtimeMcp: [{ name: "Assigned remote tools", connectionId: "remote-run-assignment", url, token }],
++      targetIsRemote: true,
++    });
++    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
++    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
++    const runtimeConfig = JSON.parse(await fs.readFile(runtimeConfigPath, "utf8")) as {
++      mcp: Record<string, unknown>;
++      permission?: unknown;
++      theme?: unknown;
++    };
++    const assigned = Object.entries(runtimeConfig.mcp).find(([, server]) =>
++      typeof server === "object" && server !== null && "url" in server && server.url === url,
++    );
++    expect(assigned).toBeDefined();
++    expect(assigned?.[0]).toBe("Assigned_remote_tools");
++    expect(assigned?.[1]).toMatchObject({
++      type: "remote",
++      url,
++      enabled: true,
++      oauth: false,
++      headers: { Authorization: `Bearer ${token}` },
++    });
++    expect(Object.keys(runtimeConfig.mcp)).toEqual([assigned?.[0]]);
++    expect(runtimeConfig.permission).toBeUndefined();
++    expect(runtimeConfig.theme).toBeUndefined();
++    expect(JSON.stringify(runtimeConfig)).not.toContain("host-only-secret");
++    expect(JSON.stringify(prepared.notes)).not.toContain(token);
++    expect(prepared.taskToolsPath).toBeDefined();
++    if (process.platform !== "win32") {
++      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
++    }
++
++    await prepared.cleanup();
++    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
++    await expect(fs.access(prepared.env.XDG_CONFIG_HOME)).rejects.toThrow();
++  });
++
++  it("keeps a readable short label and deterministically bounds long labels", async () => {
++    const configHome = await makeConfigHome();
++    const servers = [{
++      name: "Paperclip project tools with a long descriptive label",
++      connectionId: `assignment:${"c".repeat(64)}`,
++      url: "https://paperclip.example/mcp",
++      token: "fixture-token",
++    }];
++    const first = await prepareOpenCodeRuntimeConfig({
++      env: { XDG_CONFIG_HOME: configHome },
++      config: { dangerouslySkipPermissions: false },
++      runtimeMcp: servers,
++    });
++    cleanupPaths.add(first.env.XDG_CONFIG_HOME);
++    const firstConfig = JSON.parse(
++      await fs.readFile(path.join(first.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
++    ) as { mcp: Record<string, unknown> };
++    const [firstName] = Object.keys(firstConfig.mcp);
++    expect(firstName).toMatch(/^Paperclip_pro_[0-9a-f]{8}$/);
++    expect(firstName.length).toBeLessThanOrEqual(22);
++
++    await first.cleanup();
++    cleanupPaths.delete(first.env.XDG_CONFIG_HOME);
++    const second = await prepareOpenCodeRuntimeConfig({
++      env: { XDG_CONFIG_HOME: configHome },
++      config: { dangerouslySkipPermissions: false },
++      runtimeMcp: servers,
++    });
++    cleanupPaths.add(second.env.XDG_CONFIG_HOME);
++    const secondConfig = JSON.parse(
++      await fs.readFile(path.join(second.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
++    ) as { mcp: Record<string, unknown> };
++    expect(Object.keys(secondConfig.mcp)).toEqual([firstName]);
++    await second.cleanup();
++    cleanupPaths.delete(second.env.XDG_CONFIG_HOME);
++  });
++
++  it("does not follow a user config symlink when writing the run secret", async () => {
++    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-symlink-test-"));
++    cleanupPaths.add(root);
++    const configHome = path.join(root, "config");
++    const externalConfig = path.join(root, "external.json");
++    const configDir = path.join(configHome, "opencode");
++    await fs.mkdir(configDir, { recursive: true });
++    await fs.writeFile(externalConfig, JSON.stringify({ theme: "system" }), "utf8");
++    await fs.symlink(externalConfig, path.join(configDir, "opencode.json"));
++
++    const prepared = await prepareOpenCodeRuntimeConfig({
++      env: { XDG_CONFIG_HOME: configHome },
++      config: { dangerouslySkipPermissions: false },
++      runtimeMcp: [{
++        name: "Assigned tools",
++        connectionId: "connection-1",
++        url: "https://paperclip.example/mcp",
++        token: "fixture-secret",
++      }],
++    });
++    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
++    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
++    expect((await fs.lstat(runtimeConfigPath)).isSymbolicLink()).toBe(false);
++    expect(await fs.readFile(externalConfig, "utf8")).toBe(JSON.stringify({ theme: "system" }));
++    if (process.platform !== "win32") {
++      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
++    }
++    await prepared.cleanup();
++    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
++  });
+ });
+diff --git a/packages/adapters/opencode-local/src/server/runtime-config.ts b/packages/adapters/opencode-local/src/server/runtime-config.ts
+index f70e9a67e..36f26f2b9 100644
+--- a/packages/adapters/opencode-local/src/server/runtime-config.ts
++++ b/packages/adapters/opencode-local/src/server/runtime-config.ts
+@@ -436,9 +436,10 @@ export async function prepareOpenCodeRuntimeConfig(input: {
+   targetIsRemote?: boolean;
+ }): Promise<PreparedOpenCodeRuntimeConfig> {
+   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
++  const targetIsRemote = input.targetIsRemote === true;
+   const runtimeMcpServers = input.runtimeMcp ?? input.runtimeMcpServers ?? [];
+   const selectedModel = configuredModelRef(input.config.model);
+-  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || input.targetIsRemote)) {
++  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || targetIsRemote)) {
+     return {
+       env: input.env,
+       notes: [],
+diff --git a/server/src/__tests__/codex-local-execute.test.ts b/server/src/__tests__/codex-local-execute.test.ts
+index 4420280bb..3d1cfcc86 100644
+--- a/server/src/__tests__/codex-local-execute.test.ts
++++ b/server/src/__tests__/codex-local-execute.test.ts
+@@ -828,7 +828,7 @@ if (process.argv.includes("resume")) {
+     const commandPath = path.join(root, "codex");
+     await fs.mkdir(workspace, { recursive: true });
+     // Faithful to the observed MCP transport crash: the protocol stream starts,
+-    // then the process dies with only a harness tracing line on stderr — no
++    // then the process dies with only a harness tracing line on stderr â€” no
+     // protocol-terminal event (error / turn.failed / turn.completed).
+     const script = `#!/usr/bin/env node
+ console.log(JSON.stringify({ type: "thread.started", thread_id: "thread-crash-1" }));
+@@ -1225,7 +1225,8 @@ process.exit(1);
+       expect(executorResult.exitCode).toBe(0);
+       const executorCapture = JSON.parse(await fs.readFile(executorCapturePath, "utf8")) as CapturePayload;
+       expect(executorCapture.prompt).toContain("execution wake role: executor");
+-      expect(executorCapture.prompt).toContain("You are waking because changes were requested in the execution workflow.");
++      expect(executorCapture.prompt).toContain("reason: execution_changes_requested");
++      expect(executorCapture.prompt).toContain("You are the executor addressing requested changes, not the reviewer or approver named above.");
+       expect(executorCapture.prompt).toContain("allowed actions: address_changes, resubmit");
+     } finally {
+       if (previousHome === undefined) delete process.env.HOME;
+diff --git a/server/src/__tests__/heartbeat-process-recovery.test.ts b/server/src/__tests__/heartbeat-process-recovery.test.ts
+index cf2d0b2cd..bc87bffcb 100644
+--- a/server/src/__tests__/heartbeat-process-recovery.test.ts
++++ b/server/src/__tests__/heartbeat-process-recovery.test.ts
+@@ -1850,12 +1850,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+         expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(0);
+         if (!cleanupObserved) {
+           cleanupObserved = true;
+-          const denied = await db.select().from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.runId, runId),
+-            eq(heartbeatRunEvents.message, "The automatic retry could not revalidate the original user continuation.")));
+-          // Upstream failure first tries the direct scheduler, then the release
+-          // tail. Both must defer admission until the executor releases ownership.
+-          if (scenario === "upstream") expect(denied.length).toBeGreaterThanOrEqual(2);
+-          if (scenario === "timeout") expect(denied.length).toBeGreaterThanOrEqual(1);
++          // A retry may not be admitted while the executor still owns its
++          // cleanup lease. The no-successor assertion above checks that
++          // invariant without depending on how many retry probes were emitted.
+           if (scenario === "new_message") {
+             await db.insert(issueComments).values({ id: nextCommentId, companyId, issueId, authorType: "user",
+               authorUserId: "responsible-user", body: "Use these new instructions." });
+@@ -6528,7 +6525,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+       await waitForPendingRunFailureReports();
+ 
+       const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+-      expect(run).toMatchObject({ status: "failed", errorCode: "setup_failed", executionStage: "preparing", processStartedAt: null,
++      // The provider never started, but the awaited cleanup has settled the run.
++      expect(run).toMatchObject({ status: "failed", errorCode: "setup_failed", executionStage: "settled", controllerLeaseExpiresAt: null, processStartedAt: null,
+         resultJson: {
+           connectionFailure: { schemaVersion: 1, provider: "git", operation: "clone", reason: "dns_failure" },
+           executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+@@ -10525,8 +10523,15 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+     });
+     expect(retryRun?.contextSnapshot).toMatchObject({
+       issueId,
+-      currentStageId: stageId,
+-      currentStageType: "review",
++      executionStage: {
++        stageId,
++        stageType: "review",
++        wakeRole: "reviewer",
++        currentParticipant: { type: "agent", agentId, userId: null },
++        returnAssignee: { type: "agent", agentId, userId: null },
++        allowedActions: ["approve", "request_changes"],
++        recoveryInstruction: expect.stringContaining("record the decision through the issue update route"),
++      },
+     });
+   });
+ 
+diff --git a/server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts b/server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts
+index df965f6df..f0501ccb5 100644
+--- a/server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts
++++ b/server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts
+@@ -1782,10 +1782,12 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
+   });
+ 
+   it.each([
+-    ["accepted", "connection_intent"],
+-    ["rejected", "connection_intent"],
+-    ["rejected", "request_confirmation"],
+-  ])("resumes a %s %s outcome and promotes the claimed review task", async (interactionStatus, interactionKind) => {
++    ["accepted", "connection_intent", null],
++    ["rejected", "connection_intent", null],
++    ["rejected", "request_confirmation", null],
++    ["accepted", "connection_intent", "review"],
++    ["accepted", "connection_intent", "approval"],
++  ])("resumes a %s %s outcome and preserves pending stage=%s", async (interactionStatus, interactionKind, pendingStage) => {
+     const { companyId, agentId } = await seedCompanyAndAgent();
+     const issueId = randomUUID();
+     const interactionId = randomUUID();
+@@ -1798,9 +1800,16 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
+         .from(issues)
+         .where(eq(issues.id, issueId))
+         .then((rows) => rows[0] ?? null);
+-      expect(claimedIssue).toEqual({ status: "in_progress", executionRunId: checkedRunId });
++      expect(claimedIssue).toEqual({
++        status: pendingStage ? "in_review" : "in_progress",
++        executionRunId: checkedRunId,
++      });
+     };
+-    await db.insert(issues).values({ id: issueId, companyId, title: "Waiting for connection", status: "in_review", priority: "medium", assigneeAgentId: agentId });
++    await db.insert(issues).values({ id: issueId, companyId, title: "Waiting for connection", status: "in_review", priority: "medium", assigneeAgentId: agentId,
++      executionState: pendingStage ? { status: "pending", currentStageId: randomUUID(), currentStageIndex: 0,
++        currentStageType: pendingStage, currentParticipant: { type: "agent", agentId, userId: null },
++        returnAssignee: { type: "agent", agentId, userId: null }, reviewRequest: null,
++        completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null } : null });
+     await db.insert(issueComments).values({
+       id: wakeCommentId,
+       companyId,
+@@ -1833,6 +1842,6 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
+     await heartbeat.waitForRunExecutionDrain(runId);
+     expect(countExecuteCallsForRun(runId)).toBe(1);
+     await waitForCondition(async () => claimedIssue !== null);
+-    expect(claimedIssue).toEqual({ status: "in_progress", executionRunId: runId });
++    expect(claimedIssue).toEqual({ status: pendingStage ? "in_review" : "in_progress", executionRunId: runId });
+   });
+ });
+diff --git a/server/src/__tests__/issue-activity-events-routes.test.ts b/server/src/__tests__/issue-activity-events-routes.test.ts
+index 9f9a5f26a..fe3ff135d 100644
+--- a/server/src/__tests__/issue-activity-events-routes.test.ts
++++ b/server/src/__tests__/issue-activity-events-routes.test.ts
+@@ -194,6 +194,7 @@ function issueUpdateWithReceipt(issue: ReturnType<typeof makeIssue>, patch: Reco
+     actorAgentId: _actorAgentId,
+     actorRunId: _actorRunId,
+     actorRunStopId: _actorRunStopId,
++    actorRunHandoffId: _actorRunHandoffId,
+     actorUserId: _actorUserId,
+     workspaceSelectionActor: _workspaceSelectionActor,
+     blockedByIssueIds: _blockedByIssueIds,
+diff --git a/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts b/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
+index 24f8f5d63..a0d3ba21b 100644
+--- a/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
++++ b/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
+@@ -13,6 +13,7 @@ const ownerAgentId = "33333333-3333-4333-8333-333333333333";
+ const peerAgentId = "44444444-4444-4444-8444-444444444444";
+ const ownerRunId = "55555555-5555-4555-8555-555555555555";
+ const recoveryActionId = "77777777-7777-4777-8777-777777777777";
++let mockLegacyRunRevocationPresent = false;
+ 
+ const mockIssueService = vi.hoisted(() => ({
+   addComment: vi.fn(),
+@@ -365,8 +366,12 @@ function createRunContextDb(
+   const firstRun = runRows[0] ?? {};
+   const runAgentId = typeof firstRun.agentId === "string" ? firstRun.agentId : ownerAgentId;
+   const runAgentCompanyId = typeof firstRun.agentCompanyId === "string" ? firstRun.agentCompanyId : companyId;
+-  const rowsForSelection = async (selection: Record<string, unknown>, chatBindingQuery = false, settledRecoveryQuery = false) => {
++  const rowsForSelection = async (selection: Record<string, unknown>, chatBindingQuery = false, settledRecoveryQuery = false, revocationQuery = false) => {
+     if (chatBindingQuery) return chatBindings;
++    // The ownership guard queries append-only revocation evidence. These route
++    // fixtures contain no such event; never satisfy that selector with a
++    // generic issue or run row merely because both selections request `id`.
++    if (revocationQuery) return mockLegacyRunRevocationPresent ? [{ id: 1 }] : [];
+     // An unknown selector has no settled recovery receipt. Returning the
+     // generic issue fixture here would invent an unrelated replay row.
+     if (settledRecoveryQuery) return [];
+@@ -380,19 +385,19 @@ function createRunContextDb(
+     }
+     return [{ id: runAgentId, companyId: runAgentCompanyId, permissions: {}, role: "engineer", reportsTo: null }];
+   };
+-  const buildQuery = (selection: Record<string, unknown>, chatBindingQuery = false, settledRecoveryQuery = false) => {
++  const buildQuery = (selection: Record<string, unknown>, chatBindingQuery = false, settledRecoveryQuery = false, revocationQuery = false) => {
+     const whereResult = {
+       orderBy: vi.fn(async () => []),
+       limit: vi.fn(() => ({
+-        then: async (resolve: (limitedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery)),
++        then: async (resolve: (limitedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery, revocationQuery)),
+         for: vi.fn(() => ({
+-          then: async (resolve: (lockedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery)),
++          then: async (resolve: (lockedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery, revocationQuery)),
+         })),
+       })),
+       for: vi.fn(() => ({
+-        then: async (resolve: (selectedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery)),
++        then: async (resolve: (selectedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery, revocationQuery)),
+       })),
+-      then: async (resolve: (selectedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery)),
++      then: async (resolve: (selectedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery, revocationQuery)),
+     };
+     const query = {
+       innerJoin: vi.fn(() => query),
+@@ -415,6 +420,9 @@ function createRunContextDb(
+         if (getTableName(table) === "issue_thread_interactions") {
+           return { where: vi.fn(() => ({ limit: vi.fn(async () => []) })) };
+         }
++        if (getTableName(table) === "heartbeat_run_events") {
++          return buildQuery(selection, false, false, true);
++        }
+         return buildQuery(selection, getTableName(table) === "chat_conversations", getTableName(table) === "issue_recovery_actions");
+       }),
+     })),
+@@ -486,6 +494,7 @@ describe("agent issue mutation checkout ownership", () => {
+   }
+ 
+   beforeEach(() => {
++    mockLegacyRunRevocationPresent = false;
+     // This block loads the route module graph one time (see
+     // hoistModuleGraph above). As a result, the issue-list route keeps its
+     // response cache in memory between tests. Clear the cache before each
+@@ -2903,6 +2912,9 @@ describe("agent issue mutation checkout ownership", () => {
+       const app = handoffApp({ ...ownerActor(), source: "agent_jwt" });
+       const handedOff = await request(app).patch(`/api/issues/${issueId}`).send(handoff);
+       expect(handedOff.status, JSON.stringify(handedOff.body)).toBe(200);
++      // The mocked issue service does not persist its transaction's run event;
++      // seed the corresponding durable evidence before exercising the later write.
++      mockLegacyRunRevocationPresent = true;
+       mockIssueService.getById.mockResolvedValue(makeIssue(handoff));
+       mockIssueService.update.mockClear();
+ 
+diff --git a/server/src/__tests__/issue-document-restore-routes.test.ts b/server/src/__tests__/issue-document-restore-routes.test.ts
+index 173f4b865..71ea4936e 100644
+--- a/server/src/__tests__/issue-document-restore-routes.test.ts
++++ b/server/src/__tests__/issue-document-restore-routes.test.ts
+@@ -29,6 +29,7 @@ const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+ const mockHeartbeatService = vi.hoisted(() => ({
+   wakeup: vi.fn(async () => undefined),
+   reportRunActivity: vi.fn(async () => undefined),
++  getRun: vi.fn(async () => null),
+ }));
+ const mockInstanceSettingsService = vi.hoisted(() => ({
+   get: vi.fn(async () => ({
+diff --git a/server/src/__tests__/issues-service.test.ts b/server/src/__tests__/issues-service.test.ts
+index eadd41ab6..ea5a1a714 100644
+--- a/server/src/__tests__/issues-service.test.ts
++++ b/server/src/__tests__/issues-service.test.ts
+@@ -1,5 +1,5 @@
+ import { randomUUID } from "node:crypto";
+-import { asc, eq } from "drizzle-orm";
++import { and, asc, eq } from "drizzle-orm";
+ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+ import { sql } from "drizzle-orm";
+ import {
+@@ -13,6 +13,7 @@ import {
+   environments,
+   executionWorkspaces,
+   goals,
++  heartbeatRunEvents,
+   heartbeatRuns,
+   instanceSettings,
+   issueComments,
+@@ -39,6 +40,7 @@ import {
+   startEmbeddedPostgresTestDatabase,
+ } from "./helpers/embedded-postgres.js";
+ import { instanceSettingsService } from "../services/instance-settings.ts";
++import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
+ import {
+   clampIssueListLimit,
+   deriveIssueCommentRunLogAttribution,
+@@ -6611,6 +6613,7 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
+     await db.delete(issueInboxArchives);
+     await db.delete(activityLog);
+     await db.delete(issues);
++    await db.delete(heartbeatRunEvents);
+     await db.delete(heartbeatRuns);
+     await db.delete(executionWorkspaces);
+     await db.delete(projectWorkspaces);
+@@ -6814,6 +6817,93 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
+     });
+   });
+ 
++  it("durably revokes the current run on a board handoff without blocking a fresh run", async () => {
++    const seeded = await seedOwnershipIssue({ checkoutStatus: "running" });
++    const original = await svc.getById(seeded.issueId);
++    const reviewerAgentId = randomUUID();
++    await db.insert(agents).values({
++      id: reviewerAgentId,
++      companyId: original!.companyId,
++      name: "Board handoff reviewer",
++      role: "engineer",
++      status: "active",
++      adapterType: "codex_local",
++      adapterConfig: {},
++      runtimeConfig: {},
++      permissions: {},
++    });
++    await db.update(heartbeatRuns).set({
++      // The issue's execution/checkout pointers prove this run's association
++      // even when its lagging context snapshot has already lost issueId.
++      contextSnapshot: { preservedContext: "keep-me" },
++    }).where(eq(heartbeatRuns.id, seeded.staleRunId));
++
++    await svc.update(seeded.issueId, {
++      assigneeAgentId: reviewerAgentId,
++      assigneeUserId: null,
++      actorUserId: "local-board",
++    });
++    const [revokedRun] = await db.select().from(heartbeatRuns)
++      .where(eq(heartbeatRuns.id, seeded.staleRunId));
++    expect(revokedRun!.contextSnapshot).toMatchObject({ preservedContext: "keep-me" });
++    const [revocationEvent] = await db.select().from(heartbeatRunEvents).where(and(
++      eq(heartbeatRunEvents.companyId, original!.companyId),
++      eq(heartbeatRunEvents.runId, seeded.staleRunId),
++      eq(heartbeatRunEvents.agentId, seeded.assigneeAgentId),
++      eq(heartbeatRunEvents.eventType, "issue.legacy_run_ownership_revoked"),
++    ));
++    expect(revocationEvent?.payload).toMatchObject({
++      issueId: seeded.issueId,
++      ownerAgentId: seeded.assigneeAgentId,
++    });
++    await expect(assertLegacyRunTaskOwnership(db, {
++      id: seeded.staleRunId,
++      companyId: original!.companyId,
++      runtimeMode: "legacy",
++      agentId: seeded.assigneeAgentId,
++    }, {
++      id: randomUUID(),
++      companyId: original!.companyId,
++      assigneeAgentId: seeded.assigneeAgentId,
++      assigneeUserId: null,
++    })).resolves.toBeUndefined();
++
++    // A delayed writer can replace the entire context with its stale in-memory
++    // copy. The event is independent of that snapshot and remains authoritative.
++    await db.update(heartbeatRuns).set({
++      contextSnapshot: { issueId: seeded.issueId, preservedContext: "stale-snapshot" },
++    }).where(eq(heartbeatRuns.id, seeded.staleRunId));
++
++    // Returning the assignment to the original agent must not restore a run
++    // whose write authority was revoked by the earlier board handoff.
++    await svc.update(seeded.issueId, {
++      assigneeAgentId: seeded.assigneeAgentId,
++      assigneeUserId: null,
++      actorUserId: "local-board",
++    });
++    await expect(svc.update(seeded.issueId, {
++      title: "Stale run after reassignment back",
++      actorAgentId: seeded.assigneeAgentId,
++      actorRunId: seeded.staleRunId,
++    })).rejects.toMatchObject({ status: 403, details: { code: "issue_handed_off" } });
++
++    const freshRunId = randomUUID();
++    await db.insert(heartbeatRuns).values({
++      id: freshRunId,
++      companyId: original!.companyId,
++      agentId: seeded.assigneeAgentId,
++      status: "running",
++      invocationSource: "manual",
++      startedAt: new Date(),
++      contextSnapshot: { issueId: seeded.issueId },
++    });
++    await expect(svc.update(seeded.issueId, {
++      title: "Fresh run can write",
++      actorAgentId: seeded.assigneeAgentId,
++      actorRunId: freshRunId,
++    })).resolves.toMatchObject({ title: "Fresh run can write" });
++  });
++
+   it("lets the current assignee adopt a stale terminal checkout owner", async () => {
+     const seeded = await seedOwnershipIssue({ checkoutStatus: "failed" });
+ 
+diff --git a/server/src/agent-run-cancellation.ts b/server/src/agent-run-cancellation.ts
+index e46be0f37..2e1d73f1d 100644
+--- a/server/src/agent-run-cancellation.ts
++++ b/server/src/agent-run-cancellation.ts
+@@ -19,7 +19,7 @@ export async function assertAgentRunWriteAllowed(tx: Db, companyId: string, acto
+   stopId?: string | null;
+ }) {
+   if (!actor.agentId || !actor.runId) return;
+-  const [run] = await tx.select({ status: heartbeatRuns.status, resultJson: heartbeatRuns.resultJson,
++  const [run] = await tx.select({ id: heartbeatRuns.id, status: heartbeatRuns.status, resultJson: heartbeatRuns.resultJson,
+     agentId: heartbeatRuns.agentId,
+     runtimeMode: heartbeatRuns.runtimeMode, companyId: heartbeatRuns.companyId,
+     contextSnapshot: heartbeatRuns.contextSnapshot })
+diff --git a/server/src/legacy-run-task-ownership.test.ts b/server/src/legacy-run-task-ownership.test.ts
+index 9226ed30c..4bd257e26 100644
+--- a/server/src/legacy-run-task-ownership.test.ts
++++ b/server/src/legacy-run-task-ownership.test.ts
+@@ -1,38 +1,45 @@
+-import { describe, expect, it } from "vitest";
++import { describe, expect, it, vi } from "vitest";
+ import { assertLegacyRunTaskOwnership } from "./legacy-run-task-ownership.js";
+ 
+ describe("legacy run task ownership", () => {
+-  const run = {
+-    companyId: "company-1",
+-    runtimeMode: "legacy",
+-    agentId: "implementer",
+-    contextSnapshot: { issueId: "issue-1" },
+-  };
++  const run = { id: "run-1", companyId: "company-1", runtimeMode: "legacy", agentId: "implementer" };
++  const issue = { id: "issue-1", companyId: "company-1", assigneeAgentId: "implementer", assigneeUserId: null };
+ 
+-  it("allows the current owner to finish its own issue update", () => {
+-    expect(() => assertLegacyRunTaskOwnership(run, {
+-      id: "issue-1", companyId: "company-1", assigneeAgentId: "implementer", assigneeUserId: null,
+-    })).not.toThrow();
+-  });
++  function dbWithEvent(event: unknown = null) {
++    const limit = vi.fn().mockResolvedValue(event ? [event] : []);
++    const where = vi.fn().mockReturnValue({ limit });
++    const from = vi.fn().mockReturnValue({ where });
++    const select = vi.fn().mockReturnValue({ from });
++    return { db: { select } as never, select, from, where, limit };
++  }
+ 
+-  it("revokes an outgoing run's issue-write authority after an agent handoff", () => {
+-    expect(() => assertLegacyRunTaskOwnership(run, {
+-      id: "issue-1", companyId: "company-1", assigneeAgentId: "reviewer", assigneeUserId: null,
+-    })).toThrowError("This task has been handed to another owner");
++  it.each([
++    ["current owner", run, issue],
++    ["peer reviewer", { ...run, agentId: "reviewer" }, { ...issue, assigneeAgentId: "reviewer" }],
++    ["unassigned issue", run, { ...issue, assigneeAgentId: null }],
++  ])("allows a %s when no revocation event exists", async (_description, candidate, targetIssue) => {
++    const query = dbWithEvent();
++    await expect(assertLegacyRunTaskOwnership(query.db, candidate, targetIssue)).resolves.toBeUndefined();
++    expect(query.select).toHaveBeenCalledOnce();
+   });
+ 
+-  it("keeps human handoffs denied and unrelated issues outside this ownership check", () => {
+-    expect(() => assertLegacyRunTaskOwnership(run, {
+-      id: "issue-1", companyId: "company-1", assigneeAgentId: null, assigneeUserId: "user-1",
+-    })).toThrow();
+-    expect(() => assertLegacyRunTaskOwnership(run, {
+-      id: "issue-2", companyId: "company-1", assigneeAgentId: "reviewer", assigneeUserId: null,
+-    })).not.toThrow();
++  it("blocks when the run's revocation query finds handoff evidence", async () => {
++    const query = dbWithEvent({ id: 42 });
++    await expect(assertLegacyRunTaskOwnership(query.db, run, issue)).rejects.toMatchObject({
++      status: 403,
++      details: { code: "issue_handed_off", issueId: issue.id },
++    });
+   });
+ 
+-  it("does not infer legacy run ownership for native runs", () => {
+-    expect(() => assertLegacyRunTaskOwnership({ ...run, runtimeMode: "native" }, {
+-      id: "issue-1", companyId: "company-1", assigneeAgentId: "reviewer", assigneeUserId: null,
+-    })).not.toThrow();
++  it("does not check native, foreign-company, or unbound runs", async () => {
++    for (const candidate of [
++      { ...run, runtimeMode: "native" },
++      { ...run, companyId: "company-2" },
++      { ...run, agentId: null },
++    ]) {
++      const query = dbWithEvent({ id: 42 });
++      await expect(assertLegacyRunTaskOwnership(query.db, candidate, issue)).resolves.toBeUndefined();
++      expect(query.select).not.toHaveBeenCalled();
++    }
+   });
+ });
+diff --git a/server/src/legacy-run-task-ownership.ts b/server/src/legacy-run-task-ownership.ts
+index ef6dd30e5..abd6e4f53 100644
+--- a/server/src/legacy-run-task-ownership.ts
++++ b/server/src/legacy-run-task-ownership.ts
+@@ -1,11 +1,21 @@
++import { and, eq, sql } from "drizzle-orm";
++import { heartbeatRunEvents, type Db } from "@paperclipai/db";
+ import { forbidden } from "./errors.js";
+ 
+-export function assertLegacyRunTaskOwnership(
++export const LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT = "issue.legacy_run_ownership_revoked";
++
++/**
++ * Run context snapshots are periodically rewritten from in-memory state and
++ * therefore cannot carry durable ownership decisions. This guard consults the
++ * append-only run event written in the same transaction as an issue handoff.
++ */
++export async function assertLegacyRunTaskOwnership(
++  db: Db,
+   run: {
++    id: string;
+     companyId: string;
+     runtimeMode: string;
+     agentId?: string | null;
+-    contextSnapshot?: Record<string, unknown> | null;
+   } | null | undefined,
+   issue: {
+     id: string;
+@@ -14,14 +24,24 @@ export function assertLegacyRunTaskOwnership(
+     assigneeUserId: string | null;
+   },
+ ) {
+-  if (run?.runtimeMode !== "legacy" || run.companyId !== issue.companyId ||
+-      run.contextSnapshot?.issueId !== issue.id || !run.agentId) return;
+-  if (issue.assigneeAgentId !== run.agentId) {
+-    throw forbidden(
+-      issue.assigneeUserId
+-        ? "This task is assigned to a human; the outgoing run can no longer change it"
+-        : "This task has been handed to another owner; the outgoing run can no longer change it",
+-      { code: "issue_handed_off", issueId: issue.id },
+-    );
+-  }
++  if (run?.runtimeMode !== "legacy" || run.companyId !== issue.companyId || !run.agentId) return;
++  const [revocation] = await db
++    .select({ id: heartbeatRunEvents.id })
++    .from(heartbeatRunEvents)
++    .where(and(
++      eq(heartbeatRunEvents.companyId, issue.companyId),
++      eq(heartbeatRunEvents.runId, run.id),
++      eq(heartbeatRunEvents.agentId, run.agentId),
++      eq(heartbeatRunEvents.eventType, LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT),
++      sql`${heartbeatRunEvents.payload} @> ${JSON.stringify({ issueId: issue.id, ownerAgentId: run.agentId })}::jsonb`,
++    ))
++    .limit(1);
++  if (!revocation) return;
++
++  throw forbidden(
++    issue.assigneeUserId
++      ? "This task is assigned to a human; the outgoing run can no longer change it"
++      : "This task has been handed to another owner; the outgoing run can no longer change it",
++    { code: "issue_handed_off", issueId: issue.id },
++  );
+ }
+diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
+index 2f802ce59..0d3a14b91 100644
+--- a/server/src/routes/issues.ts
++++ b/server/src/routes/issues.ts
+@@ -5579,7 +5579,7 @@ export function issueRoutes(
+     }
+     if (req.actor.source === "agent_jwt" && req.actor.runId) {
+       const run = await heartbeat.getRun(req.actor.runId);
+-      if (run?.agentId === actorAgentId) assertLegacyRunTaskOwnership(run, issue);
++      if (run?.agentId === actorAgentId) await assertLegacyRunTaskOwnership(db, run, issue);
+     }
+     // Task-watchdog runs receive a scoped *grant* to mutate issues inside the
+     // watched subtree. This must be evaluated before the base assignee-ownership
+diff --git a/server/src/services/__tests__/run-failure-report.test.ts b/server/src/services/__tests__/run-failure-report.test.ts
+index f2c833557..1d3e53ecf 100644
+--- a/server/src/services/__tests__/run-failure-report.test.ts
++++ b/server/src/services/__tests__/run-failure-report.test.ts
+@@ -255,6 +255,18 @@ describeEmbeddedPostgres("reportRunFailure", () => {
+     expect(mockCaptureRunFailure).toHaveBeenCalledOnce();
+   });
+ 
++  it.each([
++    { label: "AI selection", createRun: () => aiSelectionRun({ executionStage: "settling" }) },
++    { label: "missing secret", createRun: () => missingSecretRun({ executionStage: "settling" }) },
++    { label: "local path policy", createRun: () => localPathConfigurationRun({ executionStage: "settling" }) },
++    { label: "restricted workspace", createRun: () => restrictedWorkspaceSourceRun({ executionStage: "settling" }) },
++    { label: "Git clone", createRun: () => gitConnectionRun({ executionStage: "settling" }) },
++  ])("keeps typed pre-dispatch $label failures local while the legacy run is settling", async ({ createRun }) => {
++    await seedCompanyAndAgent();
++    await reportRunFailure(db, createRun(), { phase: "setup" });
++    expect(mockCaptureRunFailure).not.toHaveBeenCalled();
++  });
++
+   it.each([undefined, { kind: "bootstrap" }, { kind: "bootstrap", providerWorkStarted: true },
+     { kind: "runtime", providerWorkStarted: false }])("reports Git failures without unstarted bootstrap proof: %j", async (recovery) => {
+     await seedCompanyAndAgent();
+diff --git a/server/src/services/heartbeat.ts b/server/src/services/heartbeat.ts
+index 9470fd173..03fb01ed1 100644
+--- a/server/src/services/heartbeat.ts
++++ b/server/src/services/heartbeat.ts
+@@ -548,6 +548,9 @@ export { isNonAssigneeWorkspaceBusyRetry };
+ // Routes and the scheduler construct separate heartbeatService instances, but
+ // they must agree on in-process adapter executions when reaping stale runs.
+ const activeRunExecutions = new Set<string>();
++// Tracks the final settlement tail after adapter and lease cleanup. The live
++// owner can be gone while issue release, delivery, or queue promotion remains.
++const settlingRunExecutions = new Set<string>();
+ const deferredIssueExecutionReleases = new Map<string, { suppressImmediateRecovery?: boolean }>();
+ // A legacy process adapter's signal exit can race the operator cancellation CAS while
+ // its owned process group is still being joined. Keep that exit from becoming
+@@ -1413,16 +1416,22 @@ export function heartbeatService(
+     return runControl.cancelBudgetScopeWork(...args);
+   }
+ 
+-  function releaseIssueExecutionAndPromote(...args: Parameters<typeof runControl.releaseIssueExecutionAndPromote>) {
++  async function releaseIssueExecutionAndPromote(...args: Parameters<typeof runControl.releaseIssueExecutionAndPromote>) {
+     const [run, options] = args;
+-    if (activeRunExecutions.has(run.id) && !options?.deferredPostCommitEffects) {
++    const activeRun = !options?.deferredPostCommitEffects && activeRunExecutions.has(run.id)
++      ? await getRun(run.id)
++      : null;
++    // The deferred replay below belongs to legacy process/lease cleanup. Native
++    // completion owns durable finalization and has no matching post-cleanup
++    // replay, so a native release must not be deferred here.
++    if (activeRunExecutions.has(run.id) && activeRun?.runtimeMode === "legacy" && !options?.deferredPostCommitEffects) {
+       const previous = deferredIssueExecutionReleases.get(run.id);
+       deferredIssueExecutionReleases.set(run.id, {
+         suppressImmediateRecovery: Boolean(previous?.suppressImmediateRecovery || options?.suppressImmediateRecovery),
+       });
+-      return Promise.resolve();
++      return;
+     }
+-    return runControl.releaseIssueExecutionAndPromote(...args);
++    await runControl.releaseIssueExecutionAndPromote(...args);
+   }
+ 
+   function releaseEnvironmentLeasesForRun(...args: Parameters<typeof runControl.releaseEnvironmentLeasesForRun>) {
+@@ -3663,291 +3672,296 @@ export function heartbeatService(
+         });
+       }
+     } finally {
+-      let caseHandoffCleanupSettled = false;
+-      await instructionWorkingCopy?.nativeInstructionReservation?.release().catch(error => logger.warn({ runId: run.id, err: error }, "Managed warm session preparation cleanup failed"));
+-      if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
+-      let latestRun = await getRun(run.id).catch(() => null);
+       try {
+-        if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
+-          await writeExecutionControl(db, DELIVERY_QUEUES.executionFinalization, tx => tx
+-            .update(heartbeatRuns)
+-            .set({ executionControlDeadlineAt: null })
+-            .where(eq(heartbeatRuns.id, run.id)));
+-        }
+-        nativeOwnershipHeld =
+-          nativeOwnershipHeld ||
+-          Boolean(latestRun && isNativeRunnerOwnershipHeld(latestRun));
+-        // Trace capture is debug-only and must settle independently of every
+-        // provider outcome. Adapter/setup failures used to skip the success-path
+-        // finalizer, leaving metadata permanently stuck at `capturing` even when
+-        // runnerd had already closed (or never managed to write) its sidecar.
+-        // Same-run native resumes retain the open capture until the resumed
+-        // execution reaches a true terminal boundary.
+-        if (
+-          providerTraceCapture &&
+-          !providerTraceFinalized &&
+-          !nativeSessionResumeScheduled
+-        ) {
+-          try {
+-            await traceStore.finalize(run.id, run.companyId);
+-            providerTraceFinalized = true;
+-          } catch (traceFinalizeError) {
+-            logger.warn(
+-              { err: traceFinalizeError, runId: run.id },
+-              "provider trace finalization failed during heartbeat teardown",
+-            );
++        let caseHandoffCleanupSettled = false;
++        await instructionWorkingCopy?.nativeInstructionReservation?.release().catch(error => logger.warn({ runId: run.id, err: error }, "Managed warm session preparation cleanup failed"));
++        if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
++        let latestRun = await getRun(run.id).catch(() => null);
++        try {
++          if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
++            await writeExecutionControl(db, DELIVERY_QUEUES.executionFinalization, tx => tx
++              .update(heartbeatRuns)
++              .set({ executionControlDeadlineAt: null })
++              .where(eq(heartbeatRuns.id, run.id)));
+           }
+-        }
+-        // Close the invariant "environment lease released implies the run is
+-        // terminal". When the teardown reaches this point with the run still
+-        // running or queued, force a terminal status before the lease is
+-        // released, so the UI never shows a finished task as "Live".
+-        if (
+-          latestRun &&
+-          !nativeSessionResumeScheduled &&
+-          !nativeWorkspaceFinalizeScheduled &&
+-          !nativeOwnershipHeld
+-        ) {
+-          latestRun = await terminalizeRunOnLeaseRelease(latestRun).catch(
+-            (terminalizeErr) => {
+-              logger.error(
+-                { err: terminalizeErr, runId: run.id },
+-                "failed to terminalize run before environment lease release",
++          nativeOwnershipHeld =
++            nativeOwnershipHeld ||
++            Boolean(latestRun && isNativeRunnerOwnershipHeld(latestRun));
++          // Trace capture is debug-only and must settle independently of every
++          // provider outcome. Adapter/setup failures used to skip the success-path
++          // finalizer, leaving metadata permanently stuck at `capturing` even when
++          // runnerd had already closed (or never managed to write) its sidecar.
++          // Same-run native resumes retain the open capture until the resumed
++          // execution reaches a true terminal boundary.
++          if (
++            providerTraceCapture &&
++            !providerTraceFinalized &&
++            !nativeSessionResumeScheduled
++          ) {
++            try {
++              await traceStore.finalize(run.id, run.companyId);
++              providerTraceFinalized = true;
++            } catch (traceFinalizeError) {
++              logger.warn(
++                { err: traceFinalizeError, runId: run.id },
++                "provider trace finalization failed during heartbeat teardown",
+               );
+-              return latestRun;
+-            },
+-          );
+-        }
+-        // Warm retention is earned only by a fully successful turn. A failed,
+-        // cancelled, or timed-out run stops the reusable sandbox so the next
+-        // acquisition must revalidate and explicitly resume it.
+-        nativeOwnershipHeld =
+-          nativeOwnershipHeld ||
+-          Boolean(latestRun && isNativeRunnerOwnershipHeld(latestRun));
+-        providerResourceDispositionForRun =
+-          providerResourceDispositionForTerminalRun(
+-            providerResourceDispositionForRun,
+-            latestRun?.status,
+-          );
+-        if (
+-          !nativeSessionResumeScheduled &&
+-          !nativeWorkspaceFinalizeScheduled &&
+-          !nativeOwnershipHeld
+-        ) {
+-          // Keep launchers during same-run recovery. At a terminal boundary all
+-          // operations have settled; clean before the remote lease can be stopped.
++            }
++          }
++          // Close the invariant "environment lease released implies the run is
++          // terminal". When the teardown reaches this point with the run still
++          // running or queued, force a terminal status before the lease is
++          // released, so the UI never shows a finished task as "Live".
+           if (
+-            githubLauncherLocation &&
+             latestRun &&
+-            isHeartbeatRunTerminalStatus(latestRun.status)
++            !nativeSessionResumeScheduled &&
++            !nativeWorkspaceFinalizeScheduled &&
++            !nativeOwnershipHeld
+           ) {
+-            await cleanupGitHubOperationLaunchers(githubLauncherLocation).catch(
+-              (err) => {
+-                logger.warn(
+-                  { err, runId: run.id },
+-                  "failed to clean managed GitHub launchers",
++            latestRun = await terminalizeRunOnLeaseRelease(latestRun).catch(
++              (terminalizeErr) => {
++                logger.error(
++                  { err: terminalizeErr, runId: run.id },
++                  "failed to terminalize run before environment lease release",
+                 );
++                return latestRun;
+               },
+             );
+           }
+-          // A retained or unverified process stays above this release boundary.
+-          // If no stopped-copy capture occurred, preserve an explicit loss report.
+-          await instructionWorkingCopy?.releaseWarmInstructionPreparation?.();
+-          const uncapturedInstructions = await instructionCopies.reportUnavailable(run.companyId, run.id);
+-          if (uncapturedInstructions?.state === "unavailable") {
+-            await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
+-              message: "Instruction edits could not be recovered before environment release. No instruction save is claimed.",
+-              payload: { state: "unavailable", code: uncapturedInstructions.errorCode } });
+-          }
+-          await withAdapterExecutionPhase(executionPhaseContext, "instruction_cleanup", releaseInstructionCopy);
+-          await withAdapterExecutionPhase(executionPhaseContext, "lease_release", () => releaseEnvironmentLeasesForRun({
+-            runId: run.id,
+-            companyId: run.companyId,
+-            agentId: run.agentId,
+-            status: latestRun?.status,
+-            failureReason: latestRun?.error ?? undefined,
+-            providerResourceDisposition: providerResourceDispositionForRun,
+-            nativeLifecycleTelemetry: nativeLifecycleTelemetryForRun,
+-          }));
+-          await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
+-          caseHandoffCleanupSettled = true;
+-        }
+-        if (
+-          runScratch &&
+-          latestRun &&
+-          isHeartbeatRunTerminalStatus(latestRun.status)
+-        ) {
+-          const scratchForCleanup = runScratch;
+-          let scratchCleanup: Awaited<
+-            ReturnType<typeof cleanupHeartbeatRunScratch>
+-          > | null = null;
+-          try {
+-            scratchCleanup = await cleanupHeartbeatRunScratch({
+-              scratch: scratchForCleanup,
+-              processGroupId: latestRun.processGroupId,
+-              isProcessGroupAlive,
+-              beforeRemove: caseHandoffCleanupSettled && latestRun.runtimeMode === "legacy"
+-                ? () => recordLegacyCaseHandoffCleanupVerified(db, { runId: run.id, controllerBootId: legacyControllerBootId, scratch: scratchForCleanup })
+-                : undefined,
+-            });
+-          } catch (scratchCleanupError) {
+-            caseHandoffCleanupSettled = false;
+-            logger.warn(
+-              {
+-                err: scratchCleanupError,
+-                runId: run.id,
+-                scratchDir: scratchForCleanup.dir,
+-              },
+-              "failed to clean heartbeat run scratch directory",
++          // Warm retention is earned only by a fully successful turn. A failed,
++          // cancelled, or timed-out run stops the reusable sandbox so the next
++          // acquisition must revalidate and explicitly resume it.
++          nativeOwnershipHeld =
++            nativeOwnershipHeld ||
++            Boolean(latestRun && isNativeRunnerOwnershipHeld(latestRun));
++          providerResourceDispositionForRun =
++            providerResourceDispositionForTerminalRun(
++              providerResourceDispositionForRun,
++              latestRun?.status,
+             );
+-            await appendRunEvent(latestRun, {
+-              eventType: "error",
+-              stream: "system",
+-              level: "warn",
+-              message: "run scratch cleanup failed",
+-              payload: {
+-                dir: scratchForCleanup.dir,
+-                error:
+-                  scratchCleanupError instanceof Error
+-                    ? scratchCleanupError.message
+-                    : String(scratchCleanupError),
+-              },
+-            }).catch(() => undefined);
++          if (
++            !nativeSessionResumeScheduled &&
++            !nativeWorkspaceFinalizeScheduled &&
++            !nativeOwnershipHeld
++          ) {
++            // Keep launchers during same-run recovery. At a terminal boundary all
++            // operations have settled; clean before the remote lease can be stopped.
++            if (
++              githubLauncherLocation &&
++              latestRun &&
++              isHeartbeatRunTerminalStatus(latestRun.status)
++            ) {
++              await cleanupGitHubOperationLaunchers(githubLauncherLocation).catch(
++                (err) => {
++                  logger.warn(
++                    { err, runId: run.id },
++                    "failed to clean managed GitHub launchers",
++                  );
++                },
++              );
++            }
++            // A retained or unverified process stays above this release boundary.
++            // If no stopped-copy capture occurred, preserve an explicit loss report.
++            await instructionWorkingCopy?.releaseWarmInstructionPreparation?.();
++            const uncapturedInstructions = await instructionCopies.reportUnavailable(run.companyId, run.id);
++            if (uncapturedInstructions?.state === "unavailable") {
++              await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
++                message: "Instruction edits could not be recovered before environment release. No instruction save is claimed.",
++                payload: { state: "unavailable", code: uncapturedInstructions.errorCode } });
++            }
++            await withAdapterExecutionPhase(executionPhaseContext, "instruction_cleanup", releaseInstructionCopy);
++            await withAdapterExecutionPhase(executionPhaseContext, "lease_release", () => releaseEnvironmentLeasesForRun({
++              runId: run.id,
++              companyId: run.companyId,
++              agentId: run.agentId,
++              status: latestRun?.status,
++              failureReason: latestRun?.error ?? undefined,
++              providerResourceDisposition: providerResourceDispositionForRun,
++              nativeLifecycleTelemetry: nativeLifecycleTelemetryForRun,
++            }));
++            await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
++            caseHandoffCleanupSettled = true;
+           }
+-          if (scratchCleanup) {
+-            // Scratch cleanup verifies the owned process group, including
+-            // grandchildren. The main adapter's exit is not this proof.
+-            if (!scratchCleanup.removed) caseHandoffCleanupSettled = false;
+-            await appendRunEvent(latestRun, {
+-              eventType: "lifecycle",
+-              stream: "system",
+-              level: scratchCleanup.removed ? "info" : "warn",
+-              message: scratchCleanup.removed
+-                ? "run scratch cleaned"
+-                : `run scratch cleanup skipped: ${scratchCleanup.reason}`,
+-              payload: scratchCleanup,
+-            }).catch((scratchCleanupEventError) => {
++          if (
++            runScratch &&
++            latestRun &&
++            isHeartbeatRunTerminalStatus(latestRun.status)
++          ) {
++            const scratchForCleanup = runScratch;
++            let scratchCleanup: Awaited<
++              ReturnType<typeof cleanupHeartbeatRunScratch>
++            > | null = null;
++            try {
++              scratchCleanup = await cleanupHeartbeatRunScratch({
++                scratch: scratchForCleanup,
++                processGroupId: latestRun.processGroupId,
++                isProcessGroupAlive,
++                beforeRemove: caseHandoffCleanupSettled && latestRun.runtimeMode === "legacy"
++                  ? () => recordLegacyCaseHandoffCleanupVerified(db, { runId: run.id, controllerBootId: legacyControllerBootId, scratch: scratchForCleanup })
++                  : undefined,
++              });
++            } catch (scratchCleanupError) {
++              caseHandoffCleanupSettled = false;
+               logger.warn(
+                 {
+-                  err: scratchCleanupEventError,
++                  err: scratchCleanupError,
+                   runId: run.id,
+                   scratchDir: scratchForCleanup.dir,
+                 },
+-                "failed to record heartbeat run scratch cleanup event",
++                "failed to clean heartbeat run scratch directory",
+               );
+-            });
++              await appendRunEvent(latestRun, {
++                eventType: "error",
++                stream: "system",
++                level: "warn",
++                message: "run scratch cleanup failed",
++                payload: {
++                  dir: scratchForCleanup.dir,
++                  error:
++                    scratchCleanupError instanceof Error
++                      ? scratchCleanupError.message
++                      : String(scratchCleanupError),
++                },
++              }).catch(() => undefined);
++            }
++            if (scratchCleanup) {
++              // Scratch cleanup verifies the owned process group, including
++              // grandchildren. The main adapter's exit is not this proof.
++              if (!scratchCleanup.removed) caseHandoffCleanupSettled = false;
++              await appendRunEvent(latestRun, {
++                eventType: "lifecycle",
++                stream: "system",
++                level: scratchCleanup.removed ? "info" : "warn",
++                message: scratchCleanup.removed
++                  ? "run scratch cleaned"
++                  : `run scratch cleanup skipped: ${scratchCleanup.reason}`,
++                payload: scratchCleanup,
++              }).catch((scratchCleanupEventError) => {
++                logger.warn(
++                  {
++                    err: scratchCleanupEventError,
++                    runId: run.id,
++                    scratchDir: scratchForCleanup.dir,
++                  },
++                  "failed to record heartbeat run scratch cleanup event",
++                );
++              });
++            }
++          }
++          if (latestRun?.status === "interrupted" && latestRun.errorCode === "server_shutdown_interrupted") {
++            latestRun = await settleInterruptedNativeBootstrap(db, { run: latestRun,
++              providerDispatchStarted: legacyAdapterEntered || nativeDispatchStarted || nativeOwnershipHeld,
++            }) ?? latestRun;
++          }
++          if (latestRun?.status === "cancelled" && !nativeDispatchStarted && !nativeOwnershipHeld &&
++              (latestRun.runtimeMode === "native" ||
++                parseObject(latestRun.resultJson?.startupCancellation).beforeNativeSelection === true)) {
++            // This executor has finished preparation and lease cleanup without
++            // handing off to native execution. Keep a durable receipt for admission
++            // after a restart; cleanup receipts are independently rechecked there.
++            await db.update(heartbeatRuns).set({
++              resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
++                ${JSON.stringify({ startupPreparationSettledAt: new Date().toISOString() })}::jsonb`,
++            }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
+           }
+-        }
+-        if (latestRun?.status === "interrupted" && latestRun.errorCode === "server_shutdown_interrupted") {
+-          latestRun = await settleInterruptedNativeBootstrap(db, { run: latestRun,
+-            providerDispatchStarted: legacyAdapterEntered || nativeDispatchStarted || nativeOwnershipHeld,
+-          }) ?? latestRun;
+-        }
+-        if (latestRun?.status === "cancelled" && !nativeDispatchStarted && !nativeOwnershipHeld &&
+-            (latestRun.runtimeMode === "native" ||
+-              parseObject(latestRun.resultJson?.startupCancellation).beforeNativeSelection === true)) {
+-          // This executor has finished preparation and lease cleanup without
+-          // handing off to native execution. Keep a durable receipt for admission
+-          // after a restart; cleanup receipts are independently rechecked there.
+           await db.update(heartbeatRuns).set({
+-            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
+-              ${JSON.stringify({ startupPreparationSettledAt: new Date().toISOString() })}::jsonb`,
+-          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
++            executionStage: "settled",
++            controllerLeaseExpiresAt: null,
++          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.runtimeMode, "legacy"),
++            eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
++            inArray(heartbeatRuns.status, ["succeeded", "failed", "cancelled", "timed_out", "interrupted"])));
++
++          latestRun = await getRun(run.id).catch(() => null);
++          if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status) && !isNativeRunnerOwnershipHeld(latestRun)) {
++            await appendRunEvent(run, { eventType: "lifecycle", stream: "system", level: "info", message: "task.run.measured",
++              payload: { phase: "task.run.measured", durationMs: Date.now() - (latestRun.startedAt ?? latestRun.createdAt).getTime(),
++                outcome: latestRun.status, durableSettlement: true } }).catch(error => logger.warn({ runId: run.id, error }, "Could not record terminal run duration"));
++          }
++        } finally {
++          controllerLease.stop();
++          settlingRunExecutions.add(run.id);
++          activeRunExecutions.delete(run.id);
++          // A failed owned Stop remains visible until this exact executor settles,
++          // including a graceful exit result arriving after the cancellation error.
++          // It is never retained beyond the active execution's cleanup.
++          failedProcessRunCancellations.delete(run.id);
++          executionControl.finish();
++          if (adapterExecutionControls.get(run.id) === executionControl) {
++            adapterExecutionControls.delete(run.id);
++          }
+         }
+-        await db.update(heartbeatRuns).set({
+-          executionStage: "settled",
+-          controllerLeaseExpiresAt: null,
+-        }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.runtimeMode, "legacy"),
+-          eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+-          inArray(heartbeatRuns.status, ["succeeded", "failed", "cancelled", "timed_out", "interrupted"])));
+-
+-        latestRun = await getRun(run.id).catch(() => null);
+-        if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status) && !isNativeRunnerOwnershipHeld(latestRun)) {
+-          await appendRunEvent(run, { eventType: "lifecycle", stream: "system", level: "info", message: "task.run.measured",
+-            payload: { phase: "task.run.measured", durationMs: Date.now() - (latestRun.startedAt ?? latestRun.createdAt).getTime(),
+-              outcome: latestRun.status, durableSettlement: true } }).catch(error => logger.warn({ runId: run.id, error }, "Could not record terminal run duration"));
++        if (latestRun) await reconcileMuseNativeTerminalRun(db, latestRun);
++        // Scratch preparation is optional. Its removal cannot be the only proof
++        // that a local legacy adapter's closed-stdio descendants stopped.
++        if (caseHandoffCleanupSettled && latestRun?.runtimeMode === "legacy" && legacyLocalAdapterEntered) {
++          caseHandoffCleanupSettled = hasStoppedLocalProcessTree(latestRun);
+         }
+-      } finally {
+-        controllerLease.stop();
+-        activeRunExecutions.delete(run.id);
+-        // A failed owned Stop remains visible until this exact executor settles,
+-        // including a graceful exit result arriving after the cancellation error.
+-        // It is never retained beyond the active execution's cleanup.
+-        failedProcessRunCancellations.delete(run.id);
+-        executionControl.finish();
+-        if (adapterExecutionControls.get(run.id) === executionControl) {
+-          adapterExecutionControls.delete(run.id);
++        if (caseHandoffCleanupSettled && latestRun && !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled &&
++            !nativeOwnershipHeld && isHeartbeatRunTerminalStatus(latestRun.status)) {
++          const handoff = await pendingCaseHandoffForRun(db, run.id);
++          if (handoff) await recordCaseHandoffExecutionReleased(db, run.id, handoff.issueId);
+         }
+-      }
+-      if (latestRun) await reconcileMuseNativeTerminalRun(db, latestRun);
+-      // Scratch preparation is optional. Its removal cannot be the only proof
+-      // that a local legacy adapter's closed-stdio descendants stopped.
+-      if (caseHandoffCleanupSettled && latestRun?.runtimeMode === "legacy" && legacyLocalAdapterEntered) {
+-        caseHandoffCleanupSettled = hasStoppedLocalProcessTree(latestRun);
+-      }
+-      if (caseHandoffCleanupSettled && latestRun && !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled &&
+-          !nativeOwnershipHeld && isHeartbeatRunTerminalStatus(latestRun.status)) {
+-        const handoff = await pendingCaseHandoffForRun(db, run.id);
+-        if (handoff) await recordCaseHandoffExecutionReleased(db, run.id, handoff.issueId);
+-      }
+-      // Terminalization precedes lease and adapter cleanup. Only now is the
+-      // owner gone; retry pending input for ordinary completions as well as Stop.
+-      let issueExecutionReleasedAfterCleanup = false;
+-      if (latestRun?.runtimeMode === "legacy" && ["failed", "timed_out"].includes(latestRun.status) &&
+-          latestRun.contextSnapshot?.explicitUserContinuation) {
+-        // Re-run the same queue-first recovery decision after cleanup. Its
+-        // earlier retry request could not authorize work while this executor
+-        // still held its controller or environment lease.
+-        await releaseIssueExecutionAndPromote(latestRun).then(() => {
+-          issueExecutionReleasedAfterCleanup = true;
+-          deferredIssueExecutionReleases.delete(run.id);
+-        }).catch(err => {
+-          logger.error({ err, runId: run.id }, "failed to settle explicit continuation after cleanup");
+-        });
+-      }
+-      if (latestRun?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(latestRun.status)) {
+-        const [pending] = await db.select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload }).from(agentWakeupRequests).where(and(
+-          eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.agentId, run.agentId),
+-          eq(agentWakeupRequests.status, "deferred_issue_execution"),
+-          sql`${agentWakeupRequests.payload}->>'issueId' = ${String(latestRun.contextSnapshot?.issueId)}`,
+-        )).limit(1);
+-        if (pending) {
+-          await (pending.payload?.queuedCommentInterrupt
+-            ? resumeQueuedCommentInterrupt(run.companyId, pending.id)
+-            : releaseIssueExecutionAndPromote(latestRun, { suppressImmediateRecovery: true })).then(() => {
++        // Terminalization precedes lease and adapter cleanup. Only now is the
++        // owner gone; retry pending input for ordinary completions as well as Stop.
++        let issueExecutionReleasedAfterCleanup = false;
++        if (latestRun?.runtimeMode === "legacy" && ["failed", "timed_out"].includes(latestRun.status) &&
++            latestRun.contextSnapshot?.explicitUserContinuation) {
++          // Re-run the same queue-first recovery decision after cleanup. Its
++          // earlier retry request could not authorize work while this executor
++          // still held its controller or environment lease.
++          await releaseIssueExecutionAndPromote(latestRun).then(() => {
+             issueExecutionReleasedAfterCleanup = true;
+             deferredIssueExecutionReleases.delete(run.id);
+           }).catch(err => {
+-            logger.error({ err, runId: run.id }, "failed to promote legacy comment queue after cleanup");
++            logger.error({ err, runId: run.id }, "failed to settle explicit continuation after cleanup");
+           });
+         }
+-      }
+-      if (latestRun?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(latestRun.status) &&
+-          !issueExecutionReleasedAfterCleanup) {
+-        const deferredReleaseOptions = deferredIssueExecutionReleases.get(run.id);
+-        await releaseIssueExecutionAndPromote(latestRun, deferredReleaseOptions).then(() => {
+-          deferredIssueExecutionReleases.delete(run.id);
+-        }).catch(err => {
+-          deferredIssueExecutionReleases.delete(run.id);
+-          logger.error({ err, runId: run.id }, "failed to release issue execution after legacy cleanup");
+-        });
+-      }
+-      if (
+-        !nativeSessionResumeScheduled &&
+-        !nativeWorkspaceFinalizeScheduled &&
+-        !shutdownInProgress
+-      ) {
+-        if (latestRun) await resumeRemoteStopComments(latestRun).catch(err => {
+-          logger.warn({ err, runId: run.id }, "failed to resume user messages after remote Stop");
+-        });
+-        if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
+-          await toolActionDeliveryService(db, { wakeup: trackWakeup })
+-            .deliverForRun({ companyId: run.companyId, runId: run.id })
+-            .catch(err => {
+-              logger.warn({ err, runId: run.id }, "failed to deliver settled tool reviews after execution cleanup");
++        if (latestRun?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(latestRun.status)) {
++          const [pending] = await db.select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload }).from(agentWakeupRequests).where(and(
++            eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.agentId, run.agentId),
++            eq(agentWakeupRequests.status, "deferred_issue_execution"),
++            sql`${agentWakeupRequests.payload}->>'issueId' = ${String(latestRun.contextSnapshot?.issueId)}`,
++          )).limit(1);
++          if (pending) {
++            await (pending.payload?.queuedCommentInterrupt
++              ? resumeQueuedCommentInterrupt(run.companyId, pending.id)
++              : releaseIssueExecutionAndPromote(latestRun, { suppressImmediateRecovery: true })).then(() => {
++              issueExecutionReleasedAfterCleanup = true;
++              deferredIssueExecutionReleases.delete(run.id);
++            }).catch(err => {
++              logger.error({ err, runId: run.id }, "failed to promote legacy comment queue after cleanup");
+             });
++          }
++        }
++        if (latestRun?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(latestRun.status) &&
++            !issueExecutionReleasedAfterCleanup) {
++          const deferredReleaseOptions = deferredIssueExecutionReleases.get(run.id);
++          await releaseIssueExecutionAndPromote(latestRun, deferredReleaseOptions).then(() => {
++            deferredIssueExecutionReleases.delete(run.id);
++          }).catch(err => {
++            deferredIssueExecutionReleases.delete(run.id);
++            logger.error({ err, runId: run.id }, "failed to release issue execution after legacy cleanup");
++          });
++        }
++        if (
++          !nativeSessionResumeScheduled &&
++          !nativeWorkspaceFinalizeScheduled &&
++          !shutdownInProgress
++        ) {
++          if (latestRun) await resumeRemoteStopComments(latestRun).catch(err => {
++            logger.warn({ err, runId: run.id }, "failed to resume user messages after remote Stop");
++          });
++          if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
++            await toolActionDeliveryService(db, { wakeup: trackWakeup })
++              .deliverForRun({ companyId: run.companyId, runId: run.id })
++              .catch(err => {
++                logger.warn({ err, runId: run.id }, "failed to deliver settled tool reviews after execution cleanup");
++              });
++          }
++          await startNextQueuedRunForAgent(run.agentId);
+         }
+-        await startNextQueuedRunForAgent(run.agentId);
++      } finally {
++        settlingRunExecutions.delete(run.id);
+       }
+     }
+   }
+@@ -3984,7 +3998,7 @@ export function heartbeatService(
+       const intervalMs = options.intervalMs ?? 25;
+       const deadline = Date.now() + timeoutMs;
+ 
+-      while (liveRunExecutions.has(runId)) {
++      while (liveRunExecutions.has(runId) || settlingRunExecutions.has(runId)) {
+         if (Date.now() >= deadline) {
+           throw new Error(
+             `Timed out waiting for heartbeat run ${runId} execution to drain`,
+diff --git a/server/src/services/heartbeat/queue.ts b/server/src/services/heartbeat/queue.ts
+index ad8e99cee..51dc3be6f 100644
+--- a/server/src/services/heartbeat/queue.ts
++++ b/server/src/services/heartbeat/queue.ts
+@@ -148,7 +148,7 @@ import {
+   WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
+ } from "../execution-workspace-policy.js";
+ import { readContinuationAttempt } from "../recovery/index.js";
+-import { allowsIssueInteractionWake, wakeChatConversationsConflict } from "../../modules/run-dispatch/index.js";
++import { allowsIssueInteractionWake, isResolvedInteractionContinuationWakeContext, wakeChatConversationsConflict } from "../../modules/run-dispatch/index.js";
+ import { withAgentStartLock } from "../agent-start-lock.js";
+ import {
+   evaluateAgentInvokability,
+@@ -1236,6 +1236,26 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+         executionLockedAt: claimedAt,
+         updatedAt: claimedAt,
+       }).where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)));
++      // A resolved interaction resumes a review task. Claiming the continuation
++      // transfers the task back to active work, and that visible status change
++      // must be committed with the run/issue execution lock so observers never
++      // see an active continuation still parked in review.
++      if (isResolvedInteractionContinuationWakeContext(claimedRun.contextSnapshot)) {
++        await tx.update(issues).set({
++          status: "in_progress",
++          statusVersion: sql`${issues.statusVersion} + 1`,
++          startedAt: claimedAt,
++          updatedAt: claimedAt,
++        }).where(and(
++          eq(issues.id, issueId), eq(issues.companyId, run.companyId),
++          eq(issues.assigneeAgentId, agent.id), eq(issues.executionRunId, claimedRun.id),
++          eq(issues.status, "in_review"),
++          sql`(
++            coalesce(${issues.executionState}->>'status', '') <> 'pending' OR
++            coalesce(${issues.executionState}->>'currentStageType', '') NOT IN ('review', 'approval')
++          )`,
++        ));
++      }
+     }
+     const nativeReviewContext = readNativeReviewAssignmentContext(context);
+     const queuedCommentIds = queuedCommentIdsFromRunContext(context);
+diff --git a/server/src/services/heartbeat/task-context.ts b/server/src/services/heartbeat/task-context.ts
+index 982005905..596a3b158 100644
+--- a/server/src/services/heartbeat/task-context.ts
++++ b/server/src/services/heartbeat/task-context.ts
+@@ -50,6 +50,11 @@ function readNonEmptyString(value: unknown): string | null {
+   return typeof value === "string" && value.trim().length > 0 ? value : null;
+ }
+ 
++function isAgentExecutionStagePrincipal(value: unknown, agentId: string): boolean {
++  const principal = parseObject(value);
++  return principal.type === "agent" && principal.agentId === agentId;
++}
++
+ /** Rebuild stage instructions from current company-scoped issue state for every wake. */
+ export function refreshCurrentExecutionStageContext(input: {
+   context: Record<string, unknown>;
+@@ -71,8 +76,8 @@ export function refreshCurrentExecutionStageContext(input: {
+   const previous = parseObject(input.context.executionStage);
+   if (input.recovering) {
+     const sameParticipant = executionStage?.wakeRole === "executor"
+-      ? previous.returnAssignee?.type === "agent" && previous.returnAssignee.agentId === input.agentId
+-      : previous.currentParticipant?.type === "agent" && previous.currentParticipant.agentId === input.agentId;
++      ? isAgentExecutionStagePrincipal(previous.returnAssignee, input.agentId)
++      : isAgentExecutionStagePrincipal(previous.currentParticipant, input.agentId);
+     if (
+       !executionStage ||
+       previous.stageId !== executionStage.stageId ||
+@@ -97,8 +102,8 @@ export function refreshCurrentExecutionStageContext(input: {
+     previous.stageId === executionStage.stageId &&
+     previous.wakeRole === executionStage.wakeRole &&
+     (executionStage.wakeRole === "executor"
+-      ? previous.returnAssignee?.type === "agent" && previous.returnAssignee.agentId === input.agentId
+-      : previous.currentParticipant?.type === "agent" && previous.currentParticipant.agentId === input.agentId)
++      ? isAgentExecutionStagePrincipal(previous.returnAssignee, input.agentId)
++      : isAgentExecutionStagePrincipal(previous.currentParticipant, input.agentId))
+   ) {
+     executionStage.recoveryInstruction = recoveryInstruction;
+   }
+diff --git a/server/src/services/issues.ts b/server/src/services/issues.ts
+index 257ccab4b..91c5199e0 100644
+--- a/server/src/services/issues.ts
++++ b/server/src/services/issues.ts
+@@ -17,7 +17,11 @@ import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notificatio
+ import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
+ import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
+ import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
+-import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
++import {
++  assertLegacyRunTaskOwnership,
++  LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT,
++} from "../legacy-run-task-ownership.js";
++import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
+ import { retryIdempotentDatabaseOperation } from "../database-retry.js";
+ import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
+ import { documentService } from "./documents.js";
+@@ -224,6 +228,72 @@ import { ensurePersonalPrivateProject } from "./projects.js";
+ import { projectSafeChatPublication } from "./chat-publication-projection.js";
+ import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
+ 
++async function revokeLegacyRunsOnIssueHandoff(
++  tx: any,
++  input: {
++    issue: typeof issues.$inferSelect;
++    nextAssigneeAgentId: string | null;
++    nextAssigneeUserId: string | null;
++    actorAgentId: string | null | undefined;
++    actorRunId: string | null | undefined;
++  },
++) {
++  const { issue } = input;
++  const assignmentChanged =
++    issue.assigneeAgentId !== input.nextAssigneeAgentId ||
++    issue.assigneeUserId !== input.nextAssigneeUserId;
++  if (!assignmentChanged || !issue.assigneeAgentId) return;
++
++  const issueBoundRunIds = new Set(
++    [issue.executionRunId, issue.checkoutRunId].filter((runId): runId is string => Boolean(runId)),
++  );
++  const runIds = new Set(issueBoundRunIds);
++  if (input.actorAgentId === issue.assigneeAgentId && input.actorRunId) {
++    runIds.add(input.actorRunId);
++  }
++  if (runIds.size === 0) return;
++
++  const runs = await tx
++    .select({
++      id: heartbeatRuns.id,
++      companyId: heartbeatRuns.companyId,
++      agentId: heartbeatRuns.agentId,
++      runtimeMode: heartbeatRuns.runtimeMode,
++      contextSnapshot: heartbeatRuns.contextSnapshot,
++    })
++    .from(heartbeatRuns)
++    .where(and(
++      eq(heartbeatRuns.companyId, issue.companyId),
++      inArray(heartbeatRuns.id, [...runIds]),
++    ))
++    .for("update");
++
++  for (const run of runs) {
++    const context = run.contextSnapshot;
++    if (
++      run.runtimeMode !== "legacy" ||
++      run.agentId !== issue.assigneeAgentId ||
++      (!issueBoundRunIds.has(run.id) && (
++        !context || typeof context !== "object" || Array.isArray(context) ||
++        (context as Record<string, unknown>).issueId !== issue.id
++      ))
++    ) continue;
++    await appendHeartbeatRunEvent(tx as Db, {
++      companyId: issue.companyId,
++      runId: run.id,
++      agentId: run.agentId,
++      eventType: LEGACY_ISSUE_OWNERSHIP_REVOKED_EVENT,
++      stream: "system",
++      level: "info",
++      message: "Issue ownership was transferred; this run can no longer change the issue.",
++      payload: {
++        issueId: issue.id,
++        ownerAgentId: run.agentId,
++      },
++    });
++  }
++}
++
+ const ALL_ISSUE_STATUSES = [
+   "backlog",
+   "todo",
+@@ -11234,7 +11304,7 @@ export function issueService(db: Db) {
+           const actorRun = await assertAgentRunWriteAllowed(tx, receiptExisting.companyId, {
+             agentId: actorAgentId, runId: actorRunId, stopId: actorRunStopId,
+           });
+-          assertLegacyRunTaskOwnership(actorRun, receiptExisting);
++          await assertLegacyRunTaskOwnership(tx, actorRun, receiptExisting);
+           if (actorRunHandoffId && (
+             !actorRun || actorRunHandoffId !== actorRunId ||
+             actorRun.runtimeMode !== "legacy" || actorRun.companyId !== receiptExisting.companyId ||
+@@ -11250,6 +11320,19 @@ export function issueService(db: Db) {
+             });
+           }
+         }
++        await revokeLegacyRunsOnIssueHandoff(tx, {
++          issue: receiptExisting,
++          nextAssigneeAgentId:
++            issueData.assigneeAgentId !== undefined
++              ? issueData.assigneeAgentId
++              : receiptExisting.assigneeAgentId,
++          nextAssigneeUserId:
++            issueData.assigneeUserId !== undefined
++              ? issueData.assigneeUserId
++              : receiptExisting.assigneeUserId,
++          actorAgentId,
++          actorRunId,
++        });
+         if (actorAgentId && patch.status === "done") {
+           const [review] = await tx.select({ id: toolActionRequests.id }).from(toolActionRequests).where(and(eq(toolActionRequests.companyId, existing.companyId), eq(toolActionRequests.issueId, id), inArray(toolActionRequests.status, ["pending", "approved", "executing"]))).limit(1);
+           if (review) throw conflict("This task is waiting for a connection review. Finish unrelated work, then yield in_review without retrying the governed call.", { code: "tool_review_pending", actionRequestId: review.id });
+diff --git a/server/src/services/run-failure-report.ts b/server/src/services/run-failure-report.ts
+index 46f3c090d..f15f718a1 100644
+--- a/server/src/services/run-failure-report.ts
++++ b/server/src/services/run-failure-report.ts
+@@ -72,13 +72,22 @@ function asRecord(value: unknown): Record<string, unknown> | null {
+     : null;
+ }
+ 
++function isPreDispatchSetupSnapshot(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
++  // Legacy terminalization marks a run `settling` before this async reporter
++  // observes the row. Preserve setup classification across that lifecycle
++  // transition while rejecting executing/settled snapshots without fresh
++  // pre-provider evidence.
++  return options.phase === "setup" &&
++    (run.executionStage === "preparing" || run.executionStage === "settling");
++}
++
+ /** An owned AI selection rejection before dispatch, not its broad catch wrapper. */
+ function isAiConnectionSelectionBlocker(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
+   // Resumed native input may already have provider effects, even during preparation.
+   if (run.runtimeMode === "native" && asRecord(run.runnerProfileJson)?.nativeExecutionInput !== undefined) return false;
+   if (
+     run.status !== "failed" || run.errorCode !== "configuration_incomplete" ||
+-    run.executionStage !== "preparing" || options.phase !== "setup" ||
++    !isPreDispatchSetupSnapshot(run, options) ||
+     run.exitCode != null || run.signal != null
+   ) return false;
+   const configuration = asRecord(run.resultJson?.configurationIncomplete);
+@@ -93,8 +102,7 @@ function isMissingSecretConfigurationBlocker(run: HeartbeatRun, options: RunFail
+   if (
+     run.status !== "failed" ||
+     run.errorCode !== "configuration_incomplete" ||
+-    run.executionStage !== "preparing" ||
+-    options.phase !== "setup" ||
++    !isPreDispatchSetupSnapshot(run, options) ||
+     run.exitCode != null ||
+     run.signal != null
+   ) return false;
+@@ -130,7 +138,7 @@ function isMissingSecretConfigurationBlocker(run: HeartbeatRun, options: RunFail
+ function isLocalPathWorkspaceConfigurationBlocker(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
+   if (
+     run.status !== "failed" || run.errorCode !== "workspace_validation_failed" ||
+-    run.executionStage !== "preparing" || options.phase !== "setup" ||
++    !isPreDispatchSetupSnapshot(run, options) ||
+     run.exitCode != null || run.signal != null
+   ) return false;
+ 
+@@ -149,7 +157,7 @@ function isLocalPathWorkspaceConfigurationBlocker(run: HeartbeatRun, options: Ru
+ function isRestrictedWorkspaceSourceBlocker(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
+   if (
+     run.status !== "failed" || run.errorCode !== "configuration_incomplete" ||
+-    run.executionStage !== "preparing" || options.phase !== "setup" ||
++    !isPreDispatchSetupSnapshot(run, options) ||
+     run.exitCode != null || run.signal != null
+   ) return false;
+   const configuration = asRecord(run.resultJson?.configurationIncomplete);
+@@ -161,8 +169,8 @@ function isRestrictedWorkspaceSourceBlocker(run: HeartbeatRun, options: RunFailu
+ /** Only the managed-clone producer can attach this bounded pre-dispatch evidence. */
+ function isGitConnectionFailure(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
+   const connection = readConnectionFailure(run.resultJson?.connectionFailure);
+-  if (connection?.provider !== "git" || run.status !== "failed" || run.executionStage !== "preparing" ||
+-      options.phase !== "setup" || run.exitCode != null || run.signal != null) return false;
++  if (connection?.provider !== "git" || run.status !== "failed" ||
++      !isPreDispatchSetupSnapshot(run, options) || run.exitCode != null || run.signal != null) return false;
+   const recovery = asRecord(run.resultJson?.executionRecovery);
+   if (recovery?.kind !== "bootstrap" || recovery.providerWorkStarted !== false) return false;
+   const validation = asRecord(run.resultJson?.workspaceValidation);
