@@ -89,7 +89,7 @@ index 675f46d1e..11d734d96 100644
            : [];
          const confirmedAssignmentHandoffWakeId = assignmentHandoffWake?.id ?? null;
 diff --git a/server/src/services/legacy-execution-recovery.ts b/server/src/services/legacy-execution-recovery.ts
-index cec15ef9b..e84037833 100644
+index cec15ef9b..946e9cc5d 100644
 --- a/server/src/services/legacy-execution-recovery.ts
 +++ b/server/src/services/legacy-execution-recovery.ts
 @@ -1,5 +1,5 @@
@@ -130,7 +130,7 @@ index cec15ef9b..e84037833 100644
 +            eq(caseHandoffs.companyId, current.companyId),
 +            eq(caseHandoffs.sourceRunId, current.id),
 +            eq(caseHandoffs.issueId, issueId),
-+            eq(caseHandoffs.id, caseHandoffId),
++            sql`${caseHandoffs.id} = ${caseHandoffId}`,
 +            eq(caseHandoffs.destinationKind, "agent"),
 +            eq(caseHandoffs.state, "awaiting_release"),
 +          )).limit(1)
