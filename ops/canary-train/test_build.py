@@ -44,19 +44,22 @@ class IntegrityAndProvenanceTests(unittest.TestCase):
         source = "a" * 40
         bodies = {}
         metadata = {}
-        for name in build.DEFAULT_PACKAGES:
+        for name in (*build.DEFAULT_PACKAGES, "@paperclipai/db"):
             payload, sri = make_npm_tarball(name, version, {"commit": source} if name == "@paperclipai/server" else None)
             url = "https://registry.npmjs.org/tarballs/" + name.replace("/", "-") + ".tgz"
             bodies[url] = payload
-            metadata[build.npm_url(name, "canary")] = {"name": name, "version": version, "dist": {"tarball": url, "integrity": sri}}
+            endpoint = "canary" if name in build.DEFAULT_PACKAGES else version
+            metadata[build.npm_url(name, endpoint)] = {"name": name, "version": version, "dist": {"tarball": url, "integrity": sri}}
         with patch.object(build, "http_json", side_effect=lambda url: metadata[url]) as request, patch.object(build, "http_bytes", side_effect=lambda url: bodies[url]):
             resolved, docs, commit = build.resolve_canary()
         self.assertEqual(resolved, version)
         self.assertEqual(commit, source)
-        self.assertEqual(set(docs), set(build.DEFAULT_PACKAGES))
+        self.assertEqual(set(docs), {*build.DEFAULT_PACKAGES, "@paperclipai/db"})
+        self.assertEqual(docs["@paperclipai/db"]["_verifiedTarballSha256"], hashlib.sha256(bodies["https://registry.npmjs.org/tarballs/@paperclipai-db.tgz"]).hexdigest())
         self.assertEqual([call.args[0] for call in request.call_args_list], [
             "https://registry.npmjs.org/paperclipai/canary",
             "https://registry.npmjs.org/@paperclipai%2Fserver/canary",
+            "https://registry.npmjs.org/@paperclipai%2Fdb/2026.1018.0-canary.9",
         ])
 
     def test_npm_integrity_accepts_correct_sri_and_rejects_tampering(self):
@@ -699,6 +702,44 @@ class ArtifactTests(unittest.TestCase):
             },
         }))
         return workspace, output
+
+    def test_migration_receipt_binds_source_runtime_and_workflow_identity(self):
+        inventory = {
+            f"node_modules/@paperclipai/db/dist/migrations/{index:04d}_migration.sql": hashlib.sha256(str(index).encode()).hexdigest()
+            for index in range(374)
+        }
+        inventory["node_modules/@paperclipai/db/dist/migrations/meta/_journal.json"] = hashlib.sha256(b"journal").hexdigest()
+        candidate_hash = hashlib.sha256(build.canonical_json(dict(sorted(inventory.items())))).hexdigest()
+        assertions = [{"id": item, "passed": True} for item in build.MIGRATION_COMPAT_ASSERTIONS]
+        candidate_version = "2026.1024.0-canary.14"
+        candidate_integrity = "sha512-Ub4gzp005JhteAMeDsOxUXDjbSA7OUg+dqiQ1CGaqqxB+xZpJS+x5ke5N/GkqL3f/a+DOQMDp/ZJzNC6//Uo3Q=="
+        provenance = {"version": candidate_version, "sourceCommit": "a" * 40, "patchCommit": "b" * 40, "patchTree": "c" * 40, "npmPackages": {"@paperclipai/db": {"version": candidate_version, "integrity": candidate_integrity}}}
+        body = {
+            "schema": 1,
+            "candidateSourceCommit": provenance["sourceCommit"],
+            "preparedSource": {"sourceCommit": provenance["sourceCommit"], "patchCommit": provenance["patchCommit"], "patchTree": provenance["patchTree"], "migrationInventoryCount": 375, "migrationInventorySha256": candidate_hash},
+            "oldPackage": {"version": build.MIGRATION_OLD_VERSION, "integrity": build.MIGRATION_OLD_SRI, "migrationInventoryCount": 354, "migrationInventorySha256": build.MIGRATION_BASELINE_HASH},
+            "candidate": {"version": candidate_version, "integrity": candidate_integrity, "migrationInventoryCount": 375, "migrationInventorySha256": candidate_hash},
+            "assertions": assertions,
+        }
+        receipt = {**body, "receiptSha256": hashlib.sha256(json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()}
+        with patch.object(build, "MIGRATION_CANDIDATE_HASH", candidate_hash):
+            result = build.assemble_migration_compatibility_receipt(receipt, provenance, inventory, run_id=1234, run_attempt=2, controller_commit="d" * 40)
+            self.assertEqual(result["candidateInventorySha256"], candidate_hash)
+            self.assertEqual(result["upgradeProof"], {"passed": True, "runId": 1234, "runAttempt": 2, "controllerCommit": "d" * 40, "sourceCommit": "a" * 40, "patchCommit": "b" * 40, "assertions": list(build.MIGRATION_COMPAT_ASSERTIONS)})
+            changed_inventory = dict(inventory)
+            changed_inventory[next(iter(changed_inventory))] = "f" * 64
+            with self.assertRaisesRegex(build.TrainError, "compiled runtime migration inventory"):
+                build.assemble_migration_compatibility_receipt(receipt, provenance, changed_inventory, run_id=1234, run_attempt=2, controller_commit="d" * 40)
+            changed_provenance = {**provenance, "patchCommit": "e" * 40}
+            with self.assertRaisesRegex(build.TrainError, "prepared source"):
+                build.assemble_migration_compatibility_receipt(receipt, changed_provenance, inventory, run_id=1234, run_attempt=2, controller_commit="d" * 40)
+            duplicate = json.loads(json.dumps(receipt))
+            duplicate["assertions"][-1]["id"] = duplicate["assertions"][0]["id"]
+            duplicate_body = {key: value for key, value in duplicate.items() if key != "receiptSha256"}
+            duplicate["receiptSha256"] = hashlib.sha256(json.dumps(duplicate_body, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            with self.assertRaisesRegex(build.TrainError, "missing, or duplicate assertions"):
+                build.assemble_migration_compatibility_receipt(duplicate, provenance, inventory, run_id=1234, run_attempt=2, controller_commit="d" * 40)
 
     def test_package_outputs_full_runtime_roots_hashes_migrations_and_reproducible_archive(self):
         with tempfile.TemporaryDirectory() as temp:

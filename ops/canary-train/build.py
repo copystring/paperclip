@@ -324,6 +324,19 @@ def resolve_canary() -> tuple[str, dict[str, dict[str, Any]], str]:
     docs["paperclipai"]["_verifiedTarballSha256"] = verify_npm_tarball_identity(
         cli_tar, docs["paperclipai"]["dist"].get("integrity", ""), "paperclipai", version
     )
+    db_doc = http_json(npm_url("@paperclipai/db", version))
+    if (
+        db_doc.get("name") != "@paperclipai/db"
+        or db_doc.get("version") != version
+        or not isinstance(db_doc.get("dist", {}).get("tarball"), str)
+        or not re.fullmatch(r"sha512-[A-Za-z0-9+/]+={0,2}", str(db_doc.get("dist", {}).get("integrity", "")))
+    ):
+        raise TrainError("database package metadata does not match synchronized Canary version")
+    db_tar = http_bytes(db_doc["dist"]["tarball"])
+    db_doc["_verifiedTarballSha256"] = verify_npm_tarball_identity(
+        db_tar, db_doc["dist"]["integrity"], "@paperclipai/db", version
+    )
+    docs["@paperclipai/db"] = db_doc
     return version, docs, source_commit
 
 
@@ -466,7 +479,7 @@ def prepare(workspace: Path, output: Path, manifest: dict[str, Any], manifest_pa
                 "version": npm_docs[name]["version"],
                 "integrity": npm_docs[name]["dist"].get("integrity"),
                 "tarballSha256": npm_docs[name]["_verifiedTarballSha256"],
-            } for name in DEFAULT_PACKAGES
+            } for name in (*DEFAULT_PACKAGES, "@paperclipai/db")
         },
         "patches": statuses,
     }
@@ -1082,7 +1095,86 @@ def runtime_directories(workspace: Path, release_manifest: list[dict[str, Any]])
     return result
 
 
-def package(workspace: Path, output: Path) -> dict[str, Any]:
+MIGRATION_COMPAT_ASSERTIONS = (
+    "migration-engine-upgrade",
+    "task-retry-row-preserved",
+    "candidate-schema-current",
+    "migration-specific-invariants",
+    "secret-scope-data-preserved",
+    "restore-point-checkout-migrations",
+    "migration-inventory-extension",
+)
+MIGRATION_INVENTORY_PREFIX = "node_modules/@paperclipai/db/dist/migrations/"
+MIGRATION_OLD_VERSION = "2026.1017.0-canary.6"
+MIGRATION_OLD_SRI = "sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg=="
+MIGRATION_BASELINE_HASH = "9cec6945b6dd1c38b80940e5246d500da8b5d506a4be68db20ab89136fc11ed9"
+MIGRATION_CANDIDATE_HASH = "89cd5c4305633ac9eeabbb04a9d0584adce53afe0b2d06a6f7dab983dfe34174"
+
+
+def assemble_migration_compatibility_receipt(receipt: dict[str, Any], provenance: dict[str, Any], runtime_inventory: dict[str, str], *, run_id: int, run_attempt: int, controller_commit: str) -> dict[str, Any]:
+    body = {key: value for key, value in receipt.items() if key != "receiptSha256"}
+    expected_receipt_hash = hashlib.sha256(json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    prepared = receipt.get("preparedSource")
+    old_package = receipt.get("oldPackage")
+    candidate = receipt.get("candidate")
+    candidate_package = provenance.get("npmPackages", {}).get("@paperclipai/db")
+    assertions = receipt.get("assertions")
+    if receipt.get("schema") != 1 or receipt.get("receiptSha256") != expected_receipt_hash:
+        raise TrainError("migration compatibility evidence has an invalid receipt digest")
+    if not isinstance(prepared, dict) or not isinstance(old_package, dict) or not isinstance(candidate, dict):
+        raise TrainError("migration compatibility evidence is incomplete")
+    if (
+        receipt.get("candidateSourceCommit") != provenance.get("sourceCommit")
+        or prepared.get("sourceCommit") != provenance.get("sourceCommit")
+        or prepared.get("patchCommit") != provenance.get("patchCommit")
+        or prepared.get("patchTree") != provenance.get("patchTree")
+        or not isinstance(candidate_package, dict)
+        or not re.fullmatch(r"\d{4}\.\d+\.0-canary\.\d+", str(provenance.get("version", "")))
+        or candidate_package.get("version") != provenance.get("version")
+        or candidate.get("version") != provenance.get("version")
+        or candidate.get("integrity") != candidate_package.get("integrity")
+        or not re.fullmatch(r"sha512-[A-Za-z0-9+/]+={0,2}", str(candidate_package.get("integrity", "")))
+        or candidate.get("migrationInventoryCount") != 375
+        or candidate.get("migrationInventorySha256") != MIGRATION_CANDIDATE_HASH
+        or prepared.get("migrationInventoryCount") != 375
+        or prepared.get("migrationInventorySha256") != MIGRATION_CANDIDATE_HASH
+        or old_package.get("version") != MIGRATION_OLD_VERSION
+        or old_package.get("integrity") != MIGRATION_OLD_SRI
+        or old_package.get("migrationInventoryCount") != 354
+        or old_package.get("migrationInventorySha256") != MIGRATION_BASELINE_HASH
+    ):
+        raise TrainError("migration compatibility evidence does not match the prepared source and reviewed package transition")
+    if not isinstance(assertions, list) or len(assertions) != len(MIGRATION_COMPAT_ASSERTIONS):
+        raise TrainError("migration compatibility evidence is missing required assertions")
+    assertion_ids = [item.get("id") for item in assertions if isinstance(item, dict) and item.get("passed") is True]
+    if len(assertion_ids) != len(MIGRATION_COMPAT_ASSERTIONS) or len(set(assertion_ids)) != len(assertion_ids) or set(assertion_ids) != set(MIGRATION_COMPAT_ASSERTIONS):
+        raise TrainError("migration compatibility evidence contains failed, missing, or duplicate assertions")
+    actual_hash = sha256(canonical_json(dict(sorted(runtime_inventory.items()))))
+    if len(runtime_inventory) != 375 or actual_hash != MIGRATION_CANDIDATE_HASH or actual_hash != candidate.get("migrationInventorySha256"):
+        raise TrainError("compiled runtime migration inventory differs from the tested candidate")
+    if not re.fullmatch(r"[a-f0-9]{40}", controller_commit) or run_id <= 0 or run_attempt <= 0:
+        raise TrainError("migration compatibility evidence requires a valid workflow identity")
+    return {
+        "schemaVersion": 1,
+        "baselineInventorySha256": old_package["migrationInventorySha256"],
+        "candidateInventorySha256": actual_hash,
+        "baselinePackage": {"version": old_package["version"], "integrity": old_package["integrity"]},
+        "candidatePackage": {"version": candidate["version"], "integrity": candidate["integrity"]},
+        "baselineFileCount": old_package["migrationInventoryCount"],
+        "candidateFileCount": len(runtime_inventory),
+        "upgradeProof": {
+            "passed": True,
+            "runId": run_id,
+            "runAttempt": run_attempt,
+            "controllerCommit": controller_commit,
+            "sourceCommit": provenance["sourceCommit"],
+            "patchCommit": provenance["patchCommit"],
+            "assertions": assertion_ids,
+        },
+    }
+
+
+def package(workspace: Path, output: Path, migration_receipt_path: Path | None = None) -> dict[str, Any]:
     provenance, release_manifest = load_provenance(workspace, output)
     build_path = output / "build.json"
     if not build_path.is_file():
@@ -1148,6 +1240,28 @@ def package(workspace: Path, output: Path) -> dict[str, Any]:
             migrations.append({"path": installed, "sha256": sha256(path.read_bytes())})
     if not migrations:
         raise TrainError("compiled database migration inventory is empty")
+    migration_compatibility = None
+    if migration_receipt_path is not None:
+        runtime_inventory = {
+            item["path"]: item["sha256"]
+            for item in migrations
+            if item["path"].endswith(".sql") or item["path"].endswith("/meta/_journal.json")
+        }
+        try:
+            receipt = json.loads(migration_receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TrainError("migration compatibility receipt is missing or invalid") from exc
+        try:
+            migration_compatibility = assemble_migration_compatibility_receipt(
+                receipt,
+                provenance,
+                runtime_inventory,
+                run_id=int(os.environ["GITHUB_RUN_ID"]),
+                run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                controller_commit=os.environ["GITHUB_SHA"].lower(),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TrainError("migration compatibility receipt workflow identity is invalid") from exc
     manifest = {
         "schemaVersion": 1,
         "version": provenance["version"],
@@ -1165,6 +1279,8 @@ def package(workspace: Path, output: Path) -> dict[str, Any]:
         "quality": quality,
         "archiveSha256": sha256(payload.read_bytes()),
     }
+    if migration_compatibility is not None:
+        manifest["migrationCompatibilityReceipt"] = migration_compatibility
     if "testEvidence" in build_result:
         manifest["testEvidence"] = build_result["testEvidence"]
     native_evidence = build_result.get("nativeRunnerEvidence")
@@ -1227,6 +1343,8 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--test-receipts", type=Path)
             command.add_argument("--runner-artifacts", type=Path, required=True)
             command.add_argument("--provider-pack", type=Path, required=True)
+        elif name == "package":
+            command.add_argument("--migration-receipt", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         workspace, output = args.workspace.resolve(), args.output.resolve()
@@ -1246,7 +1364,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.provider_pack.resolve(),
             )
         else:
-            result = package(workspace, output)
+            result = package(workspace, output, args.migration_receipt.resolve())
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
     except (TrainError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:

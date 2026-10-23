@@ -1,0 +1,13 @@
+# Isolated migration compatibility lane
+
+Run this lane in a disposable CI environment, never against the configured production database:
+
+```sh
+node ops/canary-train/verify-migration-compatibility.mjs /tmp/migration-compat-receipt.json /path/to/prepared/paperclip-source /path/to/prepared/paperclip-output/provenance.json
+```
+
+The runner fetches and verifies the pinned Canary 6 baseline and the exact `@paperclipai/db` package version selected by the prepared Canary provenance. The approved candidate migration inventory remains fixed at 375 files and its reviewed SHA-256; a newer runtime version can pass only if its package SRI, prepared source migrations, and compiled runtime all match that inventory. It checks the old package's 354-file migration inventory and the candidate's approved 375-file inventory against pinned hashes, requires all old SQL bytes and journal entries to remain unchanged, and accepts exactly 21 appended migrations.
+
+It creates a disposable embedded PostgreSQL database using the old package's real test harness and migration engine. It seeds representative retry and company/user/agent-owned secret rows, applies the candidate migrations through 0373, adds restore-point data at that schema boundary, then applies 0374 and 0375 with the candidate migration engine. The restore-point journal is temporarily shortened only inside the runner's private temporary npm installation; its original bytes and hash are checked after restoration and before receipt creation. Assertions cover preservation of existing rows and the new checkout-specific uniqueness behavior.
+
+Before running PostgreSQL, the helper also checks the prepared source commit and patch tree against provenance, verifies a clean pinned checkout, and requires its SQL and journal inventory to match the exact candidate npm tarball. The packaging stage separately compares the compiled runtime inventory to that tested inventory and binds the proof to the current workflow run, attempt, controller commit, source commit, and patch commit. The JSON output is preparation evidence bound to the package identities, inventory/journal hashes, prepared source, and passing fixture assertions. Its `receiptSha256` is an unkeyed integrity hash, not a signature or consumer-acceptance token. It does not establish that the old Paperclip application can boot against the migrated schema or roll back safely, and it must not be used as a consumer allowlist until those separate checks pass.

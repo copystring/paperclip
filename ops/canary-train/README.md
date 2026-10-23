@@ -81,6 +81,31 @@ The `review-tool-access` instance registration requires `sourceReplacement` with
 
 The controller workflow runs once daily at 03:23 UTC; identical green builds are skipped. The instance timer template checks once daily at 08:30 UTC, with up to 40 seconds of random delay. It catches up once after downtime. Manual checks remain available. Install the timer template only after the first accepted activation; retain the existing service and its configuration. PR heads remain pinned until deliberately reviewed. A patch is retired automatically when the exact published Canary includes its merged commit or already contains the verified patch. A changed unreviewed PR head or unresolved source conflict blocks publication.
 
+### Reviewed migration transitions
+
+Changed migration inventories remain blocked by default. A local
+`approvedMigrationTransitions` entry must name the exact baseline and candidate
+inventory hashes and a nonempty `requiredAssertions` list. The release must
+contain a matching `migrationCompatibilityReceipt` from its verified successful
+workflow, including the installed baseline package version and npm integrity.
+The receipt is bound to the workflow run, attempt, controller, source and patched
+commit. Approval alone cannot substitute for that evidence.
+
+Before cutover, a hash-registered `migration-precondition-probe` hook must prove
+live preconditions and both exact application starts against an isolated,
+migrated fixture. Its registration must set `readOnlyProduction: true` and name
+`productionConfigPath` and `productionEnvFilePath` as regular files inside the
+registered Paperclip home. The consumer obtains the running process ID from
+the configured systemd service. It passes these paths, the loopback API base,
+payload paths and receipt hashes in a private temporary context file. It does
+not put credentials in command arguments. The probe may write its isolated
+fixture; it must not migrate, copy or modify the production database.
+
+The consumer rechecks candidate integrity, active files, migration inventories
+and drain ownership after the probe. Missing or failed evidence defers the
+update before it changes the active symlink. Existing backup and service
+settings are not modified by this compatibility mechanism.
+
 ### Manifest-aware preservation probes
 
 A registered `tool-review-probe` can set `verifiedReleaseManifest: true`.
