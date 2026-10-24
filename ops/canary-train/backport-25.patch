@@ -2306,6 +2306,159 @@ index 000000000..e5974aa87
 +   self.assertNotIn('token=\'foo\'',db_text)
 +if __name__=='__main__':unittest.main(verbosity=2)
 +if __name__=='__main__':unittest.main(verbosity=2)
+diff --git a/server/src/__tests__/chat-channels.integration.test.ts b/server/src/__tests__/chat-channels.integration.test.ts
+index c2ef1b9a3..283c23a11 100644
+--- a/server/src/__tests__/chat-channels.integration.test.ts
++++ b/server/src/__tests__/chat-channels.integration.test.ts
+@@ -31,13 +31,14 @@ import { resolveGitHubReviewInstructions } from "../services/chat-channels/githu
+ import { githubResponseCommentService } from "../services/chat-github-response-comments.js";
+ import { githubReviewCheckService } from "../services/chat-github-checks.js";
+ import { githubAutomaticReviewEvent } from "../services/chat-github-events.js";
+-import { githubBotToolsForSession, syncGitHubBotTools } from "../services/chat-github-tools.js";
++import { githubBotToolsForSession, githubGuestBotConnectionForSession, syncGitHubBotTools } from "../services/chat-github-tools.js";
+ import { buildPaperclipRuntimeMcpServers } from "../services/heartbeat/run-preparation.js";
+ import { createAssignedMcpTools } from "../services/native-runtime/assigned-mcp-tools.js";
+ import { createToolGatewayService } from "../services/tool-gateway.js";
+ import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
+ import { initializeRunIdentity } from "../services/run-identity.js";
+-import { chatGitHubRegistrations, chatGitHubReviews, chatGitHubConfigurations, toolCatalogEntries } from "@paperclipai/db";
++import { chatRunSourceMessageId } from "../services/chat-channels/run-origin.js";
++import { chatGitHubRegistrations, chatGitHubReviews, chatGitHubConfigurations } from "@paperclipai/db";
+ import { AsyncLocalStorage } from "node:async_hooks";
+ import * as cloudRuntimeIdentity from "../services/cloud-runtime-identity.js";
+ import {
+@@ -92,6 +93,8 @@ import {
+   chatExternalPrincipals,
+   chatIdentityLinks,
+   joinRequests,
++  toolApplications,
++  toolCatalogEntries,
+   chatMessageLinks,
+   chatPublications,
+   chatSdkState,
+@@ -119,6 +122,9 @@ import {
+   projects,
+   projectWorkspaces,
+   toolConnections,
++  toolProfiles,
++  toolProfileEntries,
++  toolProfileBindings,
+ } from "@paperclipai/db";
+ import { defaultGitHubReviewPolicy, type ChatProvider } from "@paperclipai/shared";
+ import { isPaperclipExternalChatTurn } from "@paperclipai/adapter-utils/server-utils";
+@@ -3181,6 +3187,112 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
+       expect(await githubBotToolsForSession(db, { ...f.session, issueId: randomUUID() })).toEqual([]);
+       expect(await readChatConversationsByEndpointId(f.endpoint.id)).toHaveLength(2);
+     });
++    it("keeps delegated GitHub chat discovery task-scoped without failing general MCP discovery", async () => {
++      const f = await toolReplyFixture("github:paperclipai/paperclip:418");
++      const parentIdentity = await initializeRunIdentity(db, {
++        companyId: f.companyId,
++        runId: f.run.id,
++        issueId: f.conversation.issueId!,
++        responsibleUserId: "owner-user",
++        messageIds: [String(f.run.contextSnapshot?.wakeCommentId)],
++        cause: "user_message",
++      });
++      const [childIssue] = await db.insert(issues).values({
++        companyId: f.companyId,
++        title: "Delegated ordinary task",
++        assigneeAgentId: f.assignedAgentId,
++      }).returning();
++      const [childRun] = await db.insert(heartbeatRuns).values({
++        companyId: f.companyId,
++        agentId: f.assignedAgentId,
++        nativeIssueId: childIssue.id,
++        status: "running",
++      }).returning();
++      await initializeRunIdentity(db, {
++        companyId: f.companyId,
++        runId: childRun.id,
++        issueId: childIssue.id,
++        responsibleUserId: "owner-user",
++        parentContextId: parentIdentity.id,
++        cause: "delegation",
++      });
++
++      const childSession = { companyId: f.companyId, agentId: f.assignedAgentId, issueId: childIssue.id, runId: childRun.id };
++      const [child] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, childRun.id));
++      await expect(chatRunSourceMessageId(db, child!)).rejects.toMatchObject({ status: 403 });
++      expect(await githubBotToolsForSession(db, childSession)).toEqual([]);
++      await expect(githubGuestBotConnectionForSession(db, childSession)).resolves.toBeNull();
++
++      const [application] = await db.insert(toolApplications).values({
++        companyId: f.companyId,
++        applicationKey: `delegated-mcp-${randomUUID().slice(0, 8)}`,
++        name: `Delegated MCP ${randomUUID()}`,
++        type: "mcp_http",
++      }).returning();
++      const [connection] = await db.insert(toolConnections).values({
++        companyId: f.companyId,
++        applicationId: application.id,
++        name: "Assigned ordinary MCP",
++        uid: `delegated-mcp-${randomUUID()}`,
++        transport: "mcp_remote",
++        authKind: "none",
++        status: "active",
++        enabled: true,
++        healthStatus: "healthy",
++        config: { url: "https://mcp.example.test/mcp" },
++      }).returning();
++      await db.insert(toolCatalogEntries).values({
++        companyId: f.companyId,
++        applicationId: application.id,
++        connectionId: connection.id,
++        name: "ordinary_read",
++        toolName: "ordinary_read",
++        description: "Read an assigned fixture value.",
++        inputSchema: { type: "object", properties: {}, additionalProperties: false },
++        versionHash: createHash("sha256").update("ordinary_read").digest("hex"),
++        status: "active",
++      });
++      const [profile] = await db.insert(toolProfiles).values({
++        companyId: f.companyId,
++        profileKey: `delegated-mcp-${randomUUID()}`,
++        name: `Delegated MCP profile ${randomUUID()}`,
++        status: "active",
++        defaultAction: "deny",
++      }).returning();
++      await db.insert(toolProfileEntries).values({
++        companyId: f.companyId,
++        profileId: profile.id,
++        selectorType: "connection",
++        connectionId: connection.id,
++        effect: "include",
++      });
++      await db.insert(toolProfileBindings).values({
++        companyId: f.companyId,
++        profileId: profile.id,
++        targetType: "agent",
++        targetId: f.assignedAgentId,
++      });
++
++      const gateway = createToolGatewayService(db);
++      const gatewaySession = await gateway.createSession({
++        companyId: f.companyId,
++        agentId: f.assignedAgentId,
++        runId: childRun.id,
++      });
++      const gatewayTools = await gateway.listToolsForSession(gatewaySession.token);
++      expect(gatewayTools.some(tool => tool.providerType === "paperclip_github_chat")).toBe(false);
++      expect(gatewayTools).toEqual(expect.arrayContaining([
++        expect.objectContaining({ connectionId: connection.id, upstreamToolName: "ordinary_read" }),
++      ]));
++
++      const { id: _conversationId, ...childConversation } = f.conversation;
++      await db.insert(chatConversations).values({
++        ...childConversation,
++        issueId: childIssue.id,
++        externalThreadId: `github:paperclipai/paperclip:delegated:${randomUUID()}`,
++      });
++      await expect(githubGuestBotConnectionForSession(db, childSession)).rejects.toMatchObject({ status: 403 });
++    });
+     describe("replies in review finding threads behind an active run", () => {
+       const pr = "github:paperclipai/paperclip:17044";
+       async function findingThreadFixture() {
 diff --git a/server/src/__tests__/execution-control-scheduler.test.ts b/server/src/__tests__/execution-control-scheduler.test.ts
 new file mode 100644
 index 000000000..301a54cf5
@@ -3741,6 +3894,51 @@ index 842159d91..836b3af07 100644
    it("wakes the assignee on comment-only issue updates", async () => {
      const existing = makeIssue({
        assigneeAgentId: ASSIGNEE_AGENT_ID,
+diff --git a/server/src/__tests__/project-tools-pagination.test.ts b/server/src/__tests__/project-tools-pagination.test.ts
+index b676221a6..f30440f6e 100644
+--- a/server/src/__tests__/project-tools-pagination.test.ts
++++ b/server/src/__tests__/project-tools-pagination.test.ts
+@@ -9,6 +9,40 @@ const input = {
+ afterEach(() => vi.unstubAllGlobals());
+ 
+ describe("project discovery result bounds", () => {
++  it.each(["standard", "ask", "planning"])("lists serializable input schemas in %s mode", mode => {
++    const definitions = projectToolDefinitions(mode, true);
++    expect(definitions.length).toBeGreaterThan(0);
++    for (const tool of definitions) {
++      expect(JSON.parse(JSON.stringify(tool.inputSchema))).toMatchObject({ type: "object" });
++    }
++    const create = definitions.find(tool => tool.name === "create_project");
++    if (mode !== "standard") {
++      expect(create).toBeUndefined();
++      return;
++    }
++    expect(create?.inputSchema).toMatchObject({
++      required: ["idempotencyKey", "name"],
++      properties: { executionWorkspacePolicy: expect.any(Object), workspace: expect.any(Object) },
++    });
++  });
++
++  it("validates project creation with the same input contract advertised to MCP", async () => {
++    const fetch = vi.fn(async (_url: string, _options: RequestInit) => ({ ok: true, json: async () => ({ id: "project" }) }));
++    vi.stubGlobal("fetch", fetch);
++    await callProjectTool({ ...input, name: "create_project", arguments: {
++      name: "Project", idempotencyKey: "  create-project  ",
++      executionWorkspacePolicy: { enabled: true, runtimePolicy: { custom: "retained" } },
++    } });
++    expect(JSON.parse(fetch.mock.calls[0]![1].body as string)).toMatchObject({
++      idempotencyKey: "create-project", status: "backlog",
++      executionWorkspacePolicy: { runtimePolicy: { custom: "retained" } },
++    });
++    fetch.mockClear();
++    await expect(callProjectTool({ ...input, name: "create_project", arguments: { name: "Project", idempotencyKey: " " } }))
++      .rejects.toThrow();
++    expect(fetch).not.toHaveBeenCalled();
++  });
++
+   it("requests bounded summaries and normalizes continuation cursors", async () => {
+     const page = { projects: [{ id: "abcdefab-0000-4000-8000-000000000001", name: "Project", status: "in_progress", description: "Summary", descriptionTruncated: true }], nextCursor: "abcdefab-0000-4000-8000-000000000001" };
+     const fetch = vi.fn(async (_url: string, _options: RequestInit) => ({ ok: true, json: async () => page }));
 diff --git a/server/src/__tests__/restart-readiness-route.integration.test.ts b/server/src/__tests__/restart-readiness-route.integration.test.ts
 new file mode 100644
 index 000000000..b450235c8
@@ -4844,6 +5042,38 @@ index 9f585d4ab..41faa8bf5 100644
      await db.delete(agentApiKeys); await db.delete(boardApiKeys); await db.delete(authSessions);
      await db.delete(principalPermissionGrants); await db.delete(companyMemberships); await db.delete(authUsers);
      await db.delete(agents); await db.delete(companies);
+diff --git a/server/src/services/chat-github-tools.ts b/server/src/services/chat-github-tools.ts
+index f87a9f1c6..1ad74a0d5 100644
+--- a/server/src/services/chat-github-tools.ts
++++ b/server/src/services/chat-github-tools.ts
+@@ -397,13 +397,26 @@ export async function githubGuestBotConnectionForSession(
+       contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object('wakeCommentId', ${heartbeatRuns.contextSnapshot}->'wakeCommentId')`,
+     })
+     .from(heartbeatRuns)
++    // Ordinary tasks have no chat sponsorship. Check that scope before
++    // following chat provenance, which must remain bound to its own task.
++    .innerJoin(chatConversations, and(
++      eq(chatConversations.companyId, heartbeatRuns.companyId),
++      eq(sql<string>`${chatConversations.issueId}::text`, boundRunIssueIdSql()),
++      eq(chatConversations.issueId, session.issueId),
++    ))
++    .innerJoin(chatEndpoints, and(
++      eq(chatEndpoints.id, chatConversations.endpointId),
++      eq(chatEndpoints.companyId, session.companyId),
++      eq(chatEndpoints.assignedAgentId, session.agentId),
++      eq(chatEndpoints.provider, "github"),
++    ))
+     .where(
+       and(
+         eq(heartbeatRuns.companyId, session.companyId),
+         eq(heartbeatRuns.agentId, session.agentId),
+         eq(heartbeatRuns.id, session.runId),
+       ),
+-    );
++    ).limit(1);
+   const commentId = run ? await chatRunSourceMessageId(db, run, { allowLegacyWakeComment: true, provider: "github" }) : null;
+   if (typeof commentId !== "string") return null;
+   const [source] = await db
 diff --git a/server/src/services/execution-recovery-resolution.ts b/server/src/services/execution-recovery-resolution.ts
 index e56141565..97ef97a5b 100644
 --- a/server/src/services/execution-recovery-resolution.ts
@@ -6953,6 +7183,37 @@ index 000000000..fa3980912
 +    return { resolved, replayed: false };
 +  });
 +}
+diff --git a/server/src/services/project-tools.ts b/server/src/services/project-tools.ts
+index a590e130e..3e5d98bf2 100644
+--- a/server/src/services/project-tools.ts
++++ b/server/src/services/project-tools.ts
+@@ -4,13 +4,16 @@ import { CAPABILITY_SEMANTIC_TOOL_CATALOG } from "../vendor/paperclip-runner/ind
+ import { badRequest } from "../errors.js";
+ 
+ export const PROJECT_TOOL_NAMES = ["create_project", "list_project_repositories", "list_projects"];
++const createProjectToolSchema = createProjectSchema.required({ idempotencyKey: true });
+ export function projectToolDefinitions(workMode: string, includeTask = false) {
+   return CAPABILITY_SEMANTIC_TOOL_CATALOG.filter(tool =>
+     (PROJECT_TOOL_NAMES.includes(tool.operationId) || includeTask && ["create_task", "set_task_title"].includes(tool.operationId))
+     && tool.allowedModes.includes(workMode as "standard"),
+   ).map(tool => ({ name: tool.operationId, description: tool.description,
+     inputSchema: tool.operationId === "create_project"
+-      ? z.toJSONSchema(createProjectSchema.extend({ idempotencyKey: z.string().min(1).max(255) }))
++      // The shared package can load a different Zod version than the server.
++      // Use the schema's own converter so its processors receive their own context.
++      ? createProjectToolSchema.toJSONSchema({ io: "input" })
+       : tool.inputSchema,
+   }));
+ }
+@@ -34,7 +37,7 @@ export async function callProjectTool(input: {
+     path += `?${query}`;
+   }
+   else if (input.name === "create_project") {
+-    body = createProjectSchema.extend({ idempotencyKey: z.string().min(1).max(255) }).parse(args);
++    body = createProjectToolSchema.parse(args);
+   } else if (input.name === "create_task") {
+     const key = z.string().min(1).max(150).parse(args.idempotencyKey);
+     path = `/companies/${input.companyId}/issues`;
 diff --git a/server/src/services/recovery/disposition-repair-guidance.test.ts b/server/src/services/recovery/disposition-repair-guidance.test.ts
 new file mode 100644
 index 000000000..b4beaf0d1
