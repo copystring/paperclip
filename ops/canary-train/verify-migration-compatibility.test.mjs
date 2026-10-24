@@ -221,6 +221,12 @@ test('CLI preserves failures when a beforeExit hook tries to replace the exit co
   t.after(() => rm(root, { recursive: true, force: true }));
   const hookPath = path.join(root, 'before-exit.mjs');
   await writeFile(hookPath, "process.on('beforeExit', () => { process.nextTick(() => process.exit(0)); });\n");
+  const moduleUrl = new URL('./verify-migration-compatibility.mjs', import.meta.url).href;
+  const missingReceipt = path.join(root, 'missing-receipt.json');
+
+  const noReceipt = spawnSync(process.execPath, ['--input-type=module', '-e', `import { runCli } from ${JSON.stringify(moduleUrl)}; process.exitCode = await runCli(async () => {}, ${JSON.stringify(missingReceipt)});`], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(noReceipt.status, 1, noReceipt.stderr);
+  assert.match(noReceipt.stderr, /without producing its required receipt/);
 
   const oldEntrypoint = spawnSync(process.execPath, ['--import', pathToFileURL(hookPath).href, '--input-type=module', '-e', 'process.exitCode = 1;'], { encoding: 'utf8', timeout: 10_000 });
   assert.equal(oldEntrypoint.status, 0, 'the regression fixture must reproduce beforeExit replacing process.exitCode');
