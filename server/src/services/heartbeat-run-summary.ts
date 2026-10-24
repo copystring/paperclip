@@ -401,6 +401,8 @@ function decision(
  */
 export function resolveHeartbeatRunResponse(input: {
   resultJson: Record<string, unknown> | null | undefined;
+  /** Server-owned run outcome. Failed/cancelled output remains in the run log. */
+  runSucceeded?: boolean;
   /** Server-owned conversation finalization, after normal governance checks. */
   conversationTurnFinished?: boolean;
   existingComment?: { id: string; body?: string | null } | null;
@@ -418,6 +420,12 @@ export function resolveHeartbeatRunResponse(input: {
     reasonCode?: string;
   } | null;
 }): ResolvedHeartbeatRunResponse {
+  if (input.runSucceeded === false) {
+    return {
+      text: null,
+      decision: decision("none", { commentAction: "none", reasonCodes: ["run_not_succeeded"] }),
+    };
+  }
   const resultJson = record(input.resultJson);
   const continuationSummary = readAcceptedTaskContinuationSummary(resultJson);
   if (continuationSummary) {

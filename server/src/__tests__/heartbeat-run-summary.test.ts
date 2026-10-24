@@ -355,6 +355,15 @@ describe("buildHeartbeatRunIssueComment", () => {
 });
 
 describe("resolveHeartbeatRunResponse", () => {
+  it("does not publish partial prose from a failed run as a completed response", () => {
+    expect(resolveHeartbeatRunResponse({
+      runSucceeded: false,
+      resultJson: { summary: "CTO acceptance saved", finalResponse: { disposition: "final", text: "Done" } },
+      finalAgentMessage: { channel: "final", text: "All done", sourceEventId: "partial-event" },
+    })).toMatchObject({ text: null, decision: { commentAction: "none", reasonCodes: ["run_not_succeeded"] } });
+    expect(resolveHeartbeatRunResponse({ runSucceeded: true, resultJson: { summary: "Completed result" } }).text)
+      .toBe("Completed result");
+  });
   const resultJson = {
     nativeResult: {
       schema: "paperclip.run_result.v1",
