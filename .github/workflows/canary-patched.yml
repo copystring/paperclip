@@ -1,11 +1,11 @@
-name: Canary isolated wire budget verification
+name: Canary18 focused PRP diagnostic
 on:
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 jobs:
-  verify-wire-budget:
+  diagnose-prp-progress:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -21,53 +21,64 @@ jobs:
           version: 9.15.4
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          artifact-ids: 12537580084
+          artifact-ids: 12542943474
           github-token: ${{ github.token }}
           repository: copystring/paperclip
-          run-id: 40035689255
+          run-id: 40050215382
           path: ${{ runner.temp }}/prepared-source
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          artifact-ids: 12537371025
+          artifact-ids: 12543625101
           github-token: ${{ github.token }}
           repository: copystring/paperclip
-          run-id: 40035689255
+          run-id: 40050215382
           path: ${{ runner.temp }}/native-artifact
-      - name: Verify frozen source and exact-source Linux daemon
+      - name: Verify frozen Canary18 source and exact-source Linux daemon
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib, os, pathlib, subprocess, json, shutil
+          import hashlib, json, os, pathlib, shutil, subprocess
           temp = pathlib.Path(os.environ['RUNNER_TEMP'])
           archive = temp / 'prepared-source/canary-source.tgz'
-          assert hashlib.sha256(archive.read_bytes()).hexdigest() == '5e55c754a7810c7de6b3a221d5c6032e5a212ef6497468666d4e7d7b328e1aa9'
+          expected_archive = 'd7780eca5874b30f144772f3c74c65480b238d14189a4a95bc6bcc322e0e9819'
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected_archive
           subprocess.run(['tar', '-xzf', str(archive), '-C', str(temp)], check=True)
           source = temp / 'paperclip-source'
-          expected = 'ade9fb1535b87b0d25b8b94221dd508c877c4e78'
-          assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip() == expected
+          expected_source = '9ccdaf7bb271d6f01639ff85fca3b5c106642d3d'
+          expected_upstream = 'ec2e0d64079e6ba127401098eaadfd4ba6eb3074'
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip() == expected_source
           provenance = json.loads((temp / 'paperclip-output/provenance.json').read_text())
-          assert provenance['patchCommit'] == expected
-          receipts = list((temp/'native-artifact').rglob('receipt.json'))
+          assert provenance['patchCommit'] == expected_source
+          assert provenance['sourceCommit'] == expected_upstream
+          receipts = list((temp / 'native-artifact').rglob('receipt.json'))
           assert len(receipts) == 1
-          receipt = json.loads(receipts[0].read_text())
-          binary = receipts[0].parent/'paperclip-runnerd'
-          assert receipt['sourceRevision'] == expected and receipt['target'] == 'linux-x64'
+          receipt_path = receipts[0]
+          receipt = json.loads(receipt_path.read_text())
+          binary = receipt_path.parent / 'paperclip-runnerd'
+          assert receipt['sourceRevision'] == expected_source and receipt['target'] == 'linux-x64'
           assert receipt['sha256'] == 'sha256:' + hashlib.sha256(binary.read_bytes()).hexdigest()
           assert receipt['schema'] == 'paperclip.runner.release-artifact.v1'
           binary.chmod(0o755)
-          metadata=json.loads(subprocess.check_output([str(binary),'--build-metadata'],text=True))
+          metadata = json.loads(subprocess.check_output([str(binary), '--build-metadata'], text=True))
           assert metadata == receipt['buildMetadata']
-          dest=source/'packages/paperclip-runner/runner/target/debug/paperclip-runnerd'
-          dest.parent.mkdir(parents=True,exist_ok=True)
-          shutil.copyfile(binary,dest)
+          dest = source / 'packages/paperclip-runner/runner/target/debug/paperclip-runnerd'
+          dest.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copyfile(binary, dest)
           dest.chmod(0o755)
-          for name,digest in [('diagnostic-wire-fixture.patch','c5788c25af7dcfe509deb6abc78149e4ab5951b9dec4d475f12df17db6919176'),('diagnostic-wire-fix.patch','78c322e0bf3f46e6c5a6498c73f6fb3dcbc585bf9a4ccfcb580fbb2906873589')]:
-              patch=pathlib.Path(os.environ['GITHUB_WORKSPACE'])/'ops/canary-train'/name
-              assert hashlib.sha256(patch.read_bytes()).hexdigest() == digest
+          patch = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'ops/canary-train/diagnostic-prp-progress.patch'
+          assert hashlib.sha256(patch.read_bytes()).hexdigest() == 'ad007c688103de63cfaaa9a35ea8ffaac678f09363aa2f3de5d90efc9800aeab'
+          changed = subprocess.check_output(['git', 'diff', '--name-only', expected_source, '--'], cwd=source, text=True).splitlines()
+          assert not changed, f'prepared source is not pristine: {changed}'
           PY
-          git -C "$RUNNER_TEMP/paperclip-source" apply --check "$GITHUB_WORKSPACE/ops/canary-train/diagnostic-wire-fixture.patch"
-          git -C "$RUNNER_TEMP/paperclip-source" apply "$GITHUB_WORKSPACE/ops/canary-train/diagnostic-wire-fixture.patch"
-      - name: Install exact dependencies and prepare test runtime
+          git -C "$RUNNER_TEMP/paperclip-source" apply --check "$GITHUB_WORKSPACE/ops/canary-train/diagnostic-prp-progress.patch"
+          git -C "$RUNNER_TEMP/paperclip-source" apply "$GITHUB_WORKSPACE/ops/canary-train/diagnostic-prp-progress.patch"
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          source = pathlib.Path(os.environ['RUNNER_TEMP']) / 'paperclip-source'
+          changed = subprocess.check_output(['git', 'diff', '--name-only'], cwd=source, text=True).splitlines()
+          assert changed == ['server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts'], changed
+          PY
+      - name: Install frozen dependencies and prepare the test runtime
         working-directory: ${{ runner.temp }}/paperclip-source
         run: |
           set -euo pipefail
@@ -75,40 +86,17 @@ jobs:
           pnpm run preflight:workspace-links
           pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
           pnpm --filter @paperclipai/paperclip-runner build:typescript
-      - name: Require regression failure before the production fix
-        working-directory: ${{ runner.temp }}/paperclip-source
-        env:
-          PAPERCLIP_REQUIRE_RUNNER_API_INTEGRATION: '1'
-        run: |
-          set +e
-          set -uo pipefail
-          pnpm --filter @paperclipai/server exec vitest run src/services/native-runtime/runner-tool-results-prp.integration.test.ts 2>&1 | tee "$RUNNER_TEMP/wire-before.log"
-          status=${PIPESTATUS[0]}
-          set -e
-          test "$status" -ne 0 || { echo 'Regression unexpectedly passed without the fix'; exit 1; }
-          python3 - <<'PY'
-          import os,pathlib
-          log=(pathlib.Path(os.environ['RUNNER_TEMP'])/'wire-before.log').read_text()
-          assert 'delivers escape-heavy 500 KB pages through actual PRP without truncation' in log
-          assert '800082' in log and 'runnerd authenticated' in log, 'Failure did not prove the expected real PRP wire overflow'
-          assert '400014' in log and 'turn/started' in log
-          assert 'PRP saved-result test failed' in log, 'Missing primary failure evidence'
-          # Overflow can surface as a failed turn, a timeout, or a provider restart.
-          # The unchanged fixed run below must deliver both full digests and fit every wire response.
-          PY
-      - name: Apply generic wire serialization fix and require focused green tests
+      - name: Run only the PRP progress regression against the frozen Canary18 binary
         working-directory: ${{ runner.temp }}/paperclip-source
         env:
           PAPERCLIP_REQUIRE_RUNNER_API_INTEGRATION: '1'
         run: |
           set -euo pipefail
-          git apply --check "$GITHUB_WORKSPACE/ops/canary-train/diagnostic-wire-fix.patch"
-          git apply "$GITHUB_WORKSPACE/ops/canary-train/diagnostic-wire-fix.patch"
-          pnpm --filter @paperclipai/server exec vitest run src/services/native-runtime/runner-tool-results.test.ts src/services/native-runtime/runner-tool-results.live.test.ts src/services/native-runtime/runner-tool-results-prp.integration.test.ts 2>&1 | tee "$RUNNER_TEMP/wire-after.log"
+          pnpm --filter @paperclipai/server exec vitest run src/services/native-runtime/runner-tool-results-prp.integration.test.ts 2>&1 | tee "$RUNNER_TEMP/prp-diagnostic.log"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: wire-budget-before-after-logs
-          path: ${{ runner.temp }}/wire-*.log
+          name: canary18-prp-diagnostic-log
+          path: ${{ runner.temp }}/prp-diagnostic.log
           retention-days: 1
           if-no-files-found: warn
