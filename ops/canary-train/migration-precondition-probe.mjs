@@ -212,6 +212,110 @@ export function validateAppliedJournal(applied, inventory) {
   return sqlNames;
 }
 
+function sqlMigrationIdentity(inventory) {
+  const files = Object.fromEntries(migrationSqlNames(inventory).map((name) => [name, inventory[name]]));
+  return inventoryIdentity(files);
+}
+
+export async function migrationJournalDescriptor(payloadRoot, inventory) {
+  const journalPath = `${MIGRATION_ROOT}meta/_journal.json`;
+  const journalBytes = await readFile(path.join(payloadRoot, ...journalPath.split("/")));
+  if (sha256(journalBytes) !== inventory[journalPath]) fail("Registered migration journal metadata changed");
+  const journal = JSON.parse(journalBytes.toString("utf8"));
+  if (!Array.isArray(journal.entries)) fail("Registered migration journal metadata is invalid");
+  const sqlNames = migrationSqlNames(inventory);
+  const namesByFile = new Map();
+  const hashToNames = new Map();
+  for (const name of sqlNames) {
+    const fileName = path.posix.basename(name);
+    if (namesByFile.has(fileName)) namesByFile.set(fileName, null);
+    else namesByFile.set(fileName, name);
+    const bytes = await readFile(path.join(payloadRoot, ...name.split("/")));
+    const digest = sha256(bytes);
+    if (digest !== inventory[name]) fail("Registered migration SQL changed while reading journal metadata");
+    const matches = hashToNames.get(digest) ?? [];
+    matches.push(name);
+    hashToNames.set(digest, matches);
+  }
+  const idToNames = new Map();
+  const journalNames = [];
+  for (const [index, entry] of journal.entries.entries()) {
+    if (typeof entry?.tag !== "string" || !Number.isSafeInteger(Number(entry.idx ?? index)) || Number(entry.idx ?? index) < 0) {
+      fail("Registered migration journal entry is invalid");
+    }
+    const name = namesByFile.get(`${entry.tag}.sql`);
+    if (!name) fail("Registered migration journal references an unknown or ambiguous SQL file");
+    const id = Number(entry.idx ?? index) + 1;
+    const matches = idToNames.get(id) ?? [];
+    matches.push(name);
+    idToNames.set(id, matches);
+    journalNames.push(name);
+  }
+  if (journalNames.length !== sqlNames.length || new Set(journalNames).size !== journalNames.length
+    || canonical([...journalNames].sort()) !== canonical(sqlNames)) {
+    fail("Registered migration journal does not exactly describe its SQL inventory");
+  }
+  return { sqlNames, namesByFile, hashToNames, idToNames };
+}
+
+function mapJournalRows(journalRows, columnSet, descriptor) {
+  const applied = [];
+  for (const row of journalRows) {
+    let mapped;
+    if (columnSet.has("name")) {
+      const name = descriptor.namesByFile.get(row.name);
+      if (!name) return null;
+      mapped = name;
+    }
+    if (columnSet.has("hash")) {
+      const names = descriptor.hashToNames.get(row.hash);
+      if (!names || names.length !== 1) return null;
+      if (mapped && mapped !== names[0]) return null;
+      mapped = names[0];
+    }
+    if (!mapped && columnSet.has("id")) {
+      const names = descriptor.idToNames.get(Number(row.id));
+      if (!names || names.length !== 1) return null;
+      mapped = names[0];
+    }
+    if (!mapped) return null;
+    applied.push(mapped);
+  }
+  return applied;
+}
+
+export function identifyJournalRows(journalRows, columnSet, baselineDescriptor, candidateDescriptor,
+  baselineInventory, candidateInventory) {
+  const matches = [];
+  for (const [label, descriptor, inventory] of [
+    ["baseline", baselineDescriptor, baselineInventory],
+    ["candidate", candidateDescriptor, candidateInventory],
+  ]) {
+    const applied = mapJournalRows(journalRows, columnSet, descriptor);
+    if (!applied) continue;
+    try {
+      validateAppliedJournal(applied, inventory);
+      matches.push({ label, applied, sha256: sqlMigrationIdentity(inventory) });
+    } catch {
+      // A partial, mixed, or superseded SQL journal is not a registered state.
+    }
+  }
+  const identities = [...new Set(matches.map(({ sha256 }) => sha256))];
+  if (identities.length !== 1) fail("Production migration journal is not one unambiguous registered baseline or candidate set");
+  return {
+    applied: matches[0].applied,
+    sha256: identities[0],
+    state: matches.map(({ label }) => label).join("+"),
+  };
+}
+
+export function shouldInspectMigrationPreconditions(inventoryState) {
+  if (!['baseline', 'candidate', 'baseline+candidate'].includes(inventoryState)) {
+    fail("Production migration inventory state is not registered");
+  }
+  return inventoryState === "baseline";
+}
+
 const MIGRATION_PRECONDITIONS = [
   {
     suffix: "/0369_late_logan.sql",
@@ -486,32 +590,26 @@ async function inspectLiveJournal(context, activeRoot, baselineInventory, candid
         : columnSet.has("created_at") ? '"created_at"'
           : columnSet.has("name") ? '"name"' : '"hash"';
       const journalRows = await tx.unsafe(`SELECT * FROM "${selected}"."__drizzle_migrations" ORDER BY ${orderBy}`);
-      const journalPath = path.join(activeRoot, "node_modules", "@paperclipai", "db", "dist", "migrations", "meta", "_journal.json");
-      const journal = JSON.parse(await readFile(journalPath, "utf8"));
-      const sqlNames = migrationSqlNames(baselineInventory);
-      const namesByFile = new Map(sqlNames.map((name) => [path.posix.basename(name), name]));
-      let applied;
-      if (columnSet.has("name")) applied = journalRows.map((row) => namesByFile.get(row.name) ?? null);
-      else if (columnSet.has("hash")) {
-        const hashToName = new Map();
-        for (const name of sqlNames) hashToName.set(sha256(await readFile(path.join(activeRoot, ...name.split("/")))), name);
-        applied = journalRows.map((row) => hashToName.get(row.hash) ?? null);
-      } else {
-        const entries = Array.isArray(journal.entries) ? journal.entries : [];
-        applied = journalRows.map((row) => {
-          const entry = entries.find((item, index) => Number(item.idx ?? index) + 1 === Number(row.id));
-          return typeof entry?.tag === "string" ? namesByFile.get(`${entry.tag}.sql`) ?? null : null;
-        });
-      }
-      validateAppliedJournal(applied, baselineInventory);
-      const migrationPreconditions = await inspectMigrationPreconditions(tx, activeRoot, candidateRoot,
+      const [baselineDescriptor, candidateDescriptor] = await Promise.all([
+        migrationJournalDescriptor(activeRoot, baselineInventory),
+        migrationJournalDescriptor(candidateRoot, candidateInventory),
+      ]);
+      const appliedInventory = identifyJournalRows(journalRows, columnSet, baselineDescriptor, candidateDescriptor,
         baselineInventory, candidateInventory);
+      const sqlNames = appliedInventory.state.includes("candidate")
+        ? candidateDescriptor.sqlNames : baselineDescriptor.sqlNames;
+      const migrationPreconditions = shouldInspectMigrationPreconditions(appliedInventory.state)
+        ? await inspectMigrationPreconditions(tx, activeRoot, candidateRoot, baselineInventory, candidateInventory)
+        : [];
       await assertProcessIdentityUnchanged(target.server);
       return {
         transactionReadOnly: true,
-        activeMigrationCount: sqlNames.length,
-        activeMigrationSetSha256: sha256(Buffer.from(canonical(sqlNames), "utf8")),
-        journalEntryCount: applied.length,
+        activeMigrationCount: baselineDescriptor.sqlNames.length,
+        activeMigrationSetSha256: sha256(Buffer.from(canonical(baselineDescriptor.sqlNames), "utf8")),
+        databaseMigrationCount: sqlNames.length,
+        databaseSqlMigrationInventorySha256: appliedInventory.sha256,
+        databaseMigrationInventoryState: appliedInventory.state,
+        journalEntryCount: journalRows.length,
         mode: target.mode,
         productionPort: target.productionPort ?? null,
         migrationPreconditions,
@@ -872,10 +970,13 @@ export async function runProbe(context) {
       readOnly: true,
       apiHealth: api.passed,
       activeApiCommit: api.runtimeCommit,
-      migrationJournalMatchesActiveRuntime: true,
+      migrationJournalMatchesActiveRuntime: live.databaseMigrationInventoryState.includes("baseline"),
       activeMigrationInventorySha256: context.baselineInventorySha256,
+      databaseSqlMigrationInventorySha256: live.databaseSqlMigrationInventorySha256,
+      databaseMigrationInventoryState: live.databaseMigrationInventoryState,
       databaseMode: live.mode,
       activeMigrationCount: live.activeMigrationCount,
+      databaseMigrationCount: live.databaseMigrationCount,
       journalEntryCount: live.journalEntryCount,
       migrationPreconditions: live.migrationPreconditions,
     },
