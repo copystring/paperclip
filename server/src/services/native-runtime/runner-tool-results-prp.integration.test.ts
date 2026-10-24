@@ -122,7 +122,7 @@ describe("saved assigned results through actual PRP", () => {
     else process.env.PAPERCLIP_AGENT_JWT_SECRET = oldSecret;
   });
 
-  it.skipIf(!process.env.PAPERCLIP_REQUIRE_RUNNER_API_INTEGRATION && !existsSync(defaultCapabilityRunnerdBinary()))("delivers escape-heavy 500 KB pages through actual PRP without truncation", async () => {
+  it.skipIf(!process.env.PAPERCLIP_REQUIRE_RUNNER_API_INTEGRATION && !existsSync(defaultCapabilityRunnerdBinary()))("delivers escape-heavy 500 KB pages through actual PRP without truncation", async ({ onTestFailed }) => {
     const fixture = await server.fixture({ apiToolsEnabled: false });
     const original = { content: '🧭é"\\\n\u0000'.repeat(60_000), last: "complete-result" };
     const expected = JSON.stringify(original);
@@ -297,6 +297,9 @@ for await (const line of createInterface({input:process.stdin})) {
     let testFailure: unknown;
     let verified = false;
     const notifications: Array<{ method: string; type: unknown; status?: string }> = [];
+    onTestFailed(() => {
+      console.info(`[PRP fixture] failure ${JSON.stringify(failureEvidence())}`);
+    });
     try {
       await requestDuringTransfer("initialize", {});
       await requestDuringTransfer("thread/start", { cwd: fixture.workspace, dynamicTools: authority.definitions() });
