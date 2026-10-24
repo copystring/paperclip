@@ -764,6 +764,7 @@ def run_test_lane(workspace: Path, output: Path, lane_id: str) -> dict[str, Any]
             "cargo", "build", "--release", "--manifest-path", "runner/Cargo.toml", "--locked",
             "-p", "paperclip-runner-core", "--bin", "paperclip-runnerd", "--bin", "fake-codex-app-server",
         ], runner_package)
+        run_checked(["node", "scripts/stage-runner-binary.mjs"], runner_package)
     if lane["mode"] == "general":
         command = ["pnpm", "run", "test:run:general", "--", "--group", lane["group"]]
         if lane["shardCount"] > 1:

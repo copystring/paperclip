@@ -5152,7 +5152,7 @@ index f8d477cad..ba3d258f4 100644
        resultJson: preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,
          input.recordRestoreFailureOnly ? { ...current.resultJson, ...patch.resultJson } : patch.resultJson),
 diff --git a/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts b/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
-index 8df1cc9af..23f62c0ef 100644
+index 8df1cc9af..1cec6f254 100644
 --- a/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
 +++ b/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
 @@ -2,14 +2,113 @@ import { existsSync } from "node:fs";
@@ -5271,7 +5271,15 @@ index 8df1cc9af..23f62c0ef 100644
  describe("saved assigned results through actual PRP", () => {
    let server: Awaited<ReturnType<typeof startRunnerApiTestServer>>;
    const oldSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
-@@ -30,6 +129,10 @@ describe("saved assigned results through actual PRP", () => {
+@@ -23,13 +122,17 @@ describe("saved assigned results through actual PRP", () => {
+     else process.env.PAPERCLIP_AGENT_JWT_SECRET = oldSecret;
+   });
+ 
+-  it.skipIf(!process.env.PAPERCLIP_REQUIRE_RUNNER_API_INTEGRATION && !existsSync(defaultCapabilityRunnerdBinary()))("delivers escape-heavy 500 KB pages through actual PRP without truncation", async () => {
++  it.skipIf(!process.env.PAPERCLIP_REQUIRE_RUNNER_API_INTEGRATION && !existsSync(defaultCapabilityRunnerdBinary()))("delivers escape-heavy 500 KB pages through actual PRP without truncation", async ({ onTestFailed }) => {
+     const fixture = await server.fixture({ apiToolsEnabled: false });
+     const original = { content: '🧭é"\\\n\u0000'.repeat(60_000), last: "complete-result" };
+     const expected = JSON.stringify(original);
      const digest = createHash("sha256").update(expected).digest("hex");
      const inline = { content: "\\".repeat(200_000) };
      const inlineDigest = createHash("sha256").update(JSON.stringify(inline)).digest("hex");
@@ -5325,7 +5333,7 @@ index 8df1cc9af..23f62c0ef 100644
          }
        }
      }
-@@ -88,37 +194,154 @@ for await (const line of createInterface({input:process.stdin})) {
+@@ -88,37 +194,157 @@ for await (const line of createInterface({input:process.stdin})) {
        prpIdentity: { runnerInstanceId: "saved-test", environmentLeaseId: "saved-test-lease", runId: fixture.runId,
          normalizedSessionId: "saved-test-session", turnId: "saved-test-turn", itemId: "saved-test-item" },
      });
@@ -5437,6 +5445,9 @@ index 8df1cc9af..23f62c0ef 100644
 +    let testFailure: unknown;
      let verified = false;
      const notifications: Array<{ method: string; type: unknown; status?: string }> = [];
++    onTestFailed(() => {
++      console.info(`[PRP fixture] failure ${JSON.stringify(failureEvidence())}`);
++    });
      try {
 -      await bundle.transport.request("initialize", {});
 -      await bundle.transport.request("thread/start", { cwd: fixture.workspace, dynamicTools: authority.definitions() });
