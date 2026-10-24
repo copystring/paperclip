@@ -1,5 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   buildFixtureConfig,
   createFixtureEnvironment,
@@ -120,6 +125,58 @@ test("fixture helper output cannot contaminate the JSON receipt channel", async 
   });
   assert.equal(result, "proof");
   assert.equal(process.stdout.write, originalWrite);
+});
+
+test("CLI waits for unref-awaited work, flushes the receipt, and preserves errors against beforeExit hooks", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-migration-cli-lifetime-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const hookPath = path.join(root, "before-exit.mjs");
+  const sentinelPath = path.join(root, "before-exit-ran");
+  await writeFile(hookPath, `import { writeFileSync } from "node:fs";\nprocess.on('beforeExit', () => { writeFileSync(${JSON.stringify(sentinelPath)}, 'called'); process.nextTick(() => process.exit(0)); });\n`);
+  const probeUrl = pathToFileURL(fileURLToPath(new URL("./migration-precondition-probe.mjs", import.meta.url))).href;
+  const receipt = JSON.stringify({ schemaVersion: 1, passed: true });
+  const delayedOperation = `await new Promise(resolve => { const timer = setTimeout(resolve, 50); timer.unref(); }); process.stdout.write(${JSON.stringify(`${receipt}\n`)});`;
+
+  const oldBoundary = spawnSync(process.execPath, ["--import", pathToFileURL(hookPath).href, "--input-type=module", "-e", delayedOperation], {
+    encoding: "utf8", timeout: 5_000,
+  });
+  assert.equal(oldBoundary.status, 0, oldBoundary.stderr);
+  assert.equal(oldBoundary.stdout, "", "the old boundary exits successfully before writing its receipt");
+  assert.equal(await readFile(sentinelPath, "utf8"), "called", "the old boundary invokes the competing beforeExit hook");
+  await rm(sentinelPath, { force: true });
+
+  const successful = spawnSync(process.execPath, ["--import", pathToFileURL(hookPath).href, "--input-type=module", "-e",
+    `import { runCli } from ${JSON.stringify(probeUrl)}; const code = await runCli(async () => { ${delayedOperation} }); process.exit(code);`], {
+    encoding: "utf8", timeout: 5_000,
+  });
+  assert.equal(successful.status, 0, successful.stderr);
+  assert.equal(successful.stdout, `${receipt}\n`, "the full awaited operation completes before the exact receipt is emitted");
+  assert.equal(await readFile(sentinelPath, "utf8").catch(() => null), null, "the new boundary exits explicitly before beforeExit");
+
+  const failed = spawnSync(process.execPath, ["--import", pathToFileURL(hookPath).href, "--input-type=module", "-e",
+    `import { runCli } from ${JSON.stringify(probeUrl)}; const code = await runCli(async () => { throw new Error("controlled failure"); }); process.exit(code);`], {
+    encoding: "utf8", timeout: 5_000,
+  });
+  assert.equal(failed.status, 1, failed.stderr);
+  assert.equal(failed.stdout, "");
+  assert.deepEqual(JSON.parse(failed.stderr), { ok: false, error: "controlled failure" });
+  assert.equal(await readFile(sentinelPath, "utf8").catch(() => null), null);
+
+  const invalidCli = spawnSync(process.execPath, ["--import", pathToFileURL(hookPath).href,
+    fileURLToPath(new URL("./migration-precondition-probe.mjs", import.meta.url))], {
+    encoding: "utf8", timeout: 5_000,
+  });
+  assert.equal(invalidCli.status, 1, invalidCli.stderr);
+  assert.equal(invalidCli.stdout, "");
+  assert.deepEqual(JSON.parse(invalidCli.stderr), { ok: false, error: "Expected an absolute probe context path" });
+  assert.equal(await readFile(sentinelPath, "utf8").catch(() => null), null);
+
+  const pending = spawnSync(process.execPath, ["--input-type=module", "-e",
+    `import { runCli } from ${JSON.stringify(probeUrl)}; const code = await runCli(() => new Promise(() => {})); process.exit(code);`], {
+    encoding: "utf8", timeout: 1_000,
+  });
+  assert.equal(pending.error?.code, "ETIMEDOUT", "an unsettled operation remains alive until the bounded test timeout");
+  assert.notEqual(pending.status, 0, "pending operation cannot return a false successful exit");
 });
 
 test("fixture config and child environment disable production side effects and workers", () => {
