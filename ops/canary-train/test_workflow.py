@@ -10,6 +10,17 @@ WORKFLOW = ROOT / ".github/workflows/canary-patched.yml"
 
 
 class DependencyCacheWorkflowTests(unittest.TestCase):
+    def test_native_harness_proof_uses_prepared_source_and_blocks_before_migration(self):
+        job = self.text.split('  migration-fixture-check:\n', 1)[1].split('  assemble:\n', 1)[0]
+        proof = re.search(r'(?ms)^      - name: Verify composed native integration scheduling\n(.*?)(?=^      - |\Z)', job)
+        self.assertIsNotNone(proof, 'The source harness regression must gate composed-source qualification')
+        self.assertIn('node "$RUNNER_TEMP/migration-source/scripts/__tests__/run-vitest-stable-shard.test.mjs"', proof.group(1))
+        self.assertNotIn('continue-on-error', proof.group(1))
+        self.assertNotIn('if:', proof.group(1), 'The regression must run for PRs as well as manual qualification')
+        self.assertNotIn('||', proof.group(1))
+        self.assertLess(job.index('Prepare source for disposable migration fixtures'), proof.start())
+        self.assertLess(proof.start(), job.index('Verify migration fixtures before merge'))
+
     def test_manual_canary_input_is_quoted_and_schedule_keeps_latest_default(self):
         dispatch = self.text.split("  workflow_dispatch:\n", 1)[1].split("  schedule:\n", 1)[0]
         self.assertIn("canary_version:", dispatch)
