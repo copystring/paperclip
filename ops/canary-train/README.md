@@ -116,6 +116,20 @@ and drain ownership after the probe. Missing or failed evidence defers the
 update before it changes the active symlink. Existing backup and service
 settings are not modified by this compatibility mechanism.
 
+### Graceful shutdown with embedded PostgreSQL
+
+For a system-wide `paperclip.service` that runs the server with embedded
+PostgreSQL, install
+[`systemd/graceful-child-shutdown.conf`](systemd/graceful-child-shutdown.conf)
+as `/etc/systemd/system/paperclip.service.d/graceful-child-shutdown.conf`.
+Then run `systemctl daemon-reload` and verify the effective setting with
+`systemctl show paperclip -p KillMode`; it should report `KillMode=mixed`.
+This signals the Paperclip coordinator first so it can shut down its embedded
+database cleanly. Remaining processes in the service cgroup still receive the
+configured final timeout cleanup. Keep the unit's existing stop timeout and
+other settings unchanged. The drop-in takes effect for subsequent stop or
+restart operations; it does not itself restart the service.
+
 ### Manifest-aware preservation probes
 
 A registered `tool-review-probe` can set `verifiedReleaseManifest: true`.
