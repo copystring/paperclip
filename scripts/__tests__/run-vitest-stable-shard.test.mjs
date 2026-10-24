@@ -556,6 +556,11 @@ test("the PR vitest lane wrapper runs the native-runner group exactly on the fin
       commands.some((command) => command.includes("--group general-server-native-runner")),
       expected,
     );
+    assert.equal(
+      commands.includes("run build:binary"),
+      expected,
+      "only the final PR native-runner lane must build the staged release binary",
+    );
   }
 
   const malformed = spawnSync(process.execPath, [laneWrapper, "--shard=nonsense", "--dry-run"], {
@@ -564,6 +569,25 @@ test("the PR vitest lane wrapper runs the native-runner group exactly on the fin
     env: workflowEnv({ GITHUB_WORKFLOW: "PR" }),
   });
   assert.notEqual(malformed.status, 0, "a malformed shard flag must fail rather than guess a lane");
+});
+
+test("the final PR native-runner lane stages the release binary after package tests and before server tests", () => {
+  const plan = wrapperPlan(["--shard=2/2"], { GITHUB_WORKFLOW: "PR" });
+  const packageVitestIndex = plan.plannedCommands.findIndex((planned) =>
+    planned.args[0] === "exec" && planned.args[1] === "vitest");
+  const releaseBuildIndex = plan.plannedCommands.findIndex((planned) =>
+    planned.args.join(" ") === "run build:binary");
+  const serverNativeIndex = plan.plannedCommands.findIndex((planned) =>
+    planned.args.join(" ").includes("--group general-server-native-runner"));
+
+  assert.ok(packageVitestIndex >= 0, "package Vitest must remain in the lane");
+  assert.ok(releaseBuildIndex > packageVitestIndex, "release build must follow package Vitest");
+  assert.ok(serverNativeIndex > releaseBuildIndex, "server native tests must follow release staging");
+  assert.equal(plan.plannedCommands[releaseBuildIndex].command, "pnpm");
+  assert.equal(plan.plannedCommands[releaseBuildIndex].cwd,
+    path.join(repoRoot, "packages/paperclip-runner"));
+  assert.equal(plan.plannedCommands[releaseBuildIndex].args[1], "build:binary");
+  assert.equal(plan.plannedCommands[serverNativeIndex].cwd, repoRoot);
 });
 
 const lineShardFile = path.join(repoRoot, "server/src/__tests__/chat-channels.integration.test.ts");
