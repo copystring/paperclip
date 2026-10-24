@@ -1,12 +1,13 @@
-import { isOpenRouterUrl, openRouterAttributionHeaders } from "@paperclipai/adapter-utils/openrouter-attribution";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { isOpenRouterUrl, openRouterAttributionHeaders } from "@paperclipai/adapter-utils/openrouter-attribution";
 import { asBoolean } from "@paperclipai/adapter-utils/server-utils";
 
 type PreparedOpenCodeRuntimeConfig = {
   env: Record<string, string>;
   notes: string[];
+  runtimeConfigHome: string | null;
   cleanup: () => Promise<void>;
 };
 
@@ -103,63 +104,81 @@ async function readJsonObject(filepath: string): Promise<Record<string, unknown>
   }
 }
 
+/** Carry effective explicit settings into the inline layer before catalog discovery. */
+function preserveExplicitModelModalities(
+  env: Record<string, string>, providers: unknown, model: unknown,
+): Record<string, string> {
+  const ref = parseConfiguredModelRef(model);
+  if (!ref || !isPlainObject(providers)) return env;
+  const provider = providers[ref.provider];
+  if (!isPlainObject(provider) || !isPlainObject(provider.models)) return env;
+  const definition = provider.models[ref.model];
+  if (!isPlainObject(definition) || definition.modalities === undefined) return env;
+  try {
+    const inline = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}");
+    const entry = inline?.provider?.[ref.provider]?.models?.[ref.model];
+    // Inline settings have higher priority. Only fill the omitted field on an
+    // existing entry, so discovery cannot shadow explicit disk/provider input.
+    if (!isPlainObject(entry) || entry.modalities !== undefined) return env;
+    entry.modalities = definition.modalities;
+    return { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify(inline) };
+  } catch {
+    return env;
+  }
+}
+
 export async function prepareOpenCodeRuntimeConfig(input: {
   env: Record<string, string>;
   config: Record<string, unknown>;
   targetIsRemote?: boolean;
 }): Promise<PreparedOpenCodeRuntimeConfig> {
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
-
-  // For remote execution targets the host XDG_CONFIG_HOME path is meaningless
-  // (and actively harmful — it leaks a macOS-only path into the remote Linux
-  // env). Callers that need to ship a runtime opencode config to the remote
-  // box do that via prepareAdapterExecutionTargetRuntime in execute.ts; this
-  // host-fs helper is local-only.
-  if (input.targetIsRemote) {
-    return {
-      env: input.env,
-      notes: [],
-      cleanup: async () => {},
-    };
-  }
-
-  const sourceConfigDir = path.join(resolveXdgConfigHome(input.env), "opencode");
-  const runtimeConfigHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-config-"));
-  const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
-  const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
-
-  await fs.mkdir(runtimeConfigDir, { recursive: true });
-  try {
-    await fs.cp(sourceConfigDir, runtimeConfigDir, {
-      recursive: true,
-      force: true,
-      errorOnExist: false,
-      dereference: false,
-    });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
-      throw err;
-    }
-  }
-
-  const existingConfig = await readJsonObject(runtimeConfigPath);
+  const targetIsRemote = input.targetIsRemote === true;
   const notes = [
-    skipPermissions ? "Injected runtime OpenCode config with permission=allow for all tools and connections." : "Prepared isolated OpenCode provider configuration.",
+    skipPermissions
+      ? "Injected runtime OpenCode config with permission=allow for all tools and connections."
+      : "Prepared isolated OpenCode provider configuration.",
   ];
-
-  // Merge gateway/custom provider definitions supplied via PAPERCLIP_OPENCODE_PROVIDERS
-  // (a JSON object in OpenCode's `provider` shape). OpenCode resolves a `--model
-  // provider/model` only when that model exists in a provider's `models` map, and
-  // OPENCODE_ALLOW_ALL_MODELS does NOT bypass its internal getModel(). So routing a
-  // gateway model (e.g. an EU LLM gateway exposing OpenAI-compatible /v1) requires a
-  // custom provider with an explicit models map. We accept it as config (not
-  // hard-coded) so the gateway URL, key env, and model list stay declarative.
   const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
   const gatewayProviders = parseProviderConfig(
     input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS,
     resolveEnv,
     notes,
   );
+  const smallModel = (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim();
+  if (targetIsRemote && !skipPermissions && !gatewayProviders && !smallModel) {
+    return {
+      env: preserveExplicitModelModalities(input.env, undefined, input.config.model),
+      notes,
+      runtimeConfigHome: null,
+      cleanup: async () => {},
+    };
+  }
+
+  const sourceConfigDir = targetIsRemote
+    ? null
+    : path.join(resolveXdgConfigHome(input.env), "opencode");
+  const runtimeConfigHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-config-"));
+  const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
+  const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
+
+  await fs.mkdir(runtimeConfigDir, { recursive: true });
+  if (sourceConfigDir) {
+    try {
+      await fs.cp(sourceConfigDir, runtimeConfigDir, {
+        recursive: true,
+        force: true,
+        errorOnExist: false,
+        dereference: false,
+      });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
+        throw err;
+      }
+    }
+  }
+
+  const existingConfig = await readJsonObject(runtimeConfigPath);
   const existingProvider = isPlainObject(existingConfig.provider) ? existingConfig.provider : {};
   let nextProvider = gatewayProviders
     ? { ...existingProvider, ...gatewayProviders }
@@ -196,10 +215,6 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     }
   }
 
-  const nextConfig: Record<string, unknown> = {
-    ...existingConfig,
-    ...(skipPermissions ? { permission: "allow" } : {}),
-  };
   const inlineContent = input.env.OPENCODE_CONFIG_CONTENT ?? process.env.OPENCODE_CONFIG_CONTENT;
   let inlineConfig: Record<string, unknown> | undefined;
   if (inlineContent) {
@@ -210,8 +225,15 @@ export async function prepareOpenCodeRuntimeConfig(input: {
       // OpenCode must still report invalid operator configuration.
     }
   }
-  nextProvider = attributeOpenCodeProviders(mergeConfigObjects(nextProvider,
-    isPlainObject(inlineConfig?.provider) ? inlineConfig.provider : {}));
+  nextProvider = attributeOpenCodeProviders(mergeConfigObjects(
+    nextProvider,
+    isPlainObject(inlineConfig?.provider) ? inlineConfig.provider : {},
+  ));
+
+  const nextConfig: Record<string, unknown> = {
+    ...existingConfig,
+    ...(skipPermissions ? { permission: "allow" } : {}),
+  };
   if (Object.keys(nextProvider).length > 0) {
     nextConfig.provider = nextProvider;
   }
@@ -222,21 +244,27 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   // for the anthropic provider); when that provider is repointed at a gateway that
   // does not serve that exact model, the title-gen call fails and aborts the run.
   // Setting small_model to a gateway-served model keeps every call on supported models.
-  const smallModel = (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim();
   if (smallModel) {
     nextConfig.small_model = smallModel;
     notes.push(`Pinned OpenCode small_model to ${smallModel}.`);
   }
   await fs.writeFile(runtimeConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, "utf8");
 
+  const runtimeEnv = preserveExplicitModelModalities(input.env, nextProvider, input.config.model);
   return {
     env: {
-      ...input.env,
+      ...runtimeEnv,
       XDG_CONFIG_HOME: runtimeConfigHome,
-      ...(inlineContent ? { OPENCODE_CONFIG_CONTENT: inlineConfig
-        ? JSON.stringify({ ...inlineConfig, provider: nextProvider }) : inlineContent } : {}),
+      ...(inlineContent
+        ? {
+            OPENCODE_CONFIG_CONTENT: inlineConfig
+              ? JSON.stringify({ ...inlineConfig, provider: nextProvider })
+              : inlineContent,
+          }
+        : {}),
     },
     notes,
+    runtimeConfigHome,
     cleanup: async () => {
       await fs.rm(runtimeConfigHome, { recursive: true, force: true });
     },
