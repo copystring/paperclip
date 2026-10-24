@@ -186,8 +186,12 @@ test("fixture config and child environment disable production side effects and w
   const dbUrl = "postgres://paperclip:paperclip@127.0.0.1:54329/paperclip";
   const config = buildFixtureConfig(home, 32001, dbUrl);
   const env = createFixtureEnvironment(home, configPath, 32001, dbUrl, "fixture-only-random-secret");
+  assert.equal(config.$meta.version, 1);
+  assert.equal(config.$meta.source, "configure");
+  assert.ok(Number.isFinite(Date.parse(config.$meta.updatedAt)));
   assert.equal(config.database.backup.enabled, false);
   assert.equal(config.telemetry.enabled, false);
+  assert.equal(config.updates.checkEnabled, false);
   assert.equal(config.server.host, "127.0.0.1");
   assert.equal(env.DATABASE_URL, dbUrl);
   assert.equal(env.PAPERCLIP_DB_BACKUP_ENABLED, "false");

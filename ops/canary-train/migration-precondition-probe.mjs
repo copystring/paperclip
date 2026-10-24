@@ -672,10 +672,12 @@ async function freePort() {
 
 export function buildFixtureConfig(tempRoot, port, connectionString) {
   return {
+    $meta: { version: 1, updatedAt: new Date().toISOString(), source: "configure" },
     database: { mode: "postgres", connectionString, backup: { enabled: false, dir: path.join(tempRoot, "disabled-backups") } },
     logging: { mode: "cloud" },
     server: { deploymentMode: "local_trusted", exposure: "private", host: "127.0.0.1", port, serveUi: false },
     telemetry: { enabled: false },
+    updates: { checkEnabled: false },
     storage: { provider: "local_disk", localDisk: { baseDir: path.join(tempRoot, "storage") } },
   };
 }
