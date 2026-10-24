@@ -2,12 +2,13 @@ import hashlib
 import io
 import json
 import os
+import datetime
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import deploy
 
@@ -1075,6 +1076,34 @@ class ManifestAwareProbeTests(unittest.TestCase):
 
 
 class DrainTests(unittest.TestCase):
+    @staticmethod
+    def restart_readiness(owner="owner-id", server_pid=4321, **changes):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        report = {
+            "version": 1,
+            "status": "ready",
+            "ownerId": owner,
+            "startedAt": (now - datetime.timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+            "expiresAt": (now + datetime.timedelta(seconds=299)).isoformat().replace("+00:00", "Z"),
+            "serverPid": server_pid,
+            "generation": 7,
+            "blockers": [],
+        }
+        report.update(changes)
+        return report
+
+    @staticmethod
+    def restart_readiness_response(report):
+        return {
+            "draining": True,
+            "ownerId": report["ownerId"],
+            "startedAt": report["startedAt"],
+            "expiresAt": report["expiresAt"],
+            "activeRuns": 0,
+            "pendingWakes": 0,
+            "restartReadiness": report,
+        }
+
     def test_start_drain_accepts_real_post_response_and_confirms_get_readback(self):
         with tempfile.TemporaryDirectory() as tmp:
             api = "http://localhost:3100/api"
@@ -1112,6 +1141,10 @@ class DrainTests(unittest.TestCase):
              "acquired idle drain", deploy.DeployError("cleanup failed")),
             ({"draining": True, "activeRuns": 0, "pendingWakes": 0}, "acquired idle drain", {}),
             ({"draining": True, "ownerId": owner, "activeRuns": 1, "pendingWakes": 0},
+             "Work appeared", {}),
+            ({"draining": True, "ownerId": owner, "activeRuns": False, "pendingWakes": 0},
+             "Work appeared", {}),
+            ({"draining": True, "ownerId": owner, "activeRuns": 0, "pendingWakes": False},
              "Work appeared", {}),
         )
         for readback, message, cleanup_result in cases:
@@ -1194,6 +1227,18 @@ class DrainTests(unittest.TestCase):
             with self.assertRaisesRegex(deploy.DeployError, "queued or running"):
                 deployer(Path(tmp), http=http).assert_no_work("opaque")
 
+    def test_boolean_zero_run_counters_fail_closed_before_drain(self):
+        for field in ("activeRuns", "pendingWakes"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                api = "http://localhost:3100/api"
+                status = {"draining": False, "ownerId": None, "activeRuns": 0, "pendingWakes": 0}
+                status[field] = False
+                http = FakeHttp(json_data={
+                    ("GET", api + "/instance/task-drain"): status,
+                })
+                with self.assertRaisesRegex(deploy.DeployError, "active runs or pending wakes"):
+                    deployer(Path(tmp), http=http).assert_no_work("opaque")
+
     def test_unknown_run_inventory_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             api = "http://localhost:3100/api"
@@ -1205,40 +1250,146 @@ class DrainTests(unittest.TestCase):
             with self.assertRaisesRegex(deploy.DeployError, "incomplete"):
                 deployer(Path(tmp), http=http).assert_no_work("opaque")
 
-    def test_post_hold_uses_owner_safety_report_without_admission_gated_company_calls(self):
+    def test_post_hold_uses_owner_restart_readiness_without_blocking_durable_backlog(self):
         with tempfile.TemporaryDirectory() as tmp:
             api = "http://localhost:3100/api"
             owner = "owner-id"
+            report_path = api + "/instance/task-drain?restartReadiness=1&ownerId=owner-id"
+            report = self.restart_readiness(durableSchedules=4, openIssues=12)
             http = FakeHttp(json_data={
                 ("GET", api + "/instance/task-drain"): {
                     "draining": True, "ownerId": owner, "activeRuns": 0, "pendingWakes": 0,
+                    "startedAt": report["startedAt"], "expiresAt": report["expiresAt"],
                 },
-                ("GET", api + "/instance/task-drain?idleSleepSafety=1&ownerId=owner-id"): {
-                    "draining": True, "ownerId": owner, "activeRuns": 0, "pendingWakes": 0,
-                    "idleSleepSafety": {"version": 1, "backgroundWork": "none"},
-                },
+                ("GET", report_path): self.restart_readiness_response(report),
             })
             d = deployer(Path(tmp), http=http)
-            d.assert_idle_checkpoint_disabled = lambda: None
-            d.verify_owned_drain("token", owner)
+            d._service_main_pid = lambda: 4321
+            readiness = d.verify_owned_drain("token", owner)
+            self.assertEqual(readiness["generation"], 7)
             self.assertNotIn(("GET", api + "/companies"), http.json_data)
+            self.assertIn(("GET", report_path), http.json_data)
+            self.assertNotIn(("GET", api + "/instance/task-drain?idleSleepSafety=1&ownerId=owner-id"), http.json_data)
 
-    def test_post_hold_unknown_safety_report_fails_closed(self):
+    def test_restart_readiness_requires_exact_owner_pid_schema_generation_and_live_lease(self):
+        variants = (
+            ({"version": 2}, "not definitively ready"),
+            ({"version": True}, "not definitively ready"),
+            ({"status": "blocked", "blockers": [{"code": "plugins_busy", "count": 1}]}, "not definitively ready"),
+            ({"status": "unknown"}, "not definitively ready"),
+            ({"ownerId": "other-owner"}, "not definitively ready"),
+            ({"serverPid": 9999}, "not definitively ready"),
+            ({"serverPid": True}, "not definitively ready"),
+            ({"generation": None}, "not definitively ready"),
+            ({"generation": True}, "not definitively ready"),
+            ({"blockers": [{"code": "evidence_unavailable"}]}, "not definitively ready"),
+            ({"startedAt": "invalid"}, "invalid drain lease"),
+            ({"expiresAt": "invalid"}, "invalid drain lease"),
+            ({"startedAt": "0001-01-01T00:00:00Z"}, "stale or invalid"),
+            ({"expiresAt": "2020-01-01T00:00:00Z"}, "stale or invalid"),
+            ({"startedAt": (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=5)).isoformat()},
+             "stale or invalid"),
+            ({"expiresAt": (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=301)).isoformat()},
+             "stale or invalid"),
+            ({"expiresAt": (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=1)).isoformat()},
+             "stale or invalid"),
+        )
+        for changes, message in variants:
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as tmp:
+                api = "http://localhost:3100/api"
+                owner = "owner-id"
+                report = self.restart_readiness(**changes)
+                http = FakeHttp(json_data={
+                    ("GET", api + "/instance/task-drain"): {
+                        "draining": True, "ownerId": owner, "activeRuns": 0, "pendingWakes": 0,
+                        "startedAt": report["startedAt"], "expiresAt": report["expiresAt"],
+                    },
+                    ("GET", api + "/instance/task-drain?restartReadiness=1&ownerId=owner-id"):
+                        self.restart_readiness_response(report),
+                })
+                d = deployer(Path(tmp), http=http)
+                d._service_main_pid = lambda: 4321
+                with self.assertRaisesRegex(deploy.DeployError, message):
+                    d.verify_owned_drain("token", owner)
+
+    def test_restart_readiness_missing_report_fails_closed_without_sleep_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             api = "http://localhost:3100/api"
             owner = "owner-id"
+            lease = self.restart_readiness()
             http = FakeHttp(json_data={
                 ("GET", api + "/instance/task-drain"): {
                     "draining": True, "ownerId": owner, "activeRuns": 0, "pendingWakes": 0,
+                    "startedAt": lease["startedAt"], "expiresAt": lease["expiresAt"],
                 },
-                ("GET", api + "/instance/task-drain?idleSleepSafety=1&ownerId=owner-id"): {
-                    "idleSleepSafety": {"version": 1, "backgroundWork": "unknown"},
-                },
+                ("GET", api + "/instance/task-drain?restartReadiness=1&ownerId=owner-id"):
+                    {"draining": True, "ownerId": owner, "startedAt": lease["startedAt"],
+                     "expiresAt": lease["expiresAt"], "activeRuns": 0, "pendingWakes": 0},
             })
             d = deployer(Path(tmp), http=http)
-            d.assert_idle_checkpoint_disabled = lambda: None
-            with self.assertRaisesRegex(deploy.DeployError, "not definitively clear"):
+            d._service_main_pid = lambda: 4321
+            with self.assertRaisesRegex(deploy.DeployError, "report is missing"):
                 d.verify_owned_drain("token", owner)
+
+    def test_restart_readiness_envelope_must_match_the_current_drain_counters_and_lease(self):
+        for change in (
+            {"ownerId": "other-owner"},
+            {"draining": False},
+            {"activeRuns": 1},
+            {"pendingWakes": 1},
+            {"activeRuns": False},
+            {"pendingWakes": False},
+            {"expiresAt": "2020-01-01T00:00:00Z"},
+        ):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
+                api = "http://localhost:3100/api"
+                owner = "owner-id"
+                report = self.restart_readiness()
+                response = self.restart_readiness_response(report)
+                response.update(change)
+                http = FakeHttp(json_data={
+                    ("GET", api + "/instance/task-drain"): {
+                        "draining": True, "ownerId": owner, "activeRuns": 0, "pendingWakes": 0,
+                        "startedAt": report["startedAt"], "expiresAt": report["expiresAt"],
+                    },
+                    ("GET", api + "/instance/task-drain?restartReadiness=1&ownerId=owner-id"): response,
+                })
+                d = deployer(Path(tmp), http=http)
+                d._service_main_pid = lambda: 4321
+                with self.assertRaisesRegex(deploy.DeployError, "does not match"):
+                    d.verify_owned_drain("token", owner)
+
+    def test_restart_readiness_generation_is_monotone_and_lease_identity_is_stable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            api = "http://localhost:3100/api"
+            owner = "owner-id"
+            status = {"draining": True, "ownerId": owner, "activeRuns": 0, "pendingWakes": 0}
+            first = self.restart_readiness(generation=7)
+            status.update(startedAt=first["startedAt"], expiresAt=first["expiresAt"])
+            increased = {**first, "generation": 8}
+            decreased = {**first, "generation": 6}
+            changed_lease = {
+                **first,
+                "generation": 8,
+                "startedAt": (datetime.datetime.fromisoformat(first["startedAt"].replace("Z", "+00:00")) - datetime.timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+                "expiresAt": (datetime.datetime.fromisoformat(first["expiresAt"].replace("Z", "+00:00")) - datetime.timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+            }
+            d = deployer(Path(tmp))
+            d._service_main_pid = lambda: 4321
+            d.api_json = Mock(side_effect=[status, self.restart_readiness_response(first), status,
+                                           self.restart_readiness_response(increased), status,
+                                           self.restart_readiness_response(decreased)])
+            baseline = d.verify_owned_drain("token", owner)
+            next_readiness = d.verify_owned_drain("token", owner, expected_readiness=baseline)
+            self.assertEqual(next_readiness["generation"], 8)
+            with self.assertRaisesRegex(deploy.DeployError, "generation changed"):
+                d.verify_owned_drain("token", owner, expected_readiness=next_readiness)
+
+            d.api_json = Mock(side_effect=[status, self.restart_readiness_response(first), status,
+                                           self.restart_readiness_response(changed_lease)])
+            baseline = d.verify_owned_drain("token", owner)
+            with self.assertRaisesRegex(deploy.DeployError, "lease does not match"):
+                d.verify_owned_drain("token", owner, expected_readiness=baseline)
 
 
 class HealthTests(unittest.TestCase):
@@ -1313,7 +1464,7 @@ class ActivationTests(unittest.TestCase):
         d = deployer(root, command=command)
         d.assert_no_work = lambda token: None
         d.start_drain = lambda token: "owned"
-        d.verify_owned_drain = lambda token, owner: None
+        d.verify_owned_drain = lambda token, owner, expected_readiness=None: expected_readiness
         d.release_drain = lambda token, owner: None
         d._verify_registered_support_files = lambda: None
         d._verify_local_hook_files = lambda candidate, manifest: None

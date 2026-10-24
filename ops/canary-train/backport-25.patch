@@ -1,3 +1,35 @@
+diff --git a/doc/idle-sleep-safety.md b/doc/idle-sleep-safety.md
+index 8153e2125..18e0b404c 100644
+--- a/doc/idle-sleep-safety.md
++++ b/doc/idle-sleep-safety.md
+@@ -36,6 +36,27 @@ signed bootstrap writes. Only the task-drain read skips request tracking.
+ Its authentication finishes under a separate work token before entering the
+ report, so it counts concurrent writes without blocking on its own scan.
+ 
++## Restart readiness
++
++`GET /api/instance/task-drain?restartReadiness=1&ownerId=<owner>` returns the
++ordinary drain readback plus a `restartReadiness` object. It requires the same
++instance-admin authority and exact unexpired owner as the idle hold. Version 1
++binds the hold's ISO `startedAt`/`expiresAt`, process PID, and a stable local-work
++generation. `status` is `ready`, `blocked`, or `unknown`; only `ready` with an
++empty `blockers` array is a restart-readiness proof. Missing DB or plugin
++evidence, malformed state, or scan changes are `unknown` and must block. The
++report contains only safe blocker classes and aggregate counts.
++
++This report is for a host-controlled restart, not the Cloud sleep protocol.
++It checks in-flight process/HTTP work, running database effects, local work,
++and the owner-bound plugin inspect/prepare handshake. Future issues, API keys,
++periodic heartbeats, and queued database backlog do not by themselves mean an
++operation is currently running. Restart readiness never starts a backup; it
++ignores only the future-backup schedule flag and still blocks actual backup,
++accounting, spool, and request work. Do not substitute the Cloud
++`idleSleepSafety` report or an older endpoint response, and do not add a legacy
++fallback when this endpoint or its evidence is unavailable.
++
+ A matched static UI file served by the admitted, handler-tracked application finishes its request
+ tracking when its response ends or closes, including a match found after the
+ client has already disconnected. Unfinished middleware promises remain tracked.
 diff --git a/packages/adapter-utils/src/server-utils.test.ts b/packages/adapter-utils/src/server-utils.test.ts
 index 072004a86..1be10574f 100644
 --- a/packages/adapter-utils/src/server-utils.test.ts
@@ -3152,6 +3184,129 @@ index f0501ccb5..ad9add29a 100644
    it.each([
      { runtimeMode: "native", status: "done", reassigned: false },
      { runtimeMode: "legacy", status: "done", reassigned: false },
+diff --git a/server/src/__tests__/idle-admission.test.ts b/server/src/__tests__/idle-admission.test.ts
+index 4c8e86775..0dc22a8d8 100644
+--- a/server/src/__tests__/idle-admission.test.ts
++++ b/server/src/__tests__/idle-admission.test.ts
+@@ -2,9 +2,10 @@ import express from "express";
+ import request from "supertest";
+ import { request as httpRequest } from "node:http";
+ import { createServer as createViteServer } from "vite";
+-import { afterEach, describe, expect, it } from "vitest";
++import { afterEach, describe, expect, it, vi } from "vitest";
+ import { idleAdmissionMiddleware, trackIdleRequestHandlers } from "../middleware/idle-admission.js";
+ import { idleWorkSnapshot, startTaskDrain, stopTaskDrain, readTaskDrain, beginIdleTrackedWork } from "../services/task-admission.js";
++import { readRestartReadiness } from "../services/restart-readiness.js";
+ 
+ function deferred() {
+   let resolve!: () => void;
+@@ -125,11 +126,26 @@ describe("idle admission", () => {
+       await entered.promise;
+       client.destroy();
+       await closed.promise;
+-      startTaskDrain({ purpose: "idle", ttlMs: 60_000 });
++      const drain = startTaskDrain({ purpose: "idle", ttlMs: 60_000 });
+       expect(idleWorkSnapshot().active).toBe(1);
++      const dbTransaction = vi.fn(async (run: (tx: { execute: () => Promise<unknown[]> }) => Promise<unknown>) =>
++        run({ execute: async () => [{ activeRuns: 0, activeInvocations: 0, activeOperations: 0, unconfirmedPlugins: false }] }));
++      const readiness = () => readRestartReadiness(
++        { transaction: dbTransaction } as never,
++        () => ({ ...drain, draining: true, activeRuns: 0, pendingWakes: 0 }),
++        drain.ownerId!,
++        async () => ({ backgroundWork: "none", pluginIds: [] }),
++        Date.now,
++        async () => "none",
++      );
++      const whileHandlerContinues = await readiness();
++      expect(whileHandlerContinues.status).toBe("blocked");
++      expect(whileHandlerContinues.blockers).toContainEqual(expect.objectContaining({ code: "local_work_active" }));
++      expect(dbTransaction).not.toHaveBeenCalled();
+       done.resolve();
+       await new Promise(resolve => setImmediate(resolve));
+       expect(idleWorkSnapshot().active).toBe(0);
++      expect((await readiness()).status).toBe("ready");
+     } finally {
+       done.resolve(); client.destroy();
+       await new Promise<void>(resolve => listener.close(() => resolve()));
+diff --git a/server/src/__tests__/idle-local-work.test.ts b/server/src/__tests__/idle-local-work.test.ts
+index 4d8426796..6dd2eed38 100644
+--- a/server/src/__tests__/idle-local-work.test.ts
++++ b/server/src/__tests__/idle-local-work.test.ts
+@@ -66,6 +66,19 @@ describe("idle cleanup inspection", () => {
+     expect(await readIdleLocalWork()).toBe("none");
+   });
+ 
++  it("ignores only the future-backup schedule for restart readiness", async () => {
++    vi.stubEnv("PAPERCLIP_HOME", root);
++    markIdleIngressTracked(); markIdleStartupComplete({ scheduledBackups: true });
++    expect(await readIdleLocalWork({ purpose: "restart" })).toBe("none");
++    const custom = path.join(root, "active-spool");
++    registerIdleSpoolDirectory(custom);
++    await fs.mkdir(custom);
++    await fs.writeFile(path.join(custom, "pending.json"), "active work");
++    expect(await readIdleLocalWork({ purpose: "restart" })).toBe("present");
++    await fs.rm(custom, { recursive: true });
++    expect(await readIdleLocalWork({ purpose: "restart" })).toBe("none");
++  });
++
+ });
+ 
+ describe("idle credential recovery inspection", () => {
+diff --git a/server/src/__tests__/instance-settings-routes.test.ts b/server/src/__tests__/instance-settings-routes.test.ts
+index 2ddd8f315..2cca6b965 100644
+--- a/server/src/__tests__/instance-settings-routes.test.ts
++++ b/server/src/__tests__/instance-settings-routes.test.ts
+@@ -31,9 +31,11 @@ const mockCompanyService = vi.hoisted(() => ({
+ const mockLogActivity = vi.hoisted(() => vi.fn());
+ const mockPublishActivity = vi.hoisted(() => vi.fn());
+ const mockReadIdleSleepSafety = vi.hoisted(() => vi.fn());
++const mockReadRestartReadiness = vi.hoisted(() => vi.fn());
+ 
+ function registerModuleMocks() {
+   vi.doMock("../services/idle-sleep-safety.js", () => ({ readIdleSleepSafety: mockReadIdleSleepSafety }));
++  vi.doMock("../services/restart-readiness.js", () => ({ readRestartReadiness: mockReadRestartReadiness }));
+   vi.doMock("../services/index.js", () => ({
+     companyService: () => mockCompanyService,
+     heartbeatService: () => mockHeartbeatService,
+@@ -102,6 +104,7 @@ describe("instance settings routes", () => {
+   beforeEach(() => {
+     vi.clearAllMocks();
+     mockReadIdleSleepSafety.mockReset();
++    mockReadRestartReadiness.mockReset();
+     // vi.clearAllMocks() clears recorded calls only; it does not remove a
+     // mockImplementation a prior test installed. Reinstall the default here
+     // so a stateful implementation from one test can never leak into the
+@@ -1077,6 +1080,30 @@ describe("instance settings routes", () => {
+       expect(mockReadIdleSleepSafety).not.toHaveBeenCalled();
+     });
+ 
++    it("serves restart readiness only to instance admins and forwards the exact owner and worker handshake", async () => {
++      const ownerId = "restart-owner";
++      const startedAt = new Date(Date.now() - 1_000), expiresAt = new Date(Date.now() + 60_000);
++      const drain = { ...idleStatus, draining: true, ownerId, startedAt, expiresAt };
++      const report = { version: 1, status: "ready", ownerId, startedAt: startedAt.toISOString(), expiresAt: expiresAt.toISOString(), serverPid: process.pid, generation: 4, blockers: [] };
++      mockHeartbeatService.getTaskDrainStatus.mockReturnValue(drain);
++      mockReadRestartReadiness.mockResolvedValue(report);
++      const inspect = vi.fn(async () => ({ backgroundWork: "none", pluginIds: [] }));
++      const workers = { inspectIdleSleep: inspect } as unknown as PluginWorkerManager;
++      const app = createApp(adminActor, workers);
++      const res = await request(app).get(`/api/instance/task-drain?restartReadiness=1&ownerId=${ownerId}`).expect(200);
++      expect(res.body).toEqual({ ...drain, startedAt: startedAt.toISOString(), expiresAt: expiresAt.toISOString(), quiescent: true, restartReadiness: report });
++      expect(res.body.restartReadiness).toMatchObject({ version: 1, status: "ready", ownerId,
++        startedAt: res.body.startedAt, expiresAt: res.body.expiresAt, serverPid: process.pid,
++        generation: expect.any(Number), blockers: [] });
++      expect(mockReadRestartReadiness).toHaveBeenCalledWith(mockDb, expect.any(Function), ownerId, expect.any(Function));
++      expect(mockReadRestartReadiness.mock.calls[0][1]()).toEqual(drain);
++      await mockReadRestartReadiness.mock.calls[0][3]({ ownerId, expiresAt: Date.now() + 60_000 });
++      expect(inspect).toHaveBeenCalledOnce();
++      await request(createApp(nonAdminActor, workers))
++        .get(`/api/instance/task-drain?restartReadiness=1&ownerId=${ownerId}`).expect(403);
++      expect(mockReadRestartReadiness).toHaveBeenCalledOnce();
++    });
++
+     it("acquires an owned bounded idle hold and forwards its owner for inspection", async () => {
+       const ownerId = "d0b833f4-4098-42de-8420-1907f3aa4895";
+       mockHeartbeatService.computeTaskDrain.mockReturnValue({ ownerId, startedAt: new Date(), expiresAt: new Date(Date.now() + 60_000) });
 diff --git a/server/src/__tests__/issue-recovery-actions.test.ts b/server/src/__tests__/issue-recovery-actions.test.ts
 index e1151c9c8..17a5a9bfb 100644
 --- a/server/src/__tests__/issue-recovery-actions.test.ts
@@ -3586,6 +3741,272 @@ index 842159d91..836b3af07 100644
    it("wakes the assignee on comment-only issue updates", async () => {
      const existing = makeIssue({
        assigneeAgentId: ASSIGNEE_AGENT_ID,
+diff --git a/server/src/__tests__/restart-readiness-route.integration.test.ts b/server/src/__tests__/restart-readiness-route.integration.test.ts
+new file mode 100644
+index 000000000..b450235c8
+--- /dev/null
++++ b/server/src/__tests__/restart-readiness-route.integration.test.ts
+@@ -0,0 +1,83 @@
++import express from "express";
++import request from "supertest";
++import os from "node:os";
++import path from "node:path";
++import { promises as fs } from "node:fs";
++import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
++import { createDb, type Db } from "@paperclipai/db";
++import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
++import { markIdleIngressTracked, markIdleStartupComplete } from "../services/idle-local-work.js";
++import { startTaskDrain, stopTaskDrain } from "../services/task-admission.js";
++import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
++
++const mockGetDrainStatus = vi.hoisted(() => vi.fn());
++vi.mock("../services/index.js", () => ({
++  companyService: () => ({ listCompanyIds: async () => [] }),
++  heartbeatService: () => ({ getTaskDrainStatus: mockGetDrainStatus }),
++  instanceSettingsService: () => ({}),
++  logActivity: vi.fn(),
++  publishActivity: vi.fn(),
++}));
++vi.mock("../services/environments.js", () => ({ environmentService: () => ({}) }));
++
++import { instanceSettingsRoutes } from "../routes/instance-settings.js";
++
++const support = await getEmbeddedPostgresTestSupport();
++if (!support.supported) console.warn(`Skipping restart readiness route integration: ${support.reason}`);
++(support.supported ? describe : describe.skip)("restart readiness HTTP integration", () => {
++  let db: ReturnType<typeof createDb>;
++  let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
++  let home: string;
++  let liveDrain: ReturnType<typeof startTaskDrain>;
++
++  beforeAll(async () => {
++    database = await startEmbeddedPostgresTestDatabase("restart-readiness-http-");
++    db = createDb(database.connectionString);
++    home = await fs.mkdtemp(path.join(os.tmpdir(), "restart-readiness-http-home-"));
++  }, 60_000);
++  afterAll(async () => { await database?.cleanup(); if (home) await fs.rm(home, { recursive: true, force: true }); });
++  beforeEach(() => {
++    mockGetDrainStatus.mockClear();
++    vi.stubEnv("PAPERCLIP_HOME", home);
++    markIdleIngressTracked();
++    markIdleStartupComplete({ scheduledBackups: true });
++    liveDrain = startTaskDrain({ purpose: "idle", ttlMs: 60_000 });
++    mockGetDrainStatus.mockReturnValue({ ...liveDrain, draining: true, activeRuns: 0, pendingWakes: 0, quiescent: true });
++  });
++  afterEach(() => { stopTaskDrain(); vi.unstubAllEnvs(); });
++
++  it("returns the real database service result in the documented HTTP envelope", async () => {
++    const workers = {
++      inspectIdleSleep: vi.fn(async () => ({ backgroundWork: "none" as const, pluginIds: [] })),
++    } as unknown as PluginWorkerManager;
++    const app = express();
++    app.use((req, _res, next) => {
++      req.actor = { type: "board", source: "local_implicit", isInstanceAdmin: true } as never;
++      next();
++    });
++    app.use("/api", instanceSettingsRoutes(db as unknown as Db, workers));
++
++    const response = await request(app)
++      .get(`/api/instance/task-drain?restartReadiness=1&ownerId=${liveDrain.ownerId}`)
++      .expect(200);
++
++    expect(response.body.restartReadiness).toEqual({
++      version: 1,
++      status: "ready",
++      ownerId: liveDrain.ownerId,
++      startedAt: liveDrain.startedAt.toISOString(),
++      expiresAt: liveDrain.expiresAt.toISOString(),
++      serverPid: process.pid,
++      generation: expect.any(Number),
++      blockers: [],
++    });
++    expect(response.body).toMatchObject({
++      draining: true,
++      ownerId: liveDrain.ownerId,
++      startedAt: liveDrain.startedAt.toISOString(),
++      expiresAt: liveDrain.expiresAt.toISOString(),
++      restartReadiness: { status: "ready", version: 1 },
++    });
++    expect(workers.inspectIdleSleep).toHaveBeenCalledWith({ ownerId: liveDrain.ownerId, expiresAt: liveDrain.expiresAt.getTime() });
++  });
++});
+diff --git a/server/src/__tests__/restart-readiness.test.ts b/server/src/__tests__/restart-readiness.test.ts
+new file mode 100644
+index 000000000..bc2c68d12
+--- /dev/null
++++ b/server/src/__tests__/restart-readiness.test.ts
+@@ -0,0 +1,171 @@
++import { agentApiKeys, agents, companies, createDb, environments, environmentCustomImageSetupSessions, heartbeatRuns, issues, workspaceOperations, type Db } from "@paperclipai/db";
++import { sql } from "drizzle-orm";
++import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
++import { beginIdleTrackedWork, idleWorkSnapshot } from "../services/task-admission.js";
++import { readRestartReadiness, type RestartDrainStatus } from "../services/restart-readiness.js";
++import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
++
++const ownerId = "owner-fixture";
++const startedAt = new Date("2026-01-01T00:00:00.000Z");
++const expiresAt = new Date("2026-01-01T00:01:00.000Z");
++const now = () => Date.parse("2026-01-01T00:00:30.000Z");
++const held = (): RestartDrainStatus => ({ ownerId, draining: true, startedAt, expiresAt, activeRuns: 0, pendingWakes: 0 });
++const plugins = vi.fn(async () => ({ backgroundWork: "none" as const, pluginIds: [] }));
++const local = vi.fn(async (_options: { purpose?: "restart" }) => "none" as const);
++
++function database(result: unknown = [{ activeRuns: 0, activeInvocations: 0, activeOperations: 0, unconfirmedPlugins: false }]) {
++  const execute = vi.fn(async () => result);
++  const transaction = vi.fn(async (run: (tx: { execute: typeof execute }) => Promise<unknown>) => run({ execute }));
++  return { db: { transaction } as unknown as Db, transaction, execute };
++}
++
++afterEach(() => {
++  plugins.mockClear();
++  local.mockClear();
++});
++
++describe("restart readiness", () => {
++  it("allows future issues, API keys, and periodic heartbeats when no execution is active", async () => {
++    const { db, execute } = database();
++    const result = await readRestartReadiness(db, held, ownerId, plugins, now, local);
++    expect(result).toMatchObject({ version: 1, status: "ready", ownerId, startedAt: startedAt.toISOString(), expiresAt: expiresAt.toISOString(), serverPid: process.pid, blockers: [] });
++    expect(result.generation).toBe(idleWorkSnapshot().generation);
++    const sqlText = String(execute.mock.calls.at(-1)?.[0]);
++    expect(sqlText).not.toMatch(/\bissues\b|agent_api_keys|board_api_keys|intervalSec|scheduled_retry_at/);
++  });
++
++  it.each([
++    ["missing drain", () => ({ ...held(), draining: false }), "drain_missing"],
++    ["foreign owner", () => ({ ...held(), ownerId: "other-owner" }), "owner_mismatch"],
++    ["expired owner", () => ({ ...held(), expiresAt: new Date(now() - 1) }), "drain_expired"],
++    ["active process run", () => ({ ...held(), activeRuns: 2 }), "process_runs_active"],
++    ["pending process wake", () => ({ ...held(), pendingWakes: 1 }), "process_wakes_pending"],
++  ] as const)("blocks %s", async (_label, getStatus, code) => {
++    const { db, transaction } = database();
++    const result = await readRestartReadiness(db, getStatus, ownerId, plugins, now, local);
++    expect(result.status).toBe("blocked");
++    expect(result.blockers).toContainEqual(expect.objectContaining({ code }));
++    expect(transaction).not.toHaveBeenCalled();
++  });
++
++  it.each(["startedAt", "expiresAt"] as const)("returns unknown for an invalid %s instead of throwing", async field => {
++    const invalid = new Date(Number.NaN);
++    const result = await readRestartReadiness(database().db,
++      () => ({ ...held(), [field]: invalid }), ownerId, plugins, now, local);
++    expect(result.status).toBe("unknown");
++    expect(result.blockers).toContainEqual({ code: "evidence_unavailable" });
++    expect(result[field]).toBeNull();
++  });
++
++  it("fails closed when plugin workers are missing, busy, or unknown", async () => {
++    const { db, transaction } = database();
++    expect((await readRestartReadiness(db, held, ownerId, undefined, now, local)).status).toBe("unknown");
++    expect(transaction).not.toHaveBeenCalled();
++    for (const backgroundWork of ["present", "unknown"] as const) {
++      const inspect = vi.fn(async () => ({ backgroundWork, pluginIds: [] }));
++      const result = await readRestartReadiness(db, held, ownerId, inspect, now, local);
++      expect(result.status).toBe(backgroundWork === "present" ? "blocked" : "unknown");
++      expect(transaction).not.toHaveBeenCalled();
++    }
++    const malformed = vi.fn(async () => ({ backgroundWork: "invalid" as never, pluginIds: [] }));
++    expect((await readRestartReadiness(db, held, ownerId, malformed, now, local)).status).toBe("unknown");
++    const malformedIds = vi.fn(async () => ({ backgroundWork: "none" as const, pluginIds: ["not-a-plugin-id"] }));
++    expect((await readRestartReadiness(db, held, ownerId, malformedIds, now, local)).status).toBe("unknown");
++    const malformedLocal = vi.fn(async () => "invalid" as never);
++    expect((await readRestartReadiness(db, held, ownerId, plugins, now, malformedLocal)).status).toBe("unknown");
++  });
++
++  it("blocks database execution effects but ignores non-running backlog", async () => {
++    const { db } = database([{ activeRuns: 1, activeInvocations: 2, activeOperations: 0, unconfirmedPlugins: false }]);
++    const result = await readRestartReadiness(db, held, ownerId, plugins, now, local);
++    expect(result.status).toBe("blocked");
++    expect(result.blockers).toContainEqual({ code: "database_effects_active", count: 3 });
++  });
++
++  it("keeps unconfirmed enabled database plugins closed", async () => {
++    const { db } = database([{ activeRuns: 0, activeInvocations: 0, activeOperations: 0, unconfirmedPlugins: true }]);
++    const result = await readRestartReadiness(db, held, ownerId, plugins, now, local);
++    expect(result.status).toBe("blocked");
++    expect(result.blockers).toContainEqual({ code: "plugins_busy" });
++  });
++
++  it("reports unknown on database errors or malformed evidence", async () => {
++    const unavailable = { transaction: vi.fn().mockRejectedValue(new Error("private db detail")) } as unknown as Db;
++    expect((await readRestartReadiness(unavailable, held, ownerId, plugins, now, local)).status).toBe("unknown");
++    const malformed = database([{ activeRuns: "0", activeInvocations: 0, activeOperations: 0, unconfirmedPlugins: false }]);
++    expect((await readRestartReadiness(malformed.db, held, ownerId, plugins, now, local)).status).toBe("unknown");
++  });
++
++  it("rejects work starting and finishing during the scan by generation", async () => {
++    const { db, execute } = database();
++    execute.mockImplementationOnce(async () => {
++      const end = beginIdleTrackedWork();
++      end();
++      return [{ activeRuns: 0, activeInvocations: 0, activeOperations: 0, unconfirmedPlugins: false }];
++    });
++    const result = await readRestartReadiness(db, held, ownerId, plugins, now, local);
++    expect(result.status).toBe("unknown");
++    expect(result.blockers).toContainEqual({ code: "generation_changed" });
++  });
++
++  it("fails closed when local or plugin evidence changes during the scan", async () => {
++    const status = vi.fn().mockReturnValueOnce(held()).mockReturnValue({ ...held(), ownerId: "replacement" });
++    const { db } = database();
++    expect((await readRestartReadiness(db, status, ownerId, plugins, now, local)).status).toBe("unknown");
++    expect(plugins).not.toHaveBeenCalled();
++    const pluginUnknown = vi.fn(async () => { throw new Error("private plugin error"); });
++    expect((await readRestartReadiness(db, held, ownerId, pluginUnknown, now, local)).status).toBe("unknown");
++  });
++});
++
++const pgSupport = await getEmbeddedPostgresTestSupport();
++if (!pgSupport.supported) console.warn(`Skipping restart readiness Postgres tests: ${pgSupport.reason}`);
++(pgSupport.supported ? describe : describe.skip)("restart readiness against persisted activity", () => {
++  let db: ReturnType<typeof createDb>;
++  let databaseHandle: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
++
++  beforeAll(async () => {
++    databaseHandle = await startEmbeddedPostgresTestDatabase("restart-readiness-");
++    db = createDb(databaseHandle.connectionString);
++  }, 60_000);
++  afterEach(async () => { await db.execute(sql`TRUNCATE companies, plugins, environments CASCADE`); });
++  afterAll(async () => { await databaseHandle?.cleanup(); });
++
++  async function seed() {
++    const companyId = "ba5721cd-667c-4a2e-a238-01aafe12b1bb";
++    const agentId = "3aac840c-497c-46d7-8d6e-f0759a6858d4";
++    const runId = "0174f454-7123-4553-a600-d4be71ccf5b0";
++    await db.insert(companies).values({ id: companyId, name: "Restart readiness", issuePrefix: "RR" });
++    await db.insert(agents).values({ id: agentId, companyId, name: "Periodic agent", role: "engineer", status: "idle",
++      adapterType: "process", runtimeConfig: { heartbeat: { enabled: true, intervalSec: 300 } } });
++    await db.insert(issues).values({ companyId, title: "Future issue", status: "todo" });
++    await db.insert(agentApiKeys).values({ companyId, agentId, name: "Ingress key", keyHash: "test-hash" });
++    return { companyId, agentId, runId };
++  }
++  const readDb = (status: RestartDrainStatus = held()) => readRestartReadiness(db, () => status, ownerId,
++    async () => ({ backgroundWork: "none", pluginIds: [] }), now, local);
++
++  it("is ready with open issues, API keys, and periodic heartbeat configuration but no active effects", async () => {
++    await seed();
++    expect((await readDb()).status).toBe("ready");
++  });
++
++  it("blocks a persisted running heartbeat run", async () => {
++    const f = await seed();
++    await db.insert(heartbeatRuns).values({ id: f.runId, companyId: f.companyId, agentId: f.agentId,
++      invocationSource: "on_demand", status: "running" });
++    expect(await readDb()).toMatchObject({ status: "blocked", blockers: [{ code: "database_effects_active", count: 1 }] });
++  });
++
++  it("blocks active workspace and image operations without treating retained history as active", async () => {
++    const f = await seed();
++    await db.insert(workspaceOperations).values({ companyId: f.companyId, phase: "workspace_copyback", status: "running" });
++    expect(await readDb()).toMatchObject({ status: "blocked", blockers: [{ code: "database_effects_active", count: 1 }] });
++    await db.execute(sql`TRUNCATE workspace_operations CASCADE`);
++    await db.insert(workspaceOperations).values({ companyId: f.companyId, phase: "workspace_copyback", status: "succeeded" });
++    expect((await readDb()).status).toBe("ready");
++    const [environment] = await db.insert(environments).values({ name: "Image worker fixture", driver: "sandbox" }).returning();
++    await db.insert(environmentCustomImageSetupSessions).values({ environmentId: environment.id, provider: "fixture", status: "capturing" });
++    expect(await readDb()).toMatchObject({ status: "blocked", blockers: [{ code: "database_effects_active", count: 1 }] });
++  });
++});
 diff --git a/server/src/index.ts b/server/src/index.ts
 index ef5da7d36..dde7a3598 100644
 --- a/server/src/index.ts
@@ -4019,6 +4440,33 @@ index 11b904bdc..0da7b48e0 100644
      return { kind: "released" };
    }
  
+diff --git a/server/src/routes/instance-settings.ts b/server/src/routes/instance-settings.ts
+index e08c66b6d..bb6e70920 100644
+--- a/server/src/routes/instance-settings.ts
++++ b/server/src/routes/instance-settings.ts
+@@ -16,6 +16,7 @@ import {
+ import { getHiddenSettings } from "../services/settings-visibility.js";
+ import { readIdleSleepSafety } from "../services/idle-sleep-safety.js";
+ import { readIdleLocalWork } from "../services/idle-local-work.js";
++import { readRestartReadiness } from "../services/restart-readiness.js";
+ import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+ import { validate } from "../middleware/validate.js";
+ import { logger } from "../middleware/logger.js";
+@@ -309,6 +310,14 @@ export function instanceSettingsRoutes(db: Db, pluginWorkers?: PluginWorkerManag
+ 
+   router.get("/instance/task-drain", async (req, res) => {
+     assertBoardOrgAccess(req);
++    if (req.query.restartReadiness === "1") {
++      assertCanManageInstanceSettings(req);
++      const ownerId = typeof req.query.ownerId === "string" ? req.query.ownerId : "";
++      const restartReadiness = await readRestartReadiness(db, () => heartbeat.getTaskDrainStatus(), ownerId,
++        pluginWorkers?.inspectIdleSleep?.bind(pluginWorkers));
++      res.json({ ...heartbeat.getTaskDrainStatus(), restartReadiness });
++      return;
++    }
+     if (req.query.idleSleepSafety === "1") {
+       // The report covers every company in this process. Ordinary company
+       // members may read process counters, but not instance-wide work state.
 diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
 index b2cecd741..2acff94c1 100644
 --- a/server/src/routes/issues.ts
@@ -5291,6 +5739,59 @@ index 02d9bcaa8..8eed1616e 100644
    };
    /** Keep causally distinct external chat continuations out of an existing run. */
    allowRunCoalescing?: boolean;
+diff --git a/server/src/services/idle-local-work.ts b/server/src/services/idle-local-work.ts
+index 95b6549eb..acccaa40c 100644
+--- a/server/src/services/idle-local-work.ts
++++ b/server/src/services/idle-local-work.ts
+@@ -24,6 +24,22 @@ export function markIdleStartupComplete(options: { scheduledBackups: boolean })
+   startupComplete = true;
+ }
+ 
++async function missingWithoutInvalidParent(directory: string): Promise<IdleLocalWork> {
++  let parent = path.dirname(directory);
++  while (true) {
++    try {
++      const info = await fs.lstat(parent);
++      return info.isDirectory() && !info.isSymbolicLink() ? "none" : "unknown";
++    } catch (error) {
++      const code = (error as NodeJS.ErrnoException).code;
++      if (code !== "ENOENT") return "unknown";
++      const next = path.dirname(parent);
++      if (next === parent) return "none";
++      parent = next;
++    }
++  }
++}
++
+ /** Any entry, including malformed JSON, a temp file or a failed probe, is
+  * evidence to retain. Recovery readers intentionally skip some such files;
+  * they cannot certify that stopping the process is safe. */
+@@ -35,7 +51,7 @@ export async function inspectIdleSpool(directory: string): Promise<IdleLocalWork
+     try { return (await dir.read()) === null ? "none" : "present"; }
+     finally { await dir.close(); }
+   } catch (error) {
+-    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "none" : "unknown";
++    return (error as NodeJS.ErrnoException).code === "ENOENT" ? missingWithoutInvalidParent(directory) : "unknown";
+   }
+ }
+ 
+@@ -61,11 +77,12 @@ export async function inspectIdleQuotaRecovery(directory: string): Promise<IdleL
+   }
+ }
+ 
+-export async function readIdleLocalWork(options: { backupCheckpoint?: boolean } = {}): Promise<IdleLocalWork> {
++export async function readIdleLocalWork(options: { backupCheckpoint?: boolean; purpose?: "restart" } = {}): Promise<IdleLocalWork> {
+   if (!startupComplete || !ingressTracked) return "unknown";
+-  // This exemption belongs only to a scan which will finish a new backup
+-  // under the same admission hold before it can return an empty report.
+-  if ((scheduledBackups && !options.backupCheckpoint) || idleWorkSnapshot().active !== 0) return "present";
++  // A backup checkpoint may create its one new backup under the hold. Restart
++  // readiness ignores only the future schedule; actual backup work remains
++  // visible through tracked work and the local probes below.
++  if ((scheduledBackups && !options.backupCheckpoint && options.purpose !== "restart") || idleWorkSnapshot().active !== 0) return "present";
+   try {
+     const local = [...localWorkProbes].map(probe => probe());
+     if (local.includes("unknown")) return "unknown";
 diff --git a/server/src/services/issue-comment-wakeup.test.ts b/server/src/services/issue-comment-wakeup.test.ts
 index c8563c9b5..9438ce836 100644
 --- a/server/src/services/issue-comment-wakeup.test.ts
@@ -6699,6 +7200,173 @@ index 7d4232e37..962ebb89a 100644
            outcome: reviewOutcome,
          });
          if (queued) {
+diff --git a/server/src/services/restart-readiness.ts b/server/src/services/restart-readiness.ts
+new file mode 100644
+index 000000000..bbf0287cb
+--- /dev/null
++++ b/server/src/services/restart-readiness.ts
+@@ -0,0 +1,161 @@
++import type { Db } from "@paperclipai/db";
++import { sql } from "drizzle-orm";
++import { idleWorkSnapshot } from "./task-admission.js";
++import { readIdleLocalWork } from "./idle-local-work.js";
++
++export interface RestartDrainStatus {
++  ownerId?: string;
++  draining: boolean;
++  startedAt: Date | null;
++  expiresAt: Date | null;
++  activeRuns: number;
++  pendingWakes: number;
++}
++
++export type RestartReadinessBlocker = {
++  code:
++    | "drain_missing" | "owner_mismatch" | "drain_expired"
++    | "process_runs_active" | "process_wakes_pending" | "local_work_active"
++    | "database_effects_active" | "plugins_busy" | "generation_changed"
++    | "evidence_unavailable";
++  count?: number;
++};
++
++export interface RestartReadiness {
++  version: 1;
++  status: "ready" | "blocked" | "unknown";
++  ownerId: string;
++  startedAt: string | null;
++  expiresAt: string | null;
++  serverPid: number;
++  generation: number | null;
++  blockers: RestartReadinessBlocker[];
++}
++
++type InspectIdlePlugins = (hold: { ownerId: string; expiresAt: number }) => Promise<{
++  backgroundWork: "none" | "present" | "unknown";
++  pluginIds: string[];
++}>;
++
++const unknownCode: RestartReadinessBlocker = { code: "evidence_unavailable" };
++
++function report(
++  ownerId: string,
++  status: RestartReadiness["status"],
++  drain: RestartDrainStatus,
++  generation: number | null,
++  blockers: RestartReadinessBlocker[],
++): RestartReadiness {
++  const iso = (value: Date | null): string | null => value && Number.isFinite(value.getTime()) ? value.toISOString() : null;
++  return {
++    version: 1,
++    status,
++    ownerId,
++    startedAt: iso(drain.startedAt),
++    expiresAt: iso(drain.expiresAt),
++    serverPid: process.pid,
++    generation,
++    blockers,
++  };
++}
++
++function sameDrain(before: RestartDrainStatus, after: RestartDrainStatus, ownerId: string): boolean {
++  return before.draining && after.draining && before.ownerId === ownerId && after.ownerId === ownerId
++    && before.activeRuns === 0 && before.pendingWakes === 0 && after.activeRuns === 0 && after.pendingWakes === 0
++    && before.startedAt !== null && after.startedAt?.getTime() === before.startedAt.getTime()
++    && before.expiresAt !== null && after.expiresAt?.getTime() === before.expiresAt.getTime();
++}
++
++/**
++ * Certifies only that this exact owner-bound drain currently has no in-flight
++ * process, local, database, or plugin work. Durable backlog and configured
++ * ingress are intentionally outside this restart-specific contract.
++ */
++export async function readRestartReadiness(
++  db: Db,
++  getDrainStatus: () => RestartDrainStatus,
++  ownerId: string,
++  inspectPlugins?: InspectIdlePlugins,
++  now: () => number = Date.now,
++  inspectLocal: typeof readIdleLocalWork = readIdleLocalWork,
++): Promise<RestartReadiness> {
++  const initialDrain = getDrainStatus();
++  const initialSnapshot = idleWorkSnapshot();
++  const fail = (blockers: RestartReadinessBlocker[], status: "blocked" | "unknown" = "blocked") =>
++    report(ownerId, status, initialDrain, initialSnapshot.generation, blockers);
++
++  if (!initialDrain.draining || !initialDrain.ownerId) return fail([{ code: "drain_missing" }]);
++  if (!ownerId || initialDrain.ownerId !== ownerId) return fail([{ code: "owner_mismatch" }]);
++  if (!initialDrain.startedAt || !initialDrain.expiresAt || initialDrain.expiresAt.getTime() <= now()) {
++    return fail([{ code: "drain_expired" }]);
++  }
++  if (!Number.isSafeInteger(initialDrain.activeRuns) || initialDrain.activeRuns < 0
++    || !Number.isSafeInteger(initialDrain.pendingWakes) || initialDrain.pendingWakes < 0
++    || !Number.isFinite(initialDrain.startedAt.getTime()) || !Number.isFinite(initialDrain.expiresAt.getTime())) {
++    return fail([unknownCode], "unknown");
++  }
++  const blockers: RestartReadinessBlocker[] = [];
++  if (initialDrain.activeRuns > 0) blockers.push({ code: "process_runs_active", count: initialDrain.activeRuns });
++  if (initialDrain.pendingWakes > 0) blockers.push({ code: "process_wakes_pending", count: initialDrain.pendingWakes });
++  if (initialSnapshot.active !== 0) blockers.push({ code: "local_work_active", count: initialSnapshot.active });
++  if (blockers.length) return fail(blockers);
++  if (!inspectPlugins) return fail([unknownCode], "unknown");
++
++  try {
++    const local = await inspectLocal({ purpose: "restart" });
++    if (local === "unknown") return fail([unknownCode], "unknown");
++    if (local === "present") return fail([{ code: "local_work_active" }]);
++    if (local !== "none") return fail([unknownCode], "unknown");
++    const beforePlugins = getDrainStatus();
++    if (!sameDrain(initialDrain, beforePlugins, ownerId) || initialSnapshot.generation !== idleWorkSnapshot().generation
++      || idleWorkSnapshot().active !== 0 || initialDrain.expiresAt.getTime() <= now()) {
++      return fail([{ code: "generation_changed" }], "unknown");
++    }
++    const pluginResult = await inspectPlugins({ ownerId, expiresAt: initialDrain.expiresAt.getTime() });
++    if (pluginResult.backgroundWork === "unknown") return fail([unknownCode], "unknown");
++    if (pluginResult.backgroundWork === "present") return fail([{ code: "plugins_busy" }]);
++    if (pluginResult.backgroundWork !== "none" || !Array.isArray(pluginResult.pluginIds)
++      || pluginResult.pluginIds.some(id => typeof id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
++      return fail([unknownCode], "unknown");
++    }
++
++    const rows = await db.transaction(async (tx) => {
++      await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
++      const unconfirmedPlugins = pluginResult.pluginIds.length === 0
++        ? sql`EXISTS (SELECT 1 FROM plugins WHERE status <> 'disabled')`
++        : sql`EXISTS (SELECT 1 FROM plugins WHERE status <> 'disabled'
++            AND id NOT IN (${sql.join(pluginResult.pluginIds.map(id => sql`${id}::uuid`), sql`, `)}))`;
++      return tx.execute<{ activeRuns: number; activeInvocations: number; activeOperations: number; unconfirmedPlugins: boolean }>(sql`
++        SELECT
++          (SELECT count(*)::int FROM heartbeat_runs WHERE status = 'running') AS "activeRuns",
++          ((SELECT count(*) FROM decision_invocations WHERE status = 'running') +
++           (SELECT count(*) FROM prompt_injection_invocations WHERE status = 'running') +
++           (SELECT count(*) FROM tool_invocations WHERE status = 'executing'))::int AS "activeInvocations",
++          ((SELECT count(*) FROM workspace_operations WHERE status = 'running') +
++           (SELECT count(*) FROM environment_custom_image_setup_sessions
++             WHERE status IN ('starting', 'waiting_for_user', 'capturing')))::int AS "activeOperations",
++          ${unconfirmedPlugins} AS "unconfirmedPlugins"
++      `);
++    }, { isolationLevel: "repeatable read", accessMode: "read only" });
++    if (rows.length !== 1 || !Number.isSafeInteger(rows[0]?.activeRuns) || rows[0].activeRuns < 0
++      || !Number.isSafeInteger(rows[0]?.activeInvocations) || rows[0].activeInvocations < 0
++      || !Number.isSafeInteger(rows[0]?.activeOperations) || rows[0].activeOperations < 0
++      || typeof rows[0]?.unconfirmedPlugins !== "boolean") return fail([unknownCode], "unknown");
++    const dbBlockers: RestartReadinessBlocker[] = [];
++    const activeDbEffects = rows[0].activeRuns + rows[0].activeInvocations + rows[0].activeOperations;
++    if (activeDbEffects > 0) dbBlockers.push({ code: "database_effects_active", count: activeDbEffects });
++    if (rows[0].unconfirmedPlugins) dbBlockers.push({ code: "plugins_busy" });
++    if (dbBlockers.length) return fail(dbBlockers);
++
++    const finalDrain = getDrainStatus();
++    const finalSnapshot = idleWorkSnapshot();
++    if (!sameDrain(initialDrain, finalDrain, ownerId) || finalDrain.activeRuns !== 0 || finalDrain.pendingWakes !== 0
++      || initialSnapshot.generation !== finalSnapshot.generation || finalSnapshot.active !== 0
++      || initialDrain.expiresAt.getTime() <= now()) {
++      return fail([{ code: "generation_changed" }], "unknown");
++    }
++    return report(ownerId, "ready", initialDrain, initialSnapshot.generation, []);
++  } catch {
++    return fail([unknownCode], "unknown");
++  }
++}
 diff --git a/server/src/services/tool-gateway.ts b/server/src/services/tool-gateway.ts
 index f4c7dd3b4..1888eeb1b 100644
 --- a/server/src/services/tool-gateway.ts

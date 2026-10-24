@@ -14,6 +14,7 @@ import datetime
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -1197,11 +1198,16 @@ class Deployer:
     def api_json(self, path: str, method="GET", body=None, token=None):
         return self.http.request_json(self.api + "/api" + path, method, body, token)
 
+    @staticmethod
+    def _is_zero_count(value):
+        return isinstance(value, int) and not isinstance(value, bool) and value == 0
+
     def assert_no_work(self, token: str):
         status = self.api_json("/instance/task-drain", token=token)
         if not isinstance(status, dict) or status.get("draining") is not False or status.get("ownerId") is not None:
             raise DeployError("Paperclip already has an active task drain or returned an unknown state")
-        if status.get("activeRuns") != 0 or status.get("pendingWakes") != 0:
+        if (not self._is_zero_count(status.get("activeRuns")) or
+                not self._is_zero_count(status.get("pendingWakes"))):
             raise DeployError("Paperclip has active runs or pending wakes")
         companies = self.api_json("/companies", token=token)
         if isinstance(companies, dict):
@@ -1228,7 +1234,8 @@ class Deployer:
             if (not isinstance(status, dict) or status.get("ownerId") != owner or
                     status.get("draining") is not True):
                 raise DeployError("Paperclip did not confirm the acquired idle drain")
-            if status.get("activeRuns") != 0 or status.get("pendingWakes") != 0:
+            if (not self._is_zero_count(status.get("activeRuns")) or
+                    not self._is_zero_count(status.get("pendingWakes"))):
                 raise DeployError("Work appeared after the idle drain started")
             return owner
         except Exception:
@@ -1239,41 +1246,93 @@ class Deployer:
                 self.release_drain(token, owner)
             raise
 
-    def verify_owned_drain(self, token: str, owner: str):
+    def verify_owned_drain(self, token: str, owner: str, expected_readiness=None):
         status = self.api_json("/instance/task-drain", token=token)
         if not isinstance(status, dict) or status.get("ownerId") != owner or status.get("draining") is not True:
             raise DeployError("Paperclip idle drain ownership changed")
-        if status.get("activeRuns") != 0 or status.get("pendingWakes") != 0:
+        if (not self._is_zero_count(status.get("activeRuns")) or
+                not self._is_zero_count(status.get("pendingWakes"))):
             raise DeployError("Work appeared after the idle drain started")
-        # Company endpoints are intentionally admission-gated once an idle
-        # drain is held. The owner-scoped safety report is the authoritative
-        # post-hold check for HTTP, plugin, local, and persisted database work.
-        self.assert_idle_checkpoint_disabled()
-        report = self.api_json("/instance/task-drain?idleSleepSafety=1&ownerId=" +
-                               urllib.parse.quote(owner, safe=""), token=token)
-        safety = report.get("idleSleepSafety") if isinstance(report, dict) else None
-        if (not isinstance(safety, dict) or safety.get("version") != 1 or
-                safety.get("backgroundWork") != "none"):
-            raise DeployError("Paperclip idle-work safety report is not definitively clear")
+        # Company endpoints are admission-gated while the owned drain is held.
+        # This owner-scoped report is specifically for a controlled restart:
+        # unlike the cloud-sleep report, it checks transient effects without
+        # treating durable schedules/backlog as active work.
+        server_pid = self._service_main_pid()
+        response = self.api_json("/instance/task-drain?restartReadiness=1&ownerId=" +
+                                 urllib.parse.quote(owner, safe=""), token=token)
+        report = response.get("restartReadiness") if isinstance(response, dict) else None
+        if not isinstance(response, dict) or not isinstance(report, dict):
+            raise DeployError("Paperclip restart-readiness report is missing")
+        drain_started_at = self._restart_readiness_time(status.get("startedAt"))
+        drain_expires_at = self._restart_readiness_time(status.get("expiresAt"))
+        response_started_at = self._restart_readiness_time(response.get("startedAt"))
+        response_expires_at = self._restart_readiness_time(response.get("expiresAt"))
+        started_at = self._restart_readiness_time(report.get("startedAt"))
+        expires_at = self._restart_readiness_time(report.get("expiresAt"))
+        now = time.time()
+        blockers = report.get("blockers")
+        generation = report.get("generation")
+        report_version = report.get("version")
+        report_pid = report.get("serverPid")
+        if (not isinstance(report_version, int) or isinstance(report_version, bool) or report_version != 1 or
+                report.get("status") != "ready" or report.get("ownerId") != owner or
+                not isinstance(report_pid, int) or isinstance(report_pid, bool) or report_pid != server_pid or
+                not isinstance(generation, int) or isinstance(generation, bool) or generation < 0 or
+                not isinstance(blockers, list) or blockers):
+            raise DeployError("Paperclip restart-readiness report is not definitively ready")
+        if (started_at > now or expires_at <= now or expires_at <= started_at or
+                expires_at - started_at > 300):
+            raise DeployError("Paperclip restart-readiness drain lease is stale or invalid")
+        if (report.get("startedAt") != status.get("startedAt") or
+                report.get("expiresAt") != status.get("expiresAt") or
+                response.get("ownerId") != owner or response.get("draining") is not True or
+                not self._is_zero_count(response.get("activeRuns")) or
+                not self._is_zero_count(response.get("pendingWakes")) or
+                response.get("startedAt") != status.get("startedAt") or
+                response.get("expiresAt") != status.get("expiresAt") or
+                started_at != drain_started_at or expires_at != drain_expires_at or
+                response_started_at != drain_started_at or response_expires_at != drain_expires_at):
+            raise DeployError("Paperclip restart-readiness lease does not match the owned task drain")
+        readiness = {
+            "version": 1,
+            "ownerId": owner,
+            "serverPid": server_pid,
+            "generation": generation,
+            "startedAt": report["startedAt"],
+            "expiresAt": report["expiresAt"],
+        }
+        if expected_readiness is not None:
+            stable_identity = ("version", "ownerId", "serverPid", "startedAt", "expiresAt")
+            if (any(readiness[key] != expected_readiness.get(key) for key in stable_identity) or
+                    generation < expected_readiness.get("generation", 0)):
+                raise DeployError("Paperclip restart-readiness identity or generation changed during activation")
+        return readiness
 
-    def assert_idle_checkpoint_disabled(self):
-        """Prevent the safety probe from creating a backup checkpoint."""
+    @staticmethod
+    def _restart_readiness_time(value):
+        if not isinstance(value, str) or not value:
+            raise DeployError("Paperclip restart-readiness report has an invalid drain lease")
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, OverflowError, OSError) as exc:
+            raise DeployError("Paperclip restart-readiness report has an invalid drain lease") from exc
+        if parsed.tzinfo is None:
+            raise DeployError("Paperclip restart-readiness report has an invalid drain lease")
+        timestamp = parsed.timestamp()
+        if not math.isfinite(timestamp):
+            raise DeployError("Paperclip restart-readiness report has an invalid drain lease")
+        return timestamp
+
+    def _service_main_pid(self):
         service = self.c.get("serviceName", "paperclip")
         result = self.command(["systemctl", "show", "--property=MainPID", "--value", service],
                               capture_output=True, text=True, timeout=10)
         if result.returncode != 0:
-            raise DeployError("Could not verify the Paperclip service process before idle-work inspection")
+            raise DeployError("Could not verify the Paperclip service process before restart-readiness inspection")
         pid = result.stdout.strip()
         if not pid.isdigit() or pid == "0":
             raise DeployError("Paperclip service has no verifiable main process")
-        try:
-            environment = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
-        except OSError as exc:
-            raise DeployError("Could not inspect the Paperclip idle-checkpoint setting") from exc
-        key = b"PAPERCLIP_DB_BACKUP_IDLE_CHECKPOINT_ENABLED="
-        enabled = next((entry[len(key):] for entry in environment if entry.startswith(key)), b"")
-        if enabled == b"1":
-            raise DeployError("Idle-work inspection could create a backup checkpoint; refusing to proceed")
+        return int(pid)
 
     def assert_no_company_runs(self, token):
         companies = self.api_json("/companies", token=token)
@@ -1409,7 +1468,7 @@ class Deployer:
             self._verify_runner_release_assets(candidate, manifest)
             self.assert_no_work(token)
             owner = self.start_drain(token)
-            self.verify_owned_drain(token, owner)
+            readiness = self.verify_owned_drain(token, owner)
             # Recheck the old active package's migration baseline immediately
             # before switching; a concurrent manual update must defer this run.
             if self.current_link.resolve(strict=True) != old_target:
@@ -1421,7 +1480,7 @@ class Deployer:
             candidate_migrations = _file_inventory(candidate, MIGRATION_ROOT.rstrip("/"))
             if candidate_migrations != migration_diff.get("inventory"):
                 raise DeployError("Candidate migration inventory changed after staging")
-            self.verify_owned_drain(token, owner)
+            readiness = self.verify_owned_drain(token, owner, expected_readiness=readiness)
             self._verify_registered_support_files()
             self._verify_local_hook_files(candidate, manifest)
             self._verify_runner_release_assets(candidate, manifest)
@@ -1438,7 +1497,7 @@ class Deployer:
             if (_file_inventory(old_target, MIGRATION_ROOT.rstrip("/")) != migration_diff.get("baselineInventory") or
                     _file_inventory(candidate, MIGRATION_ROOT.rstrip("/")) != migration_diff.get("inventory")):
                 raise DeployError("Migration inventory changed during precondition check")
-            self.verify_owned_drain(token, owner)
+            readiness = self.verify_owned_drain(token, owner, expected_readiness=readiness)
             if migration_probe_receipt is not None:
                 probe = next(hook for hook in self.c["hooks"] if hook.get("kind") == MIGRATION_PROBE_KIND)
                 if (self._manifest_identity(self._production_probe_context(probe)) !=
