@@ -349,8 +349,32 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+function confirmedHandoffProcessIsStopped(run: Pick<typeof heartbeatRuns.$inferSelect, "processPid" | "processGroupId">) {
+  const definitelyGone = (pid: number, group = false) => {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+      process.kill(group ? -pid : pid, 0);
+      return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException | undefined)?.code === "ESRCH";
+    }
+  };
+
+  if (run.processPid !== null && !definitelyGone(run.processPid)) return false;
+  if (run.processGroupId !== null) {
+    // Windows has no process-group probe; any retained group identity is
+    // inconclusive there. The executor clears both identities after cleanup.
+    if (process.platform === "win32") return false;
+    if (!definitelyGone(run.processGroupId, true)) return false;
+  }
+  return true;
+}
+
 /** Queue admission and dispatch share the service lifecycle callbacks and execution ownership. */
 export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDependencies) {
+  let confirmedAssignmentHandoffScanCursor: { requestedAt: string; id: string } | null = null;
+  let confirmedAssignmentHandoffRecoveryPending = true;
+  let confirmedAssignmentHandoffPassHasOutstandingHold = false;
   const {
     setRunStatus,
     setWakeupStatus,
@@ -1854,6 +1878,106 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       await resumeQueuedCommentInterrupt(wake.companyId, wake.id).catch(err => {
         logger.warn({ err, queueId: wake.id }, "failed to resume interrupted comment queue");
       });
+    }
+    // Reconstruct persisted assignment handoffs once after startup. New
+    // handoffs are released directly by the run-settlement producer below;
+    // this bounded startup scan must go quiet after its durable backlog drains.
+    const confirmedAssignmentHandoffQuery = (cursor: typeof confirmedAssignmentHandoffScanCursor) => db.select({
+      run: heartbeatRuns,
+      wakeId: agentWakeupRequests.id,
+      requestedAt: sql<string>`${agentWakeupRequests.requestedAt}::text`,
+    }).from(agentWakeupRequests)
+      .innerJoin(issues, and(
+        eq(issues.companyId, agentWakeupRequests.companyId),
+        sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
+        eq(issues.assigneeAgentId, agentWakeupRequests.agentId),
+      ))
+      .innerJoin(heartbeatRuns, and(
+        eq(heartbeatRuns.companyId, agentWakeupRequests.companyId),
+        sql`${heartbeatRuns.id}::text = ${agentWakeupRequests.payload}->>'interruptedRunId'`,
+      ))
+      .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
+      .where(and(
+        eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        eq(agentWakeupRequests.source, "assignment"),
+        eq(agentWakeupRequests.reason, "issue_assigned"),
+        isNull(issues.assigneeUserId),
+        inArray(issues.status, ["todo", "in_progress"]),
+        isNull(issues.executionRunId),
+        eq(heartbeatRuns.runtimeMode, "legacy"),
+        eq(heartbeatRuns.status, "cancelled"),
+        eq(heartbeatRuns.errorCode, "issue_reassigned"),
+        eq(heartbeatRuns.executionStage, "settled"),
+        sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issues.id}::text`,
+        sql`${heartbeatRuns.agentId} <> ${issues.assigneeAgentId}`,
+        sql`${heartbeatRuns.finishedAt} is not null`,
+        gt(agentWakeupRequests.requestedAt, heartbeatRuns.finishedAt),
+        sql`${heartbeatRuns.resultJson}->>'reassignmentStopConfirmed' = 'true'`,
+        sql`nullif(btrim(${heartbeatRuns.resultJson}->>'issueMutationStopId'), '') is not null`,
+        sql`${heartbeatRuns.resultJson} #>> '{cancellation,source}' = 'control_plane'`,
+        sql`${heartbeatRuns.resultJson} #>> '{cancellation,expected}' = 'true'`,
+        sql`${heartbeatRuns.resultJson} #>> '{executionCancellation,state}' = 'acknowledged'`,
+        sql`${heartbeatRuns.resultJson}->>'conversationContinuation' = 'continue_conversation_v1'`,
+        cursor ? or(
+          sql`${agentWakeupRequests.requestedAt} > ${cursor.requestedAt}::timestamptz`,
+          and(sql`${agentWakeupRequests.requestedAt} = ${cursor.requestedAt}::timestamptz`, gt(agentWakeupRequests.id, cursor.id)),
+        ) : undefined,
+        cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined,
+      ))
+      .orderBy(asc(agentWakeupRequests.requestedAt), asc(agentWakeupRequests.id)).limit(51);
+    if (confirmedAssignmentHandoffRecoveryPending) {
+      let confirmedAssignmentHandoffs = await confirmedAssignmentHandoffQuery(confirmedAssignmentHandoffScanCursor);
+      if (!confirmedAssignmentHandoffs.length && confirmedAssignmentHandoffScanCursor) {
+        confirmedAssignmentHandoffScanCursor = null;
+        confirmedAssignmentHandoffs = await confirmedAssignmentHandoffQuery(null);
+        confirmedAssignmentHandoffPassHasOutstandingHold = false;
+      }
+      const batch = confirmedAssignmentHandoffs.slice(0, 50);
+      const hasMorePages = confirmedAssignmentHandoffs.length > batch.length;
+      if (batch.length) {
+        const last = batch[batch.length - 1]!;
+        confirmedAssignmentHandoffScanCursor = { requestedAt: last.requestedAt, id: last.wakeId };
+      }
+      const attemptedWakeIds: string[] = [];
+      for (const { run, wakeId } of batch) {
+        if (!confirmedHandoffProcessIsStopped(run)) {
+          confirmedAssignmentHandoffPassHasOutstandingHold = true;
+          continue;
+        }
+        attemptedWakeIds.push(wakeId);
+        await releaseIssueExecutionAndPromote(run, {
+          suppressImmediateRecovery: true,
+          resumeStrandedQueue: true,
+        }).catch(err => {
+          confirmedAssignmentHandoffPassHasOutstandingHold = true;
+          logger.warn({ err, runId: run.id }, "failed to resume confirmed assignment handoff");
+        });
+      }
+      if (attemptedWakeIds.length) {
+        try {
+          const stillDeferred = await db.select({ id: agentWakeupRequests.id })
+            .from(agentWakeupRequests)
+            .where(and(inArray(agentWakeupRequests.id, attemptedWakeIds),
+              eq(agentWakeupRequests.status, "deferred_issue_execution")));
+          if (stillDeferred.length) confirmedAssignmentHandoffPassHasOutstandingHold = true;
+        } catch (err) {
+          confirmedAssignmentHandoffPassHasOutstandingHold = true;
+          logger.warn({ err, wakeIds: attemptedWakeIds }, "failed to verify confirmed assignment handoff release");
+        }
+      }
+      if (hasMorePages) {
+        confirmedAssignmentHandoffRecoveryPending = true;
+      } else if (confirmedAssignmentHandoffPassHasOutstandingHold) {
+        // Keep concrete held obligations alive across a full pass (including
+        // holds on earlier pages) until process/adapter state permits release.
+        confirmedAssignmentHandoffScanCursor = null;
+        confirmedAssignmentHandoffPassHasOutstandingHold = false;
+        confirmedAssignmentHandoffRecoveryPending = true;
+      } else {
+        confirmedAssignmentHandoffScanCursor = null;
+        confirmedAssignmentHandoffPassHasOutstandingHold = false;
+        confirmedAssignmentHandoffRecoveryPending = false;
+      }
     }
     // A server restart or a message/cleanup race can leave a deferred wake
     // after its owner has released the issue lock. Revisit it through the same

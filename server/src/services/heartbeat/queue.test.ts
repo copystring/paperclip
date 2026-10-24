@@ -113,6 +113,205 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     return { ...seeded, recipient, pending };
   }
 
+  async function confirmedAssignmentHandoff(variant?: "stale-owner" | "wrong-run" | "foreign-issue" | "unconfirmed-stop" | "active-process" | "active-process-group") {
+    const seeded = await fixture("cancelled");
+    const [currentAgent] = await db.insert(agents).values({ companyId: seeded.company.id, name: "New owner", role: "engineer", status: "idle", adapterType: "process", adapterConfig: {} }).returning();
+    await db.update(issues).set({ assigneeAgentId: currentAgent.id, executionRunId: null, executionAgentNameKey: null, executionLockedAt: null, status: "in_progress" }).where(eq(issues.id, seeded.issue.id));
+    const finishedAt = new Date(Date.now() - 2_000);
+    const resultJson = {
+      reassignmentStopConfirmed: variant !== "unconfirmed-stop",
+      issueMutationStopId: "7cc8e304-3f95-4b39-95db-b0148ddcd6c1",
+      cancellation: { source: "control_plane", expected: true, initiator: { type: "system" },
+        reason: "Cancelled before issue reassignment", recordedAt: finishedAt.toISOString() },
+      executionCancellation: { state: "acknowledged", acknowledgedAt: finishedAt.toISOString() },
+      conversationContinuation: "continue_conversation_v1",
+    };
+    await db.update(heartbeatRuns).set({
+      status: "cancelled", runtimeMode: "legacy", errorCode: "issue_reassigned", executionStage: "settled",
+      finishedAt, processPid: variant === "active-process" ? process.pid : 2_147_483_647,
+      processGroupId: variant === "active-process-group" ? process.pid : null, resultJson,
+    }).where(eq(heartbeatRuns.id, seeded.run.id));
+    let wakeIssueId = seeded.issue.id;
+    if (variant === "foreign-issue") {
+      const [foreignIssue] = await db.insert(issues).values({ companyId: seeded.company.id, title: "Foreign issue", status: "in_progress", assigneeAgentId: currentAgent.id }).returning();
+      wakeIssueId = foreignIssue.id;
+    }
+    const [wake] = await db.insert(agentWakeupRequests).values({
+      companyId: seeded.company.id,
+      agentId: variant === "stale-owner" ? seeded.agent.id : currentAgent.id,
+      source: "assignment", reason: "issue_assigned", status: "deferred_issue_execution",
+      requestedAt: new Date(finishedAt.getTime() + 1_000),
+      payload: { issueId: wakeIssueId, interruptedRunId: variant === "wrong-run" ? "d8e5713d-baea-42fc-8a06-f7cc4da2ba72" : seeded.run.id },
+    }).returning();
+    return { ...seeded, currentAgent, wake };
+  }
+
+  function wireRealRelease(db: Db) {
+    const deps = callbacks(db);
+    deps.getAgent.mockResolvedValue(null);
+    const release = createReleaseIssueExecution({ issueLock: createPostgresWakeQueueAdapter(db, {
+      resolveResponsibleUserId: async () => "queue-test-user",
+      getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
+      resolveSessionBeforeForWakeup: async () => null,
+    }), recovery: { escalateStrandedAssignedIssue: async () => undefined, escalateStrandedRecoveryIssueInPlace: async () => undefined } });
+    deps.releaseIssueExecutionAndPromote.mockImplementation(async (run, options) => {
+      await release({ companyId: run.companyId, runId: run.id, now: new Date(), ...options });
+    });
+    return deps;
+  }
+
+  it("resumes the exact deferred assignment wake after a confirmed, settled legacy handoff", async () => {
+    const { company, currentAgent, issue, run, wake } = await confirmedAssignmentHandoff();
+    const deps = wireRealRelease(db);
+
+    await createHeartbeatQueue(db, deps).resumeQueuedRuns();
+
+    expect(deps.releaseIssueExecutionAndPromote).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: run.id }), { suppressImmediateRecovery: true, resumeStrandedQueue: true },
+    );
+    const [promoted] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
+    expect(promoted).toMatchObject({ status: "queued", agentId: currentAgent.id, runId: expect.any(String) });
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0].executionRunId).toBe(promoted.runId);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, company.id))).toHaveLength(2);
+    expect(deps.executeRun).not.toHaveBeenCalled();
+  });
+
+  it("does not query the assignment-handoff reconstruction path again after an empty startup scan", async () => {
+    let handoffReconstructionQueries = 0;
+    const select = db.select.bind(db);
+    const trackedDb = new Proxy(db, {
+      get(target, property, receiver) {
+        if (property === "select") {
+          return (fields?: Record<string, unknown>) => {
+            if (fields && Object.keys(fields).sort().join(",") === "requestedAt,run,wakeId") handoffReconstructionQueries++;
+            return select(fields as never);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as Db;
+    const queue = createHeartbeatQueue(trackedDb, callbacks(db));
+
+    await queue.resumeQueuedRuns();
+    expect(handoffReconstructionQueries).toBe(1);
+    await queue.resumeQueuedRuns();
+
+    expect(handoffReconstructionQueries).toBe(1);
+  });
+
+  it("rechecks a live startup handoff until release succeeds, then stays quiet", async () => {
+    const { run, wake } = await confirmedAssignmentHandoff("active-process");
+    let handoffReconstructionQueries = 0;
+    const select = db.select.bind(db);
+    const trackedDb = new Proxy(db, {
+      get(target, property, receiver) {
+        if (property === "select") {
+          return (fields?: Record<string, unknown>) => {
+            if (fields && Object.keys(fields).sort().join(",") === "requestedAt,run,wakeId") handoffReconstructionQueries++;
+            return select(fields as never);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as Db;
+    const deps = wireRealRelease(db);
+    const queue = createHeartbeatQueue(trackedDb, deps);
+
+    await queue.resumeQueuedRuns();
+    expect(handoffReconstructionQueries).toBe(1);
+    expect(deps.releaseIssueExecutionAndPromote).not.toHaveBeenCalled();
+
+    await db.update(heartbeatRuns).set({ processPid: 2_147_483_647 }).where(eq(heartbeatRuns.id, run.id));
+    await queue.resumeQueuedRuns();
+    expect(handoffReconstructionQueries).toBe(2);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id)))[0].status).toBe("queued");
+
+    await queue.resumeQueuedRuns();
+    expect(handoffReconstructionQueries).toBe(2);
+  });
+
+  it.each([
+    "stale-owner", "wrong-run", "foreign-issue", "unconfirmed-stop", "active-process",
+  ] as const)("does not promote a handoff without the exact settled stop proof: %s", async variant => {
+    const { wake } = await confirmedAssignmentHandoff(variant);
+    const deps = wireRealRelease(db);
+
+    await createHeartbeatQueue(db, deps).resumeQueuedRuns();
+
+    expect(deps.releaseIssueExecutionAndPromote).not.toHaveBeenCalled();
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id)))[0])
+      .toMatchObject({ status: "deferred_issue_execution", runId: null });
+    expect(deps.executeRun).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(process.platform !== "win32")("fails closed when Windows cannot verify a retained process-group identity", async () => {
+    const { wake } = await confirmedAssignmentHandoff("active-process-group");
+    const deps = wireRealRelease(db);
+
+    await createHeartbeatQueue(db, deps).resumeQueuedRuns();
+
+    expect(deps.releaseIssueExecutionAndPromote).not.toHaveBeenCalled();
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id)))[0])
+      .toMatchObject({ status: "deferred_issue_execution", runId: null });
+  });
+
+  it("scans past a full batch of still-live handoffs on the next public resume pass", async () => {
+    const [company] = await db.insert(companies).values({ name: "Fair handoff scan", issuePrefix: "QF" }).returning();
+    const [outgoingAgent] = await db.insert(agents).values({ companyId: company.id, name: "Old owner", role: "engineer", status: "idle", adapterType: "process", adapterConfig: {} }).returning();
+    const [currentAgent] = await db.insert(agents).values({ companyId: company.id, name: "Current owner", role: "engineer", status: "idle", adapterType: "process", adapterConfig: {} }).returning();
+    const seededIssues = await db.insert(issues).values(Array.from({ length: 51 }, (_, index) => ({
+      companyId: company.id, title: `Handoff ${index}`, status: "in_progress" as const, assigneeAgentId: currentAgent.id,
+    }))).returning();
+    const orderedIssues = [...seededIssues].sort((left, right) => left.title.localeCompare(right.title, undefined, { numeric: true }));
+    const now = Date.now();
+    const runs = await db.insert(heartbeatRuns).values(orderedIssues.map((issue, index) => {
+      const finishedAt = new Date(now - 60_000 + index * 10);
+      return {
+        companyId: company.id, agentId: outgoingAgent.id, status: "cancelled" as const, runtimeMode: "legacy" as const,
+        invocationSource: "assignment" as const, errorCode: "issue_reassigned", executionStage: "settled" as const,
+        startedAt: new Date(finishedAt.getTime() - 60_000), finishedAt,
+        processPid: index < 50 ? process.pid : 2_147_483_647, processGroupId: null,
+        contextSnapshot: { issueId: issue.id },
+        resultJson: {
+          reassignmentStopConfirmed: true, issueMutationStopId: `stop-${index}`,
+          cancellation: { source: "control_plane", expected: true, initiator: { type: "system" },
+            reason: "Cancelled before issue reassignment", recordedAt: finishedAt.toISOString() },
+          executionCancellation: { state: "acknowledged", acknowledgedAt: finishedAt.toISOString() },
+          conversationContinuation: "continue_conversation_v1",
+        },
+      };
+    })).returning();
+    const runByIssue = new Map(runs.map(run => [String(run.contextSnapshot?.issueId), run]));
+    const wakes = await db.insert(agentWakeupRequests).values(orderedIssues.map(issue => {
+      const run = runByIssue.get(issue.id)!;
+      return {
+        companyId: company.id, agentId: currentAgent.id, source: "assignment" as const, reason: "issue_assigned",
+        status: "deferred_issue_execution" as const, requestedAt: new Date(run.finishedAt!.getTime() + 1),
+        payload: { issueId: issue.id, interruptedRunId: run.id },
+      };
+    })).returning();
+    const timestampSecond = new Date(now + 60_000).toISOString().slice(0, 19);
+    const issueIndex = new Map(orderedIssues.map((issue, index) => [issue.id, index]));
+    await db.execute(sql`UPDATE agent_wakeup_requests SET requested_at = CASE ${sql.join(wakes.map(wake => {
+      const index = issueIndex.get(String(wake.payload?.issueId))!;
+      return sql`WHEN id = ${wake.id}::uuid THEN ${`${timestampSecond}.${String(index + 1).padStart(6, "0")}+00:00`}::timestamptz`;
+    }), sql` `)}
+      ELSE requested_at END WHERE id IN (${sql.join(wakes.map(wake => sql`${wake.id}::uuid`), sql`, `)})`);
+    const finalIssue = orderedIssues[50]!;
+    const finalWake = wakes.find(wake => wake.payload?.issueId === finalIssue.id)!;
+    const queue = createHeartbeatQueue(db, wireRealRelease(db));
+
+    await queue.resumeQueuedRuns();
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, finalWake.id)))[0].status)
+      .toBe("deferred_issue_execution");
+    await queue.resumeQueuedRuns();
+
+    const [promotedFinalWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, finalWake.id));
+    expect(promotedFinalWake).toMatchObject({ status: "queued", runId: expect.any(String) });
+  });
+
   it("rechecks a handoff's assignment version under the issue claim lock", async () => {
     const { company, agent, issue, wake, run } = await fixture("queued");
     const [record] = await db.insert(cases).values({ companyId: company.id, caseNumber: 1, identifier: "QM-CASE-1",
