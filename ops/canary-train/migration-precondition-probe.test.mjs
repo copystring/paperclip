@@ -95,10 +95,10 @@ test("read-only journal mapping accepts only the exact registered baseline or ca
     "0003_third.sql": "CREATE TABLE third_table (id integer);\n",
   };
   const digest = (contents) => createHash("sha256").update(contents).digest("hex");
-  const writeInventory = async (payloadRoot, names, overrides = {}) => {
+  const writeInventory = async (payloadRoot, names, overrides = {}, indices = names.map((_, idx) => idx)) => {
     const dir = path.join(payloadRoot, migrationRoot);
     await mkdir(path.join(dir, "meta"), { recursive: true });
-    const entries = names.map((name, idx) => ({ idx, tag: name.slice(0, -4) }));
+    const entries = names.map((name, index) => ({ idx: indices[index], tag: name.slice(0, -4) }));
     const journal = `${JSON.stringify({ entries })}\n`;
     const inventory = {
       [`${migrationPrefix}meta/_journal.json`]: digest(journal),
@@ -113,8 +113,8 @@ test("read-only journal mapping accepts only the exact registered baseline or ca
   };
   const baselineInventory = await writeInventory(baselineRoot, ["0001_first.sql", "0002_second.sql"], {
     "0002_second.sql": "CREATE TABLE second_table (legacy_id integer);\n",
-  });
-  const candidateInventory = await writeInventory(candidateRoot, ["0001_first.sql", "0002_second.sql", "0003_third.sql"]);
+  }, [0, 2]);
+  const candidateInventory = await writeInventory(candidateRoot, ["0001_first.sql", "0002_second.sql", "0003_third.sql"], {}, [0, 2, 3]);
   const baselineDescriptor = await migrationJournalDescriptor(baselineRoot, baselineInventory);
   const candidateDescriptor = await migrationJournalDescriptor(candidateRoot, candidateInventory);
   const hashFor = (inventory, name) => inventory[`${migrationPrefix}${name}`];
@@ -142,6 +142,21 @@ test("read-only journal mapping accepts only the exact registered baseline or ca
   assert.equal(shouldInspectMigrationPreconditions(migratedCandidateAfterRollback.state), false);
   assert.equal(migratedCandidateAfterRollback.sha256, inventoryIdentity(Object.fromEntries(
     Object.entries(candidateInventory).filter(([name]) => name.endsWith(".sql")))));
+  const candidateNameAndHashRows = [
+    { id: 1, name: "0001_first.sql", hash: hashFor(candidateInventory, "0001_first.sql") },
+    { id: 2, name: "0002_second.sql", hash: hashFor(candidateInventory, "0002_second.sql") },
+    { id: 3, name: "0003_third.sql", hash: hashFor(candidateInventory, "0003_third.sql") },
+  ];
+  const nameAndHashColumns = new Set(["id", "name", "hash"]);
+  assert.equal(identifyJournalRows(candidateNameAndHashRows, nameAndHashColumns, baselineDescriptor,
+    candidateDescriptor, baselineInventory, candidateInventory).state, "candidate");
+  assert.throws(() => identifyJournalRows(candidateNameAndHashRows.map((row, index) => index === 1
+    ? { ...row, name: "0001_first.sql" } : row), nameAndHashColumns, baselineDescriptor, candidateDescriptor,
+  baselineInventory, candidateInventory), /registered baseline or candidate/);
+
+  const idOnlyRows = [{ id: 1 }, { id: 3 }, { id: 4 }];
+  assert.equal(identifyJournalRows(idOnlyRows, new Set(["id"]), baselineDescriptor, candidateDescriptor,
+    baselineInventory, candidateInventory).state, "candidate");
 
   assert.throws(() => identifyJournalRows(candidateRows.slice(0, 1), columns, baselineDescriptor, candidateDescriptor,
     baselineInventory, candidateInventory), /registered baseline or candidate/);

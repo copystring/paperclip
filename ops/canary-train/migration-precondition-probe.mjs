@@ -253,8 +253,7 @@ export async function migrationJournalDescriptor(payloadRoot, inventory) {
     journalNames.push(name);
   }
   if (journalNames.length !== sqlNames.length || new Set(journalNames).size !== journalNames.length
-    || canonical([...journalNames].sort()) !== canonical(sqlNames)
-    || [...idToNames.keys()].sort((left, right) => left - right).some((id, index) => id !== index + 1)) {
+    || canonical([...journalNames].sort()) !== canonical(sqlNames)) {
     fail("Registered migration journal does not exactly describe its SQL inventory");
   }
   return { sqlNames, namesByFile, hashToNames, idToNames };
@@ -263,24 +262,25 @@ export async function migrationJournalDescriptor(payloadRoot, inventory) {
 function mapJournalRows(journalRows, columnSet, descriptor) {
   const applied = [];
   for (const row of journalRows) {
-    const mapped = [];
+    let mapped;
     if (columnSet.has("name")) {
       const name = descriptor.namesByFile.get(row.name);
       if (!name) return null;
-      mapped.push(name);
+      mapped = name;
     }
     if (columnSet.has("hash")) {
       const names = descriptor.hashToNames.get(row.hash);
       if (!names || names.length !== 1) return null;
-      mapped.push(names[0]);
+      if (mapped && mapped !== names[0]) return null;
+      mapped = names[0];
     }
-    if (columnSet.has("id")) {
+    if (!mapped && columnSet.has("id")) {
       const names = descriptor.idToNames.get(Number(row.id));
       if (!names || names.length !== 1) return null;
-      mapped.push(names[0]);
+      mapped = names[0];
     }
-    if (mapped.length === 0 || mapped.some((name) => name !== mapped[0])) return null;
-    applied.push(mapped[0]);
+    if (!mapped) return null;
+    applied.push(mapped);
   }
   return applied;
 }
