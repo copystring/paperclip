@@ -387,7 +387,12 @@ async function main() {
       await client`insert into native_run_finalizations(run_id,company_id,issue_id,phase,lease_owner,recovery_state,recovery_request_id,recovery_history,updated_at) values (${fixture.runId},${company},${issue},${fixture.phase},${fixture.leaseOwner},${fixture.recoveryState},${fixture.recoveryRequestId},${client.json(recoveryHistory)},${baselineUpdatedAt})`;
     }
     const environment = '10000000-0000-4000-8000-000000000020';
-    await client`insert into environments(id,company_id,name) values (${environment},${company},'migration compatibility environment')`;
+    // Environments are instance-scoped since migration 0105; the company
+    // ownership belongs to environment_leases, not this catalog row. Use a
+    // non-local/non-managed driver so the fixture cannot collide with the
+    // instance's canonical Local or managed sandbox environment.
+    await client`insert into environments(id,name,driver,status,config,env_vars,metadata)
+      values (${environment},'migration compatibility environment','fixture','active','{}'::jsonb,'{}'::jsonb,'{}'::jsonb)`;
     const oldFinishedAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
     const recentFinishedAt = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
     const nativeProcessFixtures = [
