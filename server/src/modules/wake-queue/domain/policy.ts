@@ -74,6 +74,8 @@ export type PreDrainFacts = {
   legacyExecutionNeedsReconciliation: boolean;
   /** True when the finishing run is cancelled and its stored result carries an acknowledged execution cancellation. */
   executionCancellationAcknowledged: boolean;
+  /** Exact current-assignee wake tied to a confirmed reassignment stop; authorizes only that queue row. */
+  confirmedAssignmentHandoffWakeId: string | null;
 };
 
 export type PreDrainDecision =
@@ -112,7 +114,7 @@ export function decidePreDrain(facts: PreDrainFacts): PreDrainDecision {
     return { kind: "released" };
   }
 
-  if (facts.executionCancellationAcknowledged) {
+  if (facts.executionCancellationAcknowledged && !facts.confirmedAssignmentHandoffWakeId) {
     return { kind: "released" };
   }
 

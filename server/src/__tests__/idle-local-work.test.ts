@@ -66,6 +66,19 @@ describe("idle cleanup inspection", () => {
     expect(await readIdleLocalWork()).toBe("none");
   });
 
+  it("ignores only the future-backup schedule for restart readiness", async () => {
+    vi.stubEnv("PAPERCLIP_HOME", root);
+    markIdleIngressTracked(); markIdleStartupComplete({ scheduledBackups: true });
+    expect(await readIdleLocalWork({ purpose: "restart" })).toBe("none");
+    const custom = path.join(root, "active-spool");
+    registerIdleSpoolDirectory(custom);
+    await fs.mkdir(custom);
+    await fs.writeFile(path.join(custom, "pending.json"), "active work");
+    expect(await readIdleLocalWork({ purpose: "restart" })).toBe("present");
+    await fs.rm(custom, { recursive: true });
+    expect(await readIdleLocalWork({ purpose: "restart" })).toBe("none");
+  });
+
 });
 
 describe("idle credential recovery inspection", () => {

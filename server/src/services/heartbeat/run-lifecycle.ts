@@ -1,5 +1,6 @@
 import { notifyExecutionRunWork } from "../execution-control-notifications.js";
 import os from "node:os";
+import { isUnclaimedRun, matchesNonDispatchSource } from "../non-dispatch-receipt.js";
 import {
   DEFERRED_WAKE_CONTEXT_KEY,
   EXECUTION_PATH_HEARTBEAT_RUN_STATUSES,
@@ -1033,6 +1034,15 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
 
+    // The gate receipt is tied to its source projection, not this later read.
+    // Check before cancellation metadata or result merging can hide a claim.
+    const receipt = patch?.resultJson?.nonDispatchReceipt;
+    if (receipt && (
+      !previousStatus ||
+      status !== "cancelled" ||
+      !matchesNonDispatchSource(previousStatus, receipt)
+    )) return null;
+
     if (previousStatus && patch?.resultJson !== undefined) patch = { ...patch,
       resultJson: preserveWorkspaceRestoreRecoveryMetadata(previousStatus.resultJson, patch.resultJson),
     };
@@ -1049,9 +1059,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     if (
       status === "cancelled" &&
       previousStatus?.status === "queued" &&
-      previousStatus.runtimeMode !== "native" &&
-      !previousStatus.startedAt &&
-      !previousStatus.processPid
+      isUnclaimedRun(previousStatus)
     ) {
       patch = {
         ...patch,
@@ -1070,6 +1078,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
             status,
             patch,
             reconcileIfNeeded: true,
+            ...(receipt ? { fromStatuses: ["queued", "scheduled_retry"] } : {}),
           })
         : writer
             .update(heartbeatRuns)
@@ -1145,9 +1154,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     if (
       status === "cancelled" &&
       previousStatus?.status === "queued" &&
-      previousStatus.runtimeMode !== "native" &&
-      !previousStatus.startedAt &&
-      !previousStatus.processPid
+      isUnclaimedRun(previousStatus)
     ) {
       patch = {
         ...patch,

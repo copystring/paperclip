@@ -2,6 +2,10 @@ import { authorizationService } from "../authorization.js";
 import { assertTaskRetryConversationAllowed, readTaskRetryIntent, retireSupersededTaskRetry } from "../task-retry.js";
 import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
+import { makeNonDispatchReceipt } from "../non-dispatch-receipt.js";
+import { isDeepStrictEqual } from "node:util";
+import { captureReconciledReviewContinuation, reconciledReviewExecutionStage } from "../execution-recovery-resolution.js";
+import { normalizeIssueExecutionPolicy } from "../issue-execution-policy.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
@@ -345,8 +349,32 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+function confirmedHandoffProcessIsStopped(run: Pick<typeof heartbeatRuns.$inferSelect, "processPid" | "processGroupId">) {
+  const definitelyGone = (pid: number, group = false) => {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+      process.kill(group ? -pid : pid, 0);
+      return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException | undefined)?.code === "ESRCH";
+    }
+  };
+
+  if (run.processPid !== null && !definitelyGone(run.processPid)) return false;
+  if (run.processGroupId !== null) {
+    // Windows has no process-group probe; any retained group identity is
+    // inconclusive there. The executor clears both identities after cleanup.
+    if (process.platform === "win32") return false;
+    if (!definitelyGone(run.processGroupId, true)) return false;
+  }
+  return true;
+}
+
 /** Queue admission and dispatch share the service lifecycle callbacks and execution ownership. */
 export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDependencies) {
+  let confirmedAssignmentHandoffScanCursor: { requestedAt: string; id: string } | null = null;
+  let confirmedAssignmentHandoffRecoveryPending = true;
+  let confirmedAssignmentHandoffPassHasOutstandingHold = false;
   const {
     setRunStatus,
     setWakeupStatus,
@@ -1759,6 +1787,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     const now = new Date();
     const reason =
       "Cancelled because issue dependencies are still blocked; Paperclip will wake the assignee when blockers resolve";
+    const [receiptIssue] = await db
+      .select({ statusVersion: issues.statusVersion })
+      .from(issues)
+      .where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId)))
+      .limit(1);
+    const receipt = makeNonDispatchReceipt(
+      run,
+      "issue_dependencies_blocked",
+      "dependency_gate",
+      receiptIssue?.statusVersion ?? null,
+    );
     const cancelled = await setRunStatus(run.id, "cancelled", {
       finishedAt: now,
       error: reason,
@@ -1766,6 +1805,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       resultJson: {
         ...parseObject(run.resultJson),
         stopReason: "issue_dependencies_blocked",
+        ...(receipt ? { nonDispatchReceipt: receipt } : {}),
+        ...(receipt ? {
+          cancellation: {
+            source: "control_plane",
+            expected: true,
+            initiator: { type: "system" },
+            reason,
+            recordedAt: now.toISOString(),
+          },
+        } : {}),
         effectiveTimeoutSec: 0,
         timeoutConfigured: false,
         timeoutSource: "dependency_gate",
@@ -1828,6 +1877,106 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       await resumeQueuedCommentInterrupt(wake.companyId, wake.id).catch(err => {
         logger.warn({ err, queueId: wake.id }, "failed to resume interrupted comment queue");
       });
+    }
+    // Reconstruct persisted assignment handoffs once after startup. New
+    // handoffs are released directly by the run-settlement producer below;
+    // this bounded startup scan must go quiet after its durable backlog drains.
+    const confirmedAssignmentHandoffQuery = (cursor: typeof confirmedAssignmentHandoffScanCursor) => db.select({
+      run: heartbeatRuns,
+      wakeId: agentWakeupRequests.id,
+      requestedAt: sql<string>`${agentWakeupRequests.requestedAt}::text`,
+    }).from(agentWakeupRequests)
+      .innerJoin(issues, and(
+        eq(issues.companyId, agentWakeupRequests.companyId),
+        sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
+        eq(issues.assigneeAgentId, agentWakeupRequests.agentId),
+      ))
+      .innerJoin(heartbeatRuns, and(
+        eq(heartbeatRuns.companyId, agentWakeupRequests.companyId),
+        sql`${heartbeatRuns.id}::text = ${agentWakeupRequests.payload}->>'interruptedRunId'`,
+      ))
+      .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
+      .where(and(
+        eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        eq(agentWakeupRequests.source, "assignment"),
+        eq(agentWakeupRequests.reason, "issue_assigned"),
+        isNull(issues.assigneeUserId),
+        inArray(issues.status, ["todo", "in_progress"]),
+        isNull(issues.executionRunId),
+        eq(heartbeatRuns.runtimeMode, "legacy"),
+        eq(heartbeatRuns.status, "cancelled"),
+        eq(heartbeatRuns.errorCode, "issue_reassigned"),
+        eq(heartbeatRuns.executionStage, "settled"),
+        sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issues.id}::text`,
+        sql`${heartbeatRuns.agentId} <> ${issues.assigneeAgentId}`,
+        sql`${heartbeatRuns.finishedAt} is not null`,
+        gt(agentWakeupRequests.requestedAt, heartbeatRuns.finishedAt),
+        sql`${heartbeatRuns.resultJson}->>'reassignmentStopConfirmed' = 'true'`,
+        sql`nullif(btrim(${heartbeatRuns.resultJson}->>'issueMutationStopId'), '') is not null`,
+        sql`${heartbeatRuns.resultJson} #>> '{cancellation,source}' = 'control_plane'`,
+        sql`${heartbeatRuns.resultJson} #>> '{cancellation,expected}' = 'true'`,
+        sql`${heartbeatRuns.resultJson} #>> '{executionCancellation,state}' = 'acknowledged'`,
+        sql`${heartbeatRuns.resultJson}->>'conversationContinuation' = 'continue_conversation_v1'`,
+        cursor ? or(
+          sql`${agentWakeupRequests.requestedAt} > ${cursor.requestedAt}::timestamptz`,
+          and(sql`${agentWakeupRequests.requestedAt} = ${cursor.requestedAt}::timestamptz`, gt(agentWakeupRequests.id, cursor.id)),
+        ) : undefined,
+        cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined,
+      ))
+      .orderBy(asc(agentWakeupRequests.requestedAt), asc(agentWakeupRequests.id)).limit(51);
+    if (confirmedAssignmentHandoffRecoveryPending) {
+      let confirmedAssignmentHandoffs = await confirmedAssignmentHandoffQuery(confirmedAssignmentHandoffScanCursor);
+      if (!confirmedAssignmentHandoffs.length && confirmedAssignmentHandoffScanCursor) {
+        confirmedAssignmentHandoffScanCursor = null;
+        confirmedAssignmentHandoffs = await confirmedAssignmentHandoffQuery(null);
+        confirmedAssignmentHandoffPassHasOutstandingHold = false;
+      }
+      const batch = confirmedAssignmentHandoffs.slice(0, 50);
+      const hasMorePages = confirmedAssignmentHandoffs.length > batch.length;
+      if (batch.length) {
+        const last = batch[batch.length - 1]!;
+        confirmedAssignmentHandoffScanCursor = { requestedAt: last.requestedAt, id: last.wakeId };
+      }
+      const attemptedWakeIds: string[] = [];
+      for (const { run, wakeId } of batch) {
+        if (!confirmedHandoffProcessIsStopped(run)) {
+          confirmedAssignmentHandoffPassHasOutstandingHold = true;
+          continue;
+        }
+        attemptedWakeIds.push(wakeId);
+        await releaseIssueExecutionAndPromote(run, {
+          suppressImmediateRecovery: true,
+          resumeStrandedQueue: true,
+        }).catch(err => {
+          confirmedAssignmentHandoffPassHasOutstandingHold = true;
+          logger.warn({ err, runId: run.id }, "failed to resume confirmed assignment handoff");
+        });
+      }
+      if (attemptedWakeIds.length) {
+        try {
+          const stillDeferred = await db.select({ id: agentWakeupRequests.id })
+            .from(agentWakeupRequests)
+            .where(and(inArray(agentWakeupRequests.id, attemptedWakeIds),
+              eq(agentWakeupRequests.status, "deferred_issue_execution")));
+          if (stillDeferred.length) confirmedAssignmentHandoffPassHasOutstandingHold = true;
+        } catch (err) {
+          confirmedAssignmentHandoffPassHasOutstandingHold = true;
+          logger.warn({ err, wakeIds: attemptedWakeIds }, "failed to verify confirmed assignment handoff release");
+        }
+      }
+      if (hasMorePages) {
+        confirmedAssignmentHandoffRecoveryPending = true;
+      } else if (confirmedAssignmentHandoffPassHasOutstandingHold) {
+        // Keep concrete held obligations alive across a full pass (including
+        // holds on earlier pages) until process/adapter state permits release.
+        confirmedAssignmentHandoffScanCursor = null;
+        confirmedAssignmentHandoffPassHasOutstandingHold = false;
+        confirmedAssignmentHandoffRecoveryPending = true;
+      } else {
+        confirmedAssignmentHandoffScanCursor = null;
+        confirmedAssignmentHandoffPassHasOutstandingHold = false;
+        confirmedAssignmentHandoffRecoveryPending = false;
+      }
     }
     // A server restart or a message/cleanup race can leave a deferred wake
     // after its owner has released the issue lock. Revisit it through the same
@@ -3079,6 +3228,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               executionWorkspaceSettings: issues.executionWorkspaceSettings,
               assigneeAgentId: issues.assigneeAgentId,
               assigneeUserId: issues.assigneeUserId,
+              executionState: issues.executionState,
+              executionPolicy: issues.executionPolicy,
               monitorNextCheckAt: issues.monitorNextCheckAt,
               monitorWakeRequestedAt: issues.monitorWakeRequestedAt,
               executionRunId: issues.executionRunId,
@@ -3121,6 +3272,22 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             })) return { kind: "deferred" as const };
           }
           const issueStateGuard = opts.issueStateGuard;
+          const actualReviewState = issueStateGuard?.reviewAttempt
+            ? parseObject(issue.executionState)
+            : null;
+          const actualReviewParticipant = actualReviewState
+            ? parseObject(actualReviewState.currentParticipant)
+            : null;
+          const reviewAttemptMismatch = issueStateGuard?.reviewAttempt && (
+            actualReviewState?.status !== "pending" ||
+            readNonEmptyString(actualReviewState.lastDecisionId) !== issueStateGuard.reviewAttempt.decisionId ||
+            actualReviewParticipant?.type !== "agent" ||
+            actualReviewParticipant.agentId !== issueStateGuard.reviewAttempt.participantAgentId ||
+            (issueStateGuard.reviewAttempt.currentStageId !== undefined &&
+              (readNonEmptyString(actualReviewState.currentStageId) ?? null) !== issueStateGuard.reviewAttempt.currentStageId) ||
+            (issueStateGuard.reviewAttempt.executionPolicy !== undefined &&
+              !isDeepStrictEqual(normalizeIssueExecutionPolicy(issue.executionPolicy), issueStateGuard.reviewAttempt.executionPolicy))
+          );
           const activeMonitorRun = issueStateGuard?.monitorNextCheckAt === undefined ? null
             : await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
               eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.nativeIssueId, issue.id),
@@ -3131,6 +3298,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             (!issueStateGuard.statuses.includes(issue.status) ||
               issue.assigneeAgentId !== issueStateGuard.assigneeAgentId ||
               (issueStateGuard.statusVersion !== undefined && issue.statusVersion !== issueStateGuard.statusVersion) ||
+              Boolean(reviewAttemptMismatch) ||
               (issueStateGuard.monitorNextCheckAt !== undefined && (
                 activeMonitorRun !== null || issue.assigneeUserId !== null ||
                 issue.monitorNextCheckAt?.toISOString() !== issueStateGuard.monitorNextCheckAt ||
@@ -3151,13 +3319,22 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               payload: {
                 ...(payload ?? {}),
                 heartbeatSkip: {
-                  reason:
-                    "Issue status or assignee changed before the wake could be queued.",
+                  reason: reviewAttemptMismatch
+                    ? "Execution-review decision, participant, or stage changed before the wake could be queued."
+                    : "Issue status or assignee changed before the wake could be queued.",
                   issueId: issue.id,
                   expectedStatuses: issueStateGuard.statuses,
                   actualStatus: issue.status,
                   expectedAssigneeAgentId: issueStateGuard.assigneeAgentId,
                   actualAssigneeAgentId: issue.assigneeAgentId,
+                  ...(issueStateGuard.reviewAttempt ? {
+                    expectedReviewDecisionId: issueStateGuard.reviewAttempt.decisionId,
+                    actualReviewDecisionId: readNonEmptyString(actualReviewState?.lastDecisionId),
+                    expectedReviewParticipantAgentId: issueStateGuard.reviewAttempt.participantAgentId,
+                    actualReviewParticipantAgentId: actualReviewParticipant?.type === "agent"
+                      ? readNonEmptyString(actualReviewParticipant.agentId)
+                      : null,
+                  } : {}),
                 },
               },
               status: "skipped",
@@ -3191,15 +3368,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               !isUuidLike(actionId) ||
               source !== "automation" ||
               triggerDetail !== "system" ||
-              reason !== "issue_recovery_action_restored" ||
               opts.requestedByActorType !== "system" ||
               opts.requestedByActorId !== "execution-recovery" ||
               opts.idempotencyKey !== `execution-reconciliation:${actionId}` ||
-              enrichedContextSnapshot.source !== "execution.reconciled" ||
               enrichedContextSnapshot.forceFreshSession !== true ||
               payload?.issueId !== issue.id ||
               payload?.recoveryActionId !== actionId ||
-              issue.assigneeAgentId !== agentId ||
               ["done", "cancelled"].includes(issue.status)
             )
               return { kind: "skipped" as const };
@@ -3222,11 +3396,31 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               action?.evidence.executionReconciliation,
             );
             const sourceRunId = readNonEmptyString(decision.runId);
+            const isReviewReconciliation = Boolean(action?.evidence.reviewContinuation);
+            const currentReviewBinding = isReviewReconciliation ? captureReconciledReviewContinuation(issue) : null;
+            const expectedStage = currentReviewBinding ? reconciledReviewExecutionStage(currentReviewBinding) : null;
+            const continuationMatches = isReviewReconciliation
+              ? currentReviewBinding !== null &&
+                isDeepStrictEqual(currentReviewBinding, action!.evidence.reviewContinuation) &&
+                currentReviewBinding.participantAgentId === agentId &&
+                reason === (currentReviewBinding.state.currentStageType === "approval" ? "execution_approval_requested" : "execution_review_requested") &&
+                enrichedContextSnapshot.source === "execution.review.reconciled" &&
+                isDeepStrictEqual(enrichedContextSnapshot.executionStage, expectedStage) &&
+                isDeepStrictEqual(payload?.executionStage, expectedStage) &&
+                !opts.failedRunId &&
+                !readNonEmptyString(enrichedContextSnapshot.previousRunId) &&
+                !readNonEmptyString(enrichedContextSnapshot.retryOfRunId)
+              : reason === "issue_recovery_action_restored" &&
+                enrichedContextSnapshot.source === "execution.reconciled" &&
+                issue.assigneeAgentId === agentId &&
+                action?.returnOwnerAgentId === agentId &&
+                enrichedContextSnapshot.previousRunId === sourceRunId &&
+                enrichedContextSnapshot.retryOfRunId === sourceRunId;
             if (
               !action ||
               action.status !== "resolved" ||
               action.kind !== "active_run_watchdog" ||
-              action.returnOwnerAgentId !== agentId ||
+              !continuationMatches ||
               !sourceRunId ||
               !isUuidLike(sourceRunId) ||
               decision.providerStopped !== true ||
@@ -3234,8 +3428,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 String(decision.actionOutcome),
               ) ||
               !readNonEmptyString(decision.outcomeEvidence) ||
-              enrichedContextSnapshot.previousRunId !== sourceRunId ||
-              enrichedContextSnapshot.retryOfRunId !== sourceRunId ||
               !["pending", "delivered"].includes(
                 String(action.evidence.continuationDelivery),
               )
@@ -3278,7 +3470,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 !existingRun ||
                 existingRun.contextSnapshot?.issueId !== issue.id ||
                 existingRun.contextSnapshot?.recoveryActionId !== action.id ||
-                existingRun.contextSnapshot?.previousRunId !== sourceRunId
+                (isReviewReconciliation
+                  ? !isDeepStrictEqual(existingRun.contextSnapshot?.executionStage, expectedStage) ||
+                    Boolean(existingRun.retryOfRunId) ||
+                    Boolean(readNonEmptyString(existingRun.contextSnapshot?.previousRunId))
+                  : existingRun.contextSnapshot?.previousRunId !== sourceRunId)
               )
                 return { kind: "deferred" as const };
               return { kind: "replayed" as const, run: existingRun };
@@ -3299,9 +3495,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               if ((readNonEmptyString(decision.workspaceRepairEvidence)?.length ?? 0) < 20)
                 return { kind: "skipped" as const };
               // Repair does not reset the remaining automatic retry budget.
-              reconciledRestoreRetryCount = executionFailureRetryCount(reconciledRun!);
+              if (!isReviewReconciliation) reconciledRestoreRetryCount = executionFailureRetryCount(reconciledRun!);
             }
-            reconciledSourceRunId = sourceRunId;
+            if (!isReviewReconciliation) reconciledSourceRunId = sourceRunId;
           }
 
           let continuationWait = { reason: "execution_recovery", message: "Waiting for execution recovery. Your message is saved." };
@@ -3876,7 +4072,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             // The resolved action is already a durable retry outbox. Do not merge
             // its fresh-session contract into unrelated work or create a second
             // deferred wake that could later replay the same reconciliation.
-            if (reconciledSourceRunId) return { kind: "deferred" as const };
+            if (executionReconciliationWake) return { kind: "deferred" as const };
 
             // Offer the input to the active external agent, but keep a durable queued wake
             // until it reads the comment. A finish racing the event tick must

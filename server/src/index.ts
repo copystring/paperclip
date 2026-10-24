@@ -1213,6 +1213,8 @@ async function startServerWithDatabaseTeardown(
       await Promise.allSettled([...heartbeatSchedulerInFlight]);
     }
   };
+  // Execution-control work is registered with the shared durable scheduler
+  // below; do not add an independent interval here.
   const startHeartbeatSchedulerInterval = (callback: () => void) => {
     heartbeatSchedulerInterval = setInterval(() => {
       if (!isWarmStandby() && !isIdleTaskDrainActive()) callback();

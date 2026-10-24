@@ -2,9 +2,10 @@ import express from "express";
 import request from "supertest";
 import { request as httpRequest } from "node:http";
 import { createServer as createViteServer } from "vite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { idleAdmissionMiddleware, trackIdleRequestHandlers } from "../middleware/idle-admission.js";
 import { idleWorkSnapshot, startTaskDrain, stopTaskDrain, readTaskDrain, beginIdleTrackedWork } from "../services/task-admission.js";
+import { readRestartReadiness } from "../services/restart-readiness.js";
 
 function deferred() {
   let resolve!: () => void;
@@ -125,11 +126,26 @@ describe("idle admission", () => {
       await entered.promise;
       client.destroy();
       await closed.promise;
-      startTaskDrain({ purpose: "idle", ttlMs: 60_000 });
+      const drain = startTaskDrain({ purpose: "idle", ttlMs: 60_000 });
       expect(idleWorkSnapshot().active).toBe(1);
+      const dbTransaction = vi.fn(async (run: (tx: { execute: () => Promise<unknown[]> }) => Promise<unknown>) =>
+        run({ execute: async () => [{ activeRuns: 0, activeInvocations: 0, activeOperations: 0, unconfirmedPlugins: false }] }));
+      const readiness = () => readRestartReadiness(
+        { transaction: dbTransaction } as never,
+        () => ({ ...drain, draining: true, activeRuns: 0, pendingWakes: 0 }),
+        drain.ownerId!,
+        async () => ({ backgroundWork: "none", pluginIds: [] }),
+        Date.now,
+        async () => "none",
+      );
+      const whileHandlerContinues = await readiness();
+      expect(whileHandlerContinues.status).toBe("blocked");
+      expect(whileHandlerContinues.blockers).toContainEqual(expect.objectContaining({ code: "local_work_active" }));
+      expect(dbTransaction).not.toHaveBeenCalled();
       done.resolve();
       await new Promise(resolve => setImmediate(resolve));
       expect(idleWorkSnapshot().active).toBe(0);
+      expect((await readiness()).status).toBe("ready");
     } finally {
       done.resolve(); client.destroy();
       await new Promise<void>(resolve => listener.close(() => resolve()));

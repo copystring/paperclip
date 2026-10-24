@@ -953,6 +953,105 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toHaveLength(0);
   });
 
+  it("promotes only the current assignee wake bound to a settled confirmed legacy reassignment", async () => {
+    const companyId = await seedCompany();
+    const outgoingAgentId = await seedAgent({ companyId });
+    const currentAgentId = await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: currentAgentId, status: "in_progress" });
+    const runId = await seedRun({ companyId, agentId: outgoingAgentId, status: "cancelled", runtimeMode: "legacy",
+      errorCode: "issue_reassigned", contextSnapshot: { issueId } });
+    const finishedAt = new Date(Date.now() - 2_000);
+    const stopId = randomUUID();
+    await db.update(heartbeatRuns).set({ finishedAt, resultJson: {
+      reassignmentStopConfirmed: true,
+      issueMutationStopId: stopId,
+      executionCancellation: { state: "acknowledged" },
+      cancellation: { source: "control_plane", expected: true, initiator: { type: "system" },
+        reason: "Cancelled before issue reassignment", recordedAt: finishedAt.toISOString() },
+      executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" },
+    } }).where(eq(heartbeatRuns.id, runId));
+    const wakeId = await seedDeferredWake({ companyId, agentId: currentAgentId, issueId, source: "assignment",
+      reason: "issue_assigned", requestedByActorType: "system",
+      payload: { interruptedRunId: runId, mutation: "update" } });
+    const unrelatedWakeId = await seedDeferredWake({ companyId, agentId: outgoingAgentId, issueId,
+      source: "automation", reason: "issue_commented", payload: { oldOwnerFollowUp: true } });
+    await db.update(agentWakeupRequests).set({ requestedAt: new Date(finishedAt.getTime() - 1_000) })
+      .where(eq(agentWakeupRequests.id, unrelatedWakeId));
+    const release = createReleaseIssueExecution({ issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+      recovery: { escalateStrandedAssignedIssue: async () => undefined, escalateStrandedRecoveryIssueInPlace: async () => undefined },
+    });
+
+    const result = await release({ companyId, runId, now: new Date(), suppressImmediateRecovery: true });
+
+    expect(result.outcome.kind).toBe("promoted");
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+    expect(wake).toMatchObject({ status: "queued", runId: expect.any(String), agentId: currentAgentId });
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, unrelatedWakeId)))[0].status)
+      .toBe("deferred_issue_execution");
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(issue.executionRunId).toBe(wake.runId);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(2);
+  });
+
+  it.each([
+    { name: "a wake for a stale assignee", staleAssignee: true, staleInterruptedRun: false },
+    { name: "a wake tied to a different interrupted run", staleAssignee: false, staleInterruptedRun: true },
+  ])("keeps reassignment work deferred when it is not the exact current handoff (%s)", async ({ staleAssignee, staleInterruptedRun }) => {
+    const companyId = await seedCompany();
+    const outgoingAgentId = await seedAgent({ companyId });
+    const currentAgentId = await seedAgent({ companyId });
+    const staleAgentId = staleAssignee ? await seedAgent({ companyId }) : currentAgentId;
+    const issueId = await seedIssue({ companyId, assigneeAgentId: currentAgentId, status: "in_progress" });
+    const runId = await seedRun({ companyId, agentId: outgoingAgentId, status: "cancelled", runtimeMode: "legacy",
+      errorCode: "issue_reassigned", contextSnapshot: { issueId } });
+    const finishedAt = new Date(Date.now() - 2_000);
+    await db.update(heartbeatRuns).set({ finishedAt, resultJson: {
+      reassignmentStopConfirmed: true,
+      issueMutationStopId: randomUUID(),
+      executionCancellation: { state: "acknowledged" },
+      cancellation: { source: "control_plane", expected: true, initiator: { type: "system" },
+        reason: "Cancelled before issue reassignment", recordedAt: finishedAt.toISOString() },
+      executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" },
+    } }).where(eq(heartbeatRuns.id, runId));
+    const wakeId = await seedDeferredWake({ companyId, agentId: staleAgentId, issueId, source: "assignment",
+      reason: "issue_assigned", requestedByActorType: "system",
+      payload: { interruptedRunId: staleInterruptedRun ? randomUUID() : runId } });
+    const release = createReleaseIssueExecution({ issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+      recovery: { escalateStrandedAssignedIssue: async () => undefined, escalateStrandedRecoveryIssueInPlace: async () => undefined },
+    });
+
+    const result = await release({ companyId, runId, now: new Date(), suppressImmediateRecovery: true });
+
+    expect(result.outcome.kind).toBe("released");
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+    expect(wake).toMatchObject({ status: "deferred_issue_execution", runId: null });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+  });
+
+  it("keeps an acknowledged operator stop from promoting deferred work", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: agentId, status: "in_progress" });
+    const runId = await seedRun({ companyId, agentId, status: "cancelled", runtimeMode: "legacy", contextSnapshot: { issueId } });
+    const finishedAt = new Date(Date.now() - 2_000);
+    await db.update(heartbeatRuns).set({ finishedAt, resultJson: {
+      executionCancellation: { state: "acknowledged" },
+      cancellation: { source: "operator", expected: true, initiator: { type: "user" },
+        reason: "Stopped by operator", recordedAt: finishedAt.toISOString() },
+    } }).where(eq(heartbeatRuns.id, runId));
+    const wakeId = await seedDeferredWake({ companyId, agentId, issueId });
+    const release = createReleaseIssueExecution({ issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+      recovery: { escalateStrandedAssignedIssue: async () => undefined, escalateStrandedRecoveryIssueInPlace: async () => undefined },
+    });
+
+    const result = await release({ companyId, runId, now: new Date(), suppressImmediateRecovery: true });
+
+    expect(result.outcome.kind).toBe("released");
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId)))[0].status)
+      .toBe("deferred_issue_execution");
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+  });
+
   it.each(["in_progress", "blocked"])("preserves recovery ownership and queued messages when a native task fails from %s", async (status) => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });

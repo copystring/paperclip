@@ -4,13 +4,16 @@ import { CAPABILITY_SEMANTIC_TOOL_CATALOG } from "../vendor/paperclip-runner/ind
 import { badRequest } from "../errors.js";
 
 export const PROJECT_TOOL_NAMES = ["create_project", "list_project_repositories", "list_projects"];
+const createProjectToolSchema = createProjectSchema.required({ idempotencyKey: true });
 export function projectToolDefinitions(workMode: string, includeTask = false) {
   return CAPABILITY_SEMANTIC_TOOL_CATALOG.filter(tool =>
     (PROJECT_TOOL_NAMES.includes(tool.operationId) || includeTask && ["create_task", "set_task_title"].includes(tool.operationId))
     && tool.allowedModes.includes(workMode as "standard"),
   ).map(tool => ({ name: tool.operationId, description: tool.description,
     inputSchema: tool.operationId === "create_project"
-      ? z.toJSONSchema(createProjectSchema.extend({ idempotencyKey: z.string().min(1).max(255) }))
+      // The shared package can load a different Zod version than the server.
+      // Use the schema's own converter so its processors receive their own context.
+      ? createProjectToolSchema.toJSONSchema({ io: "input" })
       : tool.inputSchema,
   }));
 }
@@ -34,7 +37,7 @@ export async function callProjectTool(input: {
     path += `?${query}`;
   }
   else if (input.name === "create_project") {
-    body = createProjectSchema.extend({ idempotencyKey: z.string().min(1).max(255) }).parse(args);
+    body = createProjectToolSchema.parse(args);
   } else if (input.name === "create_task") {
     const key = z.string().min(1).max(150).parse(args.idempotencyKey);
     path = `/companies/${input.companyId}/issues`;

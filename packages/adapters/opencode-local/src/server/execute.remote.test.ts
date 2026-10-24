@@ -266,7 +266,7 @@ describe("opencode remote execution", () => {
       server.url === "https://paperclip.example/api/mcp/remote-run",
     );
     expect(remoteAssignedMcp).toBeDefined();
-    expect(remoteAssignedMcp?.[0]).toMatch(/^paperclip_[A-F0-9]{12}$/);
+    expect(remoteAssignedMcp?.[0]).toBe("paperclip_31D0392A2092");
     expect(remoteAssignedMcp?.[1]).toMatchObject({
       url: "https://paperclip.example/api/mcp/remote-run",
       headers: { Authorization: "Bearer remote-run-secret" },

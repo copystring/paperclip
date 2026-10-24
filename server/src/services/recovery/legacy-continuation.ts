@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 /** This contract deliberately has no narrative, liveness label or progress count. */
 export interface LegacyContinuationInput {
   run: { id: string; companyId: string; agentId: string; status: string; runtimeMode?: string | null };
-  issue: { id: string; companyId: string; status: string; assigneeAgentId: string | null; assigneeUserId?: string | null } | null;
+  issue: { id: string; companyId: string; status: string; assigneeAgentId: string | null; assigneeUserId?: string | null; unblockDescriptor?: unknown } | null;
   agent: { id: string; companyId: string; status: string } | null;
   episode: LegacyDispositionEpisode;
   gates: {
@@ -23,11 +23,16 @@ export interface LegacyDispositionEpisode {
   maxAttempts: number;
 }
 export const LEGACY_DISPOSITION_REPAIR_MAX_ATTEMPTS = 2;
+export const OWNER_DISPOSITION_REPAIR_NEXT_ACTION =
+  'For your own unfinished work, use the normal PATCH /api/issues/{issueId} under your existing authority, preserving its assignee. ' +
+  'First verify your current run owns an in_progress checkout; otherwise acquire the normal checkout. Respect a refused checkout, real blockers and ownership conflicts; never fake in_progress with a status PATCH. ' +
+  'From your current in_progress checkout send {"status":"todo","comment":"Saved progress; next concrete step","resume":true} with X-Paperclip-Run-Id set to your current run. ' +
+  'Both the in_progress-to-todo transition and resume:true are required; a self-comment or todo alone queues nothing. Verify the saved successor path. ' +
+  'Otherwise record the real terminal, review or blocker path. Do not call /api/issues/{issueId}/recovery-actions/resolve: restored/todo is a board retry. Do not invent blockers, change owners or reset budgets. Respect Stop, pause and approval gates.';
 export const LEGACY_DISPOSITION_REPAIR_INSTRUCTION =
   "The previous task run ended without a recorded disposition or an owned next execution path. " +
-  "Re-read the current task state. Use Paperclip tools/API to record completion, a real blocker, " +
-  "a question or approval request, or a supported next execution path. " +
-  "A final message alone does not record disposition. Respect Stop, pause, budget and approval gates.";
+  "Re-read the current task state. A final message alone does not record disposition. " +
+  OWNER_DISPOSITION_REPAIR_NEXT_ACTION;
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -68,7 +73,15 @@ export function decideLegacyContinuation(input: LegacyContinuationInput):
   if (run.status !== "succeeded") return { kind: "skip", reason: "run_not_successful" };
   if (!issue || !agent || issue.companyId !== run.companyId || agent.companyId !== run.companyId || agent.id !== run.agentId) return { kind: "skip", reason: "invalid_binding" };
   if (issue.assigneeAgentId !== run.agentId || issue.assigneeUserId) return { kind: "skip", reason: "owner_changed" };
-  if (!["todo", "in_progress"].includes(issue.status)) return { kind: "skip", reason: "recorded_disposition" };
+  if (!["todo", "in_progress", "blocked"].includes(issue.status)) return { kind: "skip", reason: "recorded_disposition" };
+  const descriptor = record(issue.unblockDescriptor);
+  const unblockOwner = descriptor.owner;
+  const humanOwnedWait = unblockOwner === "board" || typeof record(unblockOwner).userId === "string";
+  if (issue.status === "blocked" && humanOwnedWait) return { kind: "skip", reason: "human_owned_wait" };
+  const unblockOwnerAgentId = record(unblockOwner).agentId;
+  if (issue.status === "blocked" && (typeof unblockOwnerAgentId !== "string" || unblockOwnerAgentId.trim() !== run.agentId)) {
+    return { kind: "skip", reason: "recorded_disposition" };
+  }
   for (const [blocked, reason] of [
     [gates.stopped, "stopped"], [gates.paused, "paused"],
     [gates.budgetBlocked, "budget_blocked"], [gates.pendingWait, "durable_wait"],
@@ -76,6 +89,9 @@ export function decideLegacyContinuation(input: LegacyContinuationInput):
     [gates.conversation, "conversation"],
     [!gates.agentInvokable || ["paused", "terminated", "pending_approval"].includes(agent.status), "agent_not_invokable"],
   ] as const) if (blocked) return { kind: "skip", reason };
+  // A blocked status records that work stopped; it is not itself a future
+  // trigger. The caller still respects actual waits above, and any repair here
+  // remains bounded by the episode counter below.
   if (episode.attempt >= episode.maxAttempts) return { kind: "exhausted", attempt: episode.attempt, maxAttempts: episode.maxAttempts };
   const nextAttempt = episode.attempt + 1;
   return {

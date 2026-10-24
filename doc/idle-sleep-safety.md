@@ -36,6 +36,27 @@ signed bootstrap writes. Only the task-drain read skips request tracking.
 Its authentication finishes under a separate work token before entering the
 report, so it counts concurrent writes without blocking on its own scan.
 
+## Restart readiness
+
+`GET /api/instance/task-drain?restartReadiness=1&ownerId=<owner>` returns the
+ordinary drain readback plus a `restartReadiness` object. It requires the same
+instance-admin authority and exact unexpired owner as the idle hold. Version 1
+binds the hold's ISO `startedAt`/`expiresAt`, process PID, and a stable local-work
+generation. `status` is `ready`, `blocked`, or `unknown`; only `ready` with an
+empty `blockers` array is a restart-readiness proof. Missing DB or plugin
+evidence, malformed state, or scan changes are `unknown` and must block. The
+report contains only safe blocker classes and aggregate counts.
+
+This report is for a host-controlled restart, not the Cloud sleep protocol.
+It checks in-flight process/HTTP work, running database effects, local work,
+and the owner-bound plugin inspect/prepare handshake. Future issues, API keys,
+periodic heartbeats, and queued database backlog do not by themselves mean an
+operation is currently running. Restart readiness never starts a backup; it
+ignores only the future-backup schedule flag and still blocks actual backup,
+accounting, spool, and request work. Do not substitute the Cloud
+`idleSleepSafety` report or an older endpoint response, and do not add a legacy
+fallback when this endpoint or its evidence is unavailable.
+
 A matched static UI file served by the admitted, handler-tracked application finishes its request
 tracking when its response ends or closes, including a match found after the
 client has already disconnected. Unfinished middleware promises remain tracked.
