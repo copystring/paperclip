@@ -31,9 +31,11 @@ const mockCompanyService = vi.hoisted(() => ({
 const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockPublishActivity = vi.hoisted(() => vi.fn());
 const mockReadIdleSleepSafety = vi.hoisted(() => vi.fn());
+const mockReadRestartReadiness = vi.hoisted(() => vi.fn());
 
 function registerModuleMocks() {
   vi.doMock("../services/idle-sleep-safety.js", () => ({ readIdleSleepSafety: mockReadIdleSleepSafety }));
+  vi.doMock("../services/restart-readiness.js", () => ({ readRestartReadiness: mockReadRestartReadiness }));
   vi.doMock("../services/index.js", () => ({
     companyService: () => mockCompanyService,
     heartbeatService: () => mockHeartbeatService,
@@ -102,6 +104,7 @@ describe("instance settings routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockReadIdleSleepSafety.mockReset();
+    mockReadRestartReadiness.mockReset();
     // vi.clearAllMocks() clears recorded calls only; it does not remove a
     // mockImplementation a prior test installed. Reinstall the default here
     // so a stateful implementation from one test can never leak into the
@@ -1075,6 +1078,30 @@ describe("instance settings routes", () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual(idleStatus);
       expect(mockReadIdleSleepSafety).not.toHaveBeenCalled();
+    });
+
+    it("serves restart readiness only to instance admins and forwards the exact owner and worker handshake", async () => {
+      const ownerId = "restart-owner";
+      const startedAt = new Date(Date.now() - 1_000), expiresAt = new Date(Date.now() + 60_000);
+      const drain = { ...idleStatus, draining: true, ownerId, startedAt, expiresAt };
+      const report = { version: 1, status: "ready", ownerId, startedAt: startedAt.toISOString(), expiresAt: expiresAt.toISOString(), serverPid: process.pid, generation: 4, blockers: [] };
+      mockHeartbeatService.getTaskDrainStatus.mockReturnValue(drain);
+      mockReadRestartReadiness.mockResolvedValue(report);
+      const inspect = vi.fn(async () => ({ backgroundWork: "none", pluginIds: [] }));
+      const workers = { inspectIdleSleep: inspect } as unknown as PluginWorkerManager;
+      const app = createApp(adminActor, workers);
+      const res = await request(app).get(`/api/instance/task-drain?restartReadiness=1&ownerId=${ownerId}`).expect(200);
+      expect(res.body).toEqual({ ...drain, startedAt: startedAt.toISOString(), expiresAt: expiresAt.toISOString(), quiescent: true, restartReadiness: report });
+      expect(res.body.restartReadiness).toMatchObject({ version: 1, status: "ready", ownerId,
+        startedAt: res.body.startedAt, expiresAt: res.body.expiresAt, serverPid: process.pid,
+        generation: expect.any(Number), blockers: [] });
+      expect(mockReadRestartReadiness).toHaveBeenCalledWith(mockDb, expect.any(Function), ownerId, expect.any(Function));
+      expect(mockReadRestartReadiness.mock.calls[0][1]()).toEqual(drain);
+      await mockReadRestartReadiness.mock.calls[0][3]({ ownerId, expiresAt: Date.now() + 60_000 });
+      expect(inspect).toHaveBeenCalledOnce();
+      await request(createApp(nonAdminActor, workers))
+        .get(`/api/instance/task-drain?restartReadiness=1&ownerId=${ownerId}`).expect(403);
+      expect(mockReadRestartReadiness).toHaveBeenCalledOnce();
     });
 
     it("acquires an owned bounded idle hold and forwards its owner for inspection", async () => {

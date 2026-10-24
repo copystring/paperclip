@@ -16,6 +16,7 @@ import {
 import { getHiddenSettings } from "../services/settings-visibility.js";
 import { readIdleSleepSafety } from "../services/idle-sleep-safety.js";
 import { readIdleLocalWork } from "../services/idle-local-work.js";
+import { readRestartReadiness } from "../services/restart-readiness.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
@@ -309,6 +310,14 @@ export function instanceSettingsRoutes(db: Db, pluginWorkers?: PluginWorkerManag
 
   router.get("/instance/task-drain", async (req, res) => {
     assertBoardOrgAccess(req);
+    if (req.query.restartReadiness === "1") {
+      assertCanManageInstanceSettings(req);
+      const ownerId = typeof req.query.ownerId === "string" ? req.query.ownerId : "";
+      const restartReadiness = await readRestartReadiness(db, () => heartbeat.getTaskDrainStatus(), ownerId,
+        pluginWorkers?.inspectIdleSleep?.bind(pluginWorkers));
+      res.json({ ...heartbeat.getTaskDrainStatus(), restartReadiness });
+      return;
+    }
     if (req.query.idleSleepSafety === "1") {
       // The report covers every company in this process. Ordinary company
       // members may read process counters, but not instance-wide work state.
