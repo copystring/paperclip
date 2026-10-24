@@ -121,6 +121,9 @@ export async function readRestartReadiness(
 
     const rows = await db.transaction(async (tx) => {
       await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
+      // Gateway invocation rows are durable outcome records: a stranded
+      // `executing` row can outlive its process and is not proof of live work.
+      // Live Gateway promises are counted by the service boundary's local-work token.
       const unconfirmedPlugins = pluginResult.pluginIds.length === 0
         ? sql`EXISTS (SELECT 1 FROM plugins WHERE status <> 'disabled')`
         : sql`EXISTS (SELECT 1 FROM plugins WHERE status <> 'disabled'
@@ -129,8 +132,7 @@ export async function readRestartReadiness(
         SELECT
           (SELECT count(*)::int FROM heartbeat_runs WHERE status = 'running') AS "activeRuns",
           ((SELECT count(*) FROM decision_invocations WHERE status = 'running') +
-           (SELECT count(*) FROM prompt_injection_invocations WHERE status = 'running') +
-           (SELECT count(*) FROM tool_invocations WHERE status = 'executing'))::int AS "activeInvocations",
+           (SELECT count(*) FROM prompt_injection_invocations WHERE status = 'running'))::int AS "activeInvocations",
           ((SELECT count(*) FROM workspace_operations WHERE status = 'running') +
            (SELECT count(*) FROM environment_custom_image_setup_sessions
              WHERE status IN ('starting', 'waiting_for_user', 'capturing')))::int AS "activeOperations",

@@ -57,6 +57,8 @@ import {
 } from "../services/tool-content-guards.js";
 import { createToolGatewayService, ToolGatewayHttpError } from "../services/tool-gateway.js";
 import { resolveConnectionGrantSecret } from "../services/connection-credentials.js";
+import { readRestartReadiness } from "../services/restart-readiness.js";
+import { startTaskDrain, stopTaskDrain } from "../services/task-admission.js";
 import { secretService } from "../services/secrets.js";
 import * as cogneeBridge from "../services/cognee-connection.js";
 import { createKvDemoHttpServer, type KvDemoHttpServer } from "../../../packages/kv-demo-mcp-server/src/http.js";
@@ -658,6 +660,66 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       expect(testEvents.some(event => event.eventType === "call_completed")).toBe(false);
     } finally {
       await remote.close();
+    }
+  });
+
+  it("holds restart readiness until an active gateway promise settles after its run is terminal and the caller disconnects", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const { connection } = await createRemoteMcpTool(db, company.id, {
+      applicationKey: "restart-readiness-active-gateway",
+      toolName: "write_record",
+      riskLevel: "destructive",
+    });
+    await allowAllToolsForAgent(db, company.id, agent.id);
+
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
+    let rejectUpstream!: (error: Error) => void;
+    const upstream = new Promise<Response>((_resolve, reject) => { rejectUpstream = reject; });
+    const gateway = createTestToolGatewayService(db, {
+      remoteHttpRequest: async (_url, init) => {
+        const body = JSON.parse(String(init.body ?? "{}")) as { id?: string; method?: string };
+        if (body.method === "tools/call") {
+          resolveStarted();
+          return upstream;
+        }
+        if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+        return Response.json({ jsonrpc: "2.0", id: body.id ?? "fixture", result: {
+          protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" },
+        } }, { headers: { "mcp-session-id": "restart-readiness-session" } });
+      },
+    });
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    const tool = (await gateway.listToolsForSession(session.token)).find((candidate) => candidate.connectionId === connection.id)!;
+    const drain = startTaskDrain({ ttlMs: 60_000, purpose: "idle" });
+    const getDrain = () => ({ ownerId: drain.ownerId, draining: true, startedAt: drain.startedAt,
+      expiresAt: drain.expiresAt, activeRuns: 0, pendingWakes: 0 });
+    const readiness = () => readRestartReadiness(db, getDrain, drain.ownerId!,
+      async () => ({ backgroundWork: "none", pluginIds: [] }), Date.now, async () => "none");
+    const caller = new AbortController();
+    let call: ReturnType<typeof gateway.executeTool> | undefined;
+
+    try {
+      call = gateway.executeTool({ sessionToken: session.token, tool: tool.name,
+        parameters: { key: "restart", value: "uncertain" }, signal: caller.signal });
+      await Promise.race([started, call.then(() => { throw new Error("Gateway settled before the controlled upstream started"); })]);
+      await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+
+      expect(await readiness()).toMatchObject({ status: "blocked", blockers: [{ code: "local_work_active" }] });
+      caller.abort();
+      expect(await readiness()).toMatchObject({ status: "blocked", blockers: [{ code: "local_work_active" }] });
+
+      rejectUpstream(new Error("synthetic upstream disconnect"));
+      await expect(call).rejects.toMatchObject({ reasonCode: "mcp_remote_fetch_failed" });
+      expect(await readiness()).toMatchObject({ status: "ready", blockers: [] });
+      await expect(db.select({ status: toolInvocations.status }).from(toolInvocations)
+        .where(eq(toolInvocations.companyId, company.id))).resolves.toEqual([{ status: "failed" }]);
+    } finally {
+      rejectUpstream(new Error("settle controlled upstream during test cleanup"));
+      await call?.catch(() => undefined);
+      stopTaskDrain();
     }
   });
 

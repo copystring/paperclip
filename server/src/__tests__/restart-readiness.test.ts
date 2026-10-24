@@ -1,4 +1,4 @@
-import { agentApiKeys, agents, companies, createDb, environments, environmentCustomImageSetupSessions, heartbeatRuns, issues, workspaceOperations, type Db } from "@paperclipai/db";
+import { agentApiKeys, agents, companies, createDb, environments, environmentCustomImageSetupSessions, heartbeatRuns, issues, toolInvocations, workspaceOperations, type Db } from "@paperclipai/db";
 import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { beginIdleTrackedWork, idleWorkSnapshot } from "../services/task-admission.js";
@@ -155,6 +155,21 @@ if (!pgSupport.supported) console.warn(`Skipping restart readiness Postgres test
     await db.insert(heartbeatRuns).values({ id: f.runId, companyId: f.companyId, agentId: f.agentId,
       invocationSource: "on_demand", status: "running" });
     expect(await readDb()).toMatchObject({ status: "blocked", blockers: [{ code: "database_effects_active", count: 1 }] });
+  });
+
+  it("ignores an old executing invocation row when its owner run is terminal and no local handler is active", async () => {
+    const f = await seed();
+    await db.insert(heartbeatRuns).values({ id: f.runId, companyId: f.companyId, agentId: f.agentId,
+      invocationSource: "on_demand", status: "cancelled", startedAt: new Date("2026-01-01T00:00:00.000Z"),
+      finishedAt: new Date("2026-01-01T00:00:01.000Z") });
+    const [invocation] = await db.insert(toolInvocations).values({ companyId: f.companyId,
+      runId: f.runId, agentId: f.agentId, toolName: "mcp.fixture:write", riskLevel: "destructive",
+      policyDecision: "allow", status: "executing", startedAt: new Date("2026-01-01T00:00:00.500Z") }).returning();
+
+    expect(await readDb()).toMatchObject({ status: "ready", blockers: [] });
+    await expect(db.select({ status: toolInvocations.status, completedAt: toolInvocations.completedAt })
+      .from(toolInvocations).where(sql`${toolInvocations.id} = ${invocation.id}`))
+      .resolves.toEqual([{ status: "executing", completedAt: null }]);
   });
 
   it("blocks active workspace and image operations without treating retained history as active", async () => {

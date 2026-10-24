@@ -191,6 +191,17 @@ import {
   verifyToolArgumentsSignature,
 } from "./tool-content-guards.js";
 import { extendApprovedExecutionWaitDeadline } from "./approved-execution-wait.js";
+import { beginIdleTrackedWork } from "./task-admission.js";
+
+function withIdleTrackedGatewayCall<T>(operation: () => Promise<T>): Promise<T> {
+  const finish = beginIdleTrackedWork();
+  try {
+    return operation().finally(finish);
+  } catch (error) {
+    finish();
+    throw error;
+  }
+}
 
 const DEFAULT_SESSION_TTL_MS = 15 * 60 * 1000;
 const MAX_SESSION_TTL_MS = 60 * 60 * 1000;
@@ -8654,7 +8665,7 @@ export function createToolGatewayService(
     };
   }
 
-  return {
+  const service = {
     async recordRuntimeMcpDeliveryDiagnostic(input: {
       companyId: string;
       agentId: string;
@@ -11615,6 +11626,15 @@ export function createToolGatewayService(
         throw err;
       }
     },
+  };
+  return {
+    ...service,
+    executeTestCall: (input: ExecuteTestCallInput) =>
+      withIdleTrackedGatewayCall(() => service.executeTestCall(input)),
+    executeTool: (input: ExecuteGatewayToolInput) =>
+      withIdleTrackedGatewayCall(() => service.executeTool(input)),
+    executePluginTool: (input: ExecutePluginToolInput) =>
+      withIdleTrackedGatewayCall(() => service.executePluginTool(input)),
   };
 }
 
