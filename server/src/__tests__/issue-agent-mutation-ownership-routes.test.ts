@@ -13,6 +13,7 @@ const ownerAgentId = "33333333-3333-4333-8333-333333333333";
 const peerAgentId = "44444444-4444-4444-8444-444444444444";
 const ownerRunId = "55555555-5555-4555-8555-555555555555";
 const recoveryActionId = "77777777-7777-4777-8777-777777777777";
+let mockLegacyRunRevocationPresent = false;
 
 const mockIssueService = vi.hoisted(() => ({
   addComment: vi.fn(),
@@ -365,8 +366,12 @@ function createRunContextDb(
   const firstRun = runRows[0] ?? {};
   const runAgentId = typeof firstRun.agentId === "string" ? firstRun.agentId : ownerAgentId;
   const runAgentCompanyId = typeof firstRun.agentCompanyId === "string" ? firstRun.agentCompanyId : companyId;
-  const rowsForSelection = async (selection: Record<string, unknown>, chatBindingQuery = false, settledRecoveryQuery = false) => {
+  const rowsForSelection = async (selection: Record<string, unknown>, chatBindingQuery = false, settledRecoveryQuery = false, revocationQuery = false) => {
     if (chatBindingQuery) return chatBindings;
+    // The ownership guard queries append-only revocation evidence. These route
+    // fixtures contain no such event; never satisfy that selector with a
+    // generic issue or run row merely because both selections request `id`.
+    if (revocationQuery) return mockLegacyRunRevocationPresent ? [{ id: 1 }] : [];
     // An unknown selector has no settled recovery receipt. Returning the
     // generic issue fixture here would invent an unrelated replay row.
     if (settledRecoveryQuery) return [];
@@ -380,19 +385,19 @@ function createRunContextDb(
     }
     return [{ id: runAgentId, companyId: runAgentCompanyId, permissions: {}, role: "engineer", reportsTo: null }];
   };
-  const buildQuery = (selection: Record<string, unknown>, chatBindingQuery = false, settledRecoveryQuery = false) => {
+  const buildQuery = (selection: Record<string, unknown>, chatBindingQuery = false, settledRecoveryQuery = false, revocationQuery = false) => {
     const whereResult = {
       orderBy: vi.fn(async () => []),
       limit: vi.fn(() => ({
-        then: async (resolve: (limitedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery)),
+        then: async (resolve: (limitedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery, revocationQuery)),
         for: vi.fn(() => ({
-          then: async (resolve: (lockedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery)),
+          then: async (resolve: (lockedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery, revocationQuery)),
         })),
       })),
       for: vi.fn(() => ({
-        then: async (resolve: (selectedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery)),
+        then: async (resolve: (selectedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery, revocationQuery)),
       })),
-      then: async (resolve: (selectedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery)),
+      then: async (resolve: (selectedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery, revocationQuery)),
     };
     const query = {
       innerJoin: vi.fn(() => query),
@@ -414,6 +419,9 @@ function createRunContextDb(
         }
         if (getTableName(table) === "issue_thread_interactions") {
           return { where: vi.fn(() => ({ limit: vi.fn(async () => []) })) };
+        }
+        if (getTableName(table) === "heartbeat_run_events") {
+          return buildQuery(selection, false, false, true);
         }
         return buildQuery(selection, getTableName(table) === "chat_conversations", getTableName(table) === "issue_recovery_actions");
       }),
@@ -486,6 +494,7 @@ describe("agent issue mutation checkout ownership", () => {
   }
 
   beforeEach(() => {
+    mockLegacyRunRevocationPresent = false;
     // This block loads the route module graph one time (see
     // hoistModuleGraph above). As a result, the issue-list route keeps its
     // response cache in memory between tests. Clear the cache before each
@@ -2903,6 +2912,9 @@ describe("agent issue mutation checkout ownership", () => {
       const app = handoffApp({ ...ownerActor(), source: "agent_jwt" });
       const handedOff = await request(app).patch(`/api/issues/${issueId}`).send(handoff);
       expect(handedOff.status, JSON.stringify(handedOff.body)).toBe(200);
+      // The mocked issue service does not persist its transaction's run event;
+      // seed the corresponding durable evidence before exercising the later write.
+      mockLegacyRunRevocationPresent = true;
       mockIssueService.getById.mockResolvedValue(makeIssue(handoff));
       mockIssueService.update.mockClear();
 

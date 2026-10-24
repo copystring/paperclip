@@ -260,12 +260,17 @@ describe("opencode remote execution", () => {
       },
     });
     expect(stagedMcpConfigs).toHaveLength(1);
-    expect(stagedMcpConfigs[0]?.mcp).toMatchObject({
-      Remote_MCP_fixture: {
-        url: "https://paperclip.example/api/mcp/remote-run",
-        headers: { Authorization: "Bearer remote-run-secret" },
-        oauth: false,
-      },
+    const stagedMcpConfig = stagedMcpConfigs[0]?.mcp as Record<string, unknown> | undefined;
+    const remoteAssignedMcp = Object.entries(stagedMcpConfig ?? {}).find(([, server]) =>
+      typeof server === "object" && server !== null && "url" in server &&
+      server.url === "https://paperclip.example/api/mcp/remote-run",
+    );
+    expect(remoteAssignedMcp).toBeDefined();
+    expect(remoteAssignedMcp?.[0]).toMatch(/^paperclip_[A-F0-9]{12}$/);
+    expect(remoteAssignedMcp?.[1]).toMatchObject({
+      url: "https://paperclip.example/api/mcp/remote-run",
+      headers: { Authorization: "Bearer remote-run-secret" },
+      oauth: false,
     });
     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledTimes(1);
     expect(syncDirectoryToSsh).toHaveBeenCalledTimes(2);
