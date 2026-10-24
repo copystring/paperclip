@@ -105,6 +105,7 @@ jobs:
           pnpm run preflight:workspace-links
           pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
           pnpm --filter @paperclipai/server exec vitest run \
+            src/services/heartbeat/queue.test.ts \
             src/__tests__/heartbeat-process-recovery.test.ts \
             src/__tests__/heartbeat-stale-queue-invalidation.test.ts \
             src/__tests__/native-settled-process-release.test.ts \
