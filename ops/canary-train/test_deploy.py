@@ -203,8 +203,17 @@ class ReleaseTests(unittest.TestCase):
                     return json.dumps(run).encode()
                 return old_get(url, headers)
             http.get = get
+            d = deployer(Path(tmp), http=http)
             with self.assertRaisesRegex(deploy.DeployError, "No verified green release"):
-                deployer(Path(tmp), http=http).find_release()
+                d.find_release()
+            self.assertEqual(d._verified_workflow_contexts, {})
+
+            run["event"] = "workflow_dispatch"
+            run["conclusion"] = "failure"
+            failed_workflow_deployer = deployer(Path(tmp), http=http)
+            with self.assertRaisesRegex(deploy.DeployError, "No verified green release"):
+                failed_workflow_deployer.find_release()
+            self.assertEqual(failed_workflow_deployer._verified_workflow_contexts, {})
 
     def test_rejects_asset_digest_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -423,7 +432,7 @@ class CandidateTests(unittest.TestCase):
             with self.assertRaisesRegex(deploy.DeployError, "not identical"):
                 deployer(root)._migration_diff(old, new)
 
-    def _migration_transition_fixture(self, root: Path, *, approved=True, proof=True):
+    def _migration_transition_fixture(self, root: Path, *, approved=True, proof=True, verified_workflow=True):
         old, candidate = root / "old", root / "candidate"
         old_migration = Path(deploy.MIGRATION_ROOT) / "0001_initial.sql"
         new_migration = Path(deploy.MIGRATION_ROOT) / "0002_add_constraint.sql"
@@ -468,7 +477,8 @@ class CandidateTests(unittest.TestCase):
             "upgradeProof": proof_value if proof else {"passed": False, **context},
         }
         d = deployer(root, **config)
-        d._verified_workflow_contexts[d._manifest_identity(item)] = context
+        if verified_workflow:
+            d._verified_workflow_contexts[d._manifest_identity(item)] = context
         return d, old, candidate, item, old_hash, new_hash
 
     def test_exact_transition_requires_verified_upgrade_proof_and_matching_inventory(self):
@@ -508,6 +518,69 @@ class CandidateTests(unittest.TestCase):
                 }
                 with self.assertRaises(deploy.DeployError):
                     d._migration_diff(old, candidate, item)
+
+    def test_run_stage_preserves_verified_release_context_for_migration_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            d, old, candidate, item, _, _ = self._migration_transition_fixture(root, verified_workflow=False)
+            item["files"].pop("node_modules/@paperclipai/db/dist/migrations/0001_initial.sql", None)
+            for migration in item["migrations"]:
+                item["files"][migration["path"]] = migration["sha256"]
+            cli = root / ".paperclip/cli"
+            installs = cli / "installs/npm"
+            target = installs / f"{item['version']}-patched-{item['runId']}-{item['runAttempt']}"
+            installs.mkdir(parents=True)
+            candidate.rename(target)
+            (cli / "current").symlink_to(old)
+            (cli / "install.json").write_text(json.dumps({"version": "old", "payloadPath": str(old)}))
+
+            tag = f"patched-canary-{item['version']}-{item['runId']}-{item['runAttempt']}"
+            manifest_url = "https://github.test/manifest"
+            payload_url = "https://github.test/payload"
+            manifest_bytes = json.dumps(item).encode()
+            release = {
+                "tag_name": tag, "target_commitish": item["controllerCommit"],
+                "created_at": "2026-10-23T12:00:00Z", "prerelease": True,
+                "assets": [
+                    {"name": "manifest.json", "browser_download_url": manifest_url,
+                     "digest": "sha256:" + digest(manifest_bytes)},
+                    {"name": "payload.tar.gz", "browser_download_url": payload_url,
+                     "digest": "sha256:" + item["archiveSha256"], "size": 1024},
+                ],
+            }
+            releases_url = "https://api.github.com/repos/copystring/paperclip/releases?per_page=100&page=1"
+            run_url = "https://api.github.com/repos/copystring/paperclip/actions/runs/42"
+            workflow_run = {
+                "id": 42, "status": "completed", "conclusion": "success",
+                "path": ".github/workflows/canary-patched.yml", "event": "workflow_dispatch",
+                "head_repository": {"full_name": "copystring/paperclip"},
+                "head_sha": item["controllerCommit"], "run_attempt": 1,
+                "head_branch": "deploy/canary-patched",
+            }
+            http = FakeHttp(
+                raw={manifest_url: manifest_bytes, releases_url: json.dumps([release]).encode(),
+                     run_url: json.dumps(workflow_run).encode()})
+            d.http = http
+            d._verify_active_fingerprint = lambda current, install: None
+            d._verify_owned_candidate = lambda path, verified_manifest: None
+            d._write_status = lambda data: None
+
+            # The context must be keyed by the exact tagged manifest that run()
+            # passes to the real stage() and _migration_diff() methods.
+            self.assertEqual(d._verified_workflow_contexts, {})
+            result = d.run("stage")
+            self.assertTrue(result["staged"])
+            self.assertEqual(result["migrationDiff"]["compatibility"]["status"], "needsRuntimeCompatibility")
+            verified_release, verified_manifest, _ = d.find_release()
+            tagged_identity = d._manifest_identity(verified_manifest)
+            self.assertEqual(verified_manifest["tag"], verified_release["tag_name"])
+            self.assertIn(tagged_identity, d._verified_workflow_contexts)
+            self.assertNotIn(d._manifest_identity(item), d._verified_workflow_contexts)
+            tampered_manifest = {**verified_manifest, "sourceCommit": "0" * 40}
+            with self.assertRaisesRegex(deploy.DeployError, "verified successful workflow"):
+                d._migration_diff(old, target, tampered_manifest)
+            self.assertIn(tagged_identity, d._verified_workflow_contexts)
+            self.assertNotIn(d._manifest_identity(item), d._verified_workflow_contexts)
 
     def test_transition_rejects_another_tested_candidate_package(self):
         with tempfile.TemporaryDirectory() as tmp:
