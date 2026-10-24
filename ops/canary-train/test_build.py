@@ -457,6 +457,10 @@ class ShardedTestReceiptTests(unittest.TestCase):
                 ["pnpm", "run", "build:rust"],
                 cargo_commands[0],
             ])
+            stage = (["node", "scripts/stage-runner-binary.mjs"], workspace / "packages" / "paperclip-runner")
+            self.assertEqual(commands[3], stage, "The default resolver must see the release binary before native tests")
+            self.assertEqual(commands[4][0][:3], ["pnpm", "run", "test:run:general"])
+            self.assertEqual(commands.count(stage), 1, "Ordinary lanes must not stage a native binary")
             self.assertEqual(receipt["runnerBinariesPrebuilt"], True)
             ordinary = json.loads((output / "test-general-server-2-of-4.json").read_text())
             self.assertFalse(ordinary["runnerBinariesPrebuilt"])
