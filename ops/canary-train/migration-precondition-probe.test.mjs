@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   buildFixtureConfig,
+  bootRuntime,
   createFixtureEnvironment,
   assertMigrationSqlContract,
   assertZeroViolations,
@@ -185,8 +186,12 @@ test("fixture config and child environment disable production side effects and w
   const dbUrl = "postgres://paperclip:paperclip@127.0.0.1:54329/paperclip";
   const config = buildFixtureConfig(home, 32001, dbUrl);
   const env = createFixtureEnvironment(home, configPath, 32001, dbUrl, "fixture-only-random-secret");
+  assert.equal(config.$meta.version, 1);
+  assert.equal(config.$meta.source, "configure");
+  assert.ok(Number.isFinite(Date.parse(config.$meta.updatedAt)));
   assert.equal(config.database.backup.enabled, false);
   assert.equal(config.telemetry.enabled, false);
+  assert.equal(config.updates.checkEnabled, false);
   assert.equal(config.server.host, "127.0.0.1");
   assert.equal(env.DATABASE_URL, dbUrl);
   assert.equal(env.PAPERCLIP_DB_BACKUP_ENABLED, "false");
@@ -195,4 +200,23 @@ test("fixture config and child environment disable production side effects and w
   assert.equal(Object.hasOwn(env, "ANTHROPIC_API_KEY"), false);
   assert.equal(Object.hasOwn(env, "OPENAI_API_KEY"), false);
   assert.equal(env.BETTER_AUTH_SECRET, "fixture-only-random-secret");
+});
+
+test("a real failed API child preserves its startup error together with cleanup failure", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-boot-failure-"));
+  assert.equal(path.dirname(root), path.resolve(os.tmpdir()));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const payload = path.join(root, "payload");
+  const dist = path.join(payload, "node_modules", "@paperclipai", "server", "dist");
+  await mkdir(dist, { recursive: true });
+  await writeFile(path.join(dist, "build-info.json"), JSON.stringify({ commit: "1".repeat(40) }));
+  await writeFile(path.join(dist, "index.js"), "process.stderr.write('controlled startup failure\\n'); process.exit(1);\n");
+
+  await assert.rejects(bootRuntime("old", payload, "postgres://fixture:secret@127.0.0.1/fixture", root), error => {
+    assert.ok(error instanceof AggregateError);
+    assert.match(error.errors[0].message, /API child exited before readiness:.*controlled startup failure/s);
+    assert.match(error.errors[1].message, /old API child did not stop cleanly \(1\)/);
+    assert.match(error.message, /controlled startup failure/);
+    return true;
+  });
 });
