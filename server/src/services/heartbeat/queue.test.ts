@@ -148,7 +148,13 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
 
   function wireRealRelease(db: Db) {
     const deps = callbacks(db);
-    deps.getAgent.mockResolvedValue(null);
+    deps.getAgent.mockImplementation(async (agentId) => {
+      const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+      if (!agent) throw new Error("Queue fixture agent is missing");
+      return agent;
+    });
+    // Exercise real queue promotion without granting provider dispatch.
+    deps.canStartNewExternalBotWork.mockResolvedValue(false);
     const release = createReleaseIssueExecution({ issueLock: createPostgresWakeQueueAdapter(db, {
       resolveResponsibleUserId: async () => "queue-test-user",
       getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
