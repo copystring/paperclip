@@ -1,5 +1,5 @@
 diff --git a/packages/adapter-utils/src/server-utils.test.ts b/packages/adapter-utils/src/server-utils.test.ts
-index 072004a86230ebeb1ad6028a84ed2c83f69b3e4a..1be10574f5c00aba23c4d2f7ce018ab0798e2bf0 100644
+index 072004a86..1be10574f 100644
 --- a/packages/adapter-utils/src/server-utils.test.ts
 +++ b/packages/adapter-utils/src/server-utils.test.ts
 @@ -2936,6 +2936,69 @@ describe("renderPaperclipWakePrompt", () => {
@@ -73,7 +73,7 @@ index 072004a86230ebeb1ad6028a84ed2c83f69b3e4a..1be10574f5c00aba23c4d2f7ce018ab0
      const payload = { reason: "issue_disposition_repair", issue: { id: "issue-1", status: "in_progress" },
        dispositionRepair: { attempt: 1, maxAttempts: 2, sourceRunId: "source-1", instruction: "Record completion or a durable waiting path through the API." } };
 diff --git a/packages/adapter-utils/src/server-utils.ts b/packages/adapter-utils/src/server-utils.ts
-index 76e924905fecc4fc7159171c67796d721b682377..db11e0c9080a4cf2bae93e53e3c582d6e92d5c97 100644
+index 76e924905..db11e0c90 100644
 --- a/packages/adapter-utils/src/server-utils.ts
 +++ b/packages/adapter-utils/src/server-utils.ts
 @@ -3013,6 +3013,21 @@ function renderPaperclipWakePromptBody(
@@ -99,7 +99,7 @@ index 76e924905fecc4fc7159171c67796d721b682377..db11e0c9080a4cf2bae93e53e3c582d6
          "Record the decision with PATCH /api/issues/<issueId> using the current issue ID.",
          "Include Authorization: Bearer $PAPERCLIP_API_KEY and X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on the request.",
 diff --git a/packages/adapters/opencode-local/src/server/execute.remote.test.ts b/packages/adapters/opencode-local/src/server/execute.remote.test.ts
-index 53699142b87d58974a41dd14772dad9c7d3221c0..df97624f66af04474c5fe1b0cedd4c16374b0037 100644
+index 53699142b..df97624f6 100644
 --- a/packages/adapters/opencode-local/src/server/execute.remote.test.ts
 +++ b/packages/adapters/opencode-local/src/server/execute.remote.test.ts
 @@ -266,7 +266,7 @@ describe("opencode remote execution", () => {
@@ -112,7 +112,7 @@ index 53699142b87d58974a41dd14772dad9c7d3221c0..df97624f66af04474c5fe1b0cedd4c16
        url: "https://paperclip.example/api/mcp/remote-run",
        headers: { Authorization: "Bearer remote-run-secret" },
 diff --git a/packages/adapters/opencode-local/src/server/execute.test.ts b/packages/adapters/opencode-local/src/server/execute.test.ts
-index ef0149c1e4a165fdd8d86b6a264fb34ab03c5459..90d91fc0c862708d404f27713a08fd9a6a67e2ce 100644
+index ef0149c1e..90d91fc0c 100644
 --- a/packages/adapters/opencode-local/src/server/execute.test.ts
 +++ b/packages/adapters/opencode-local/src/server/execute.test.ts
 @@ -724,7 +724,7 @@ describe("OpenCode runtime MCP handoff", () => {
@@ -125,22 +125,9 @@ index ef0149c1e4a165fdd8d86b6a264fb34ab03c5459..90d91fc0c862708d404f27713a08fd9a
        type: "remote",
        url: "https://paperclip.example/api/mcp/run-1",
 diff --git a/packages/adapters/opencode-local/src/server/runtime-config.test.ts b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
-index ba07e7e4f85354bef3aa2415e8ed3c233de73f5c..4b757c873578a6153700ecac9c12711e6ac7283c 100644
+index 6a402cd7f..4b757c873 100644
 --- a/packages/adapters/opencode-local/src/server/runtime-config.test.ts
 +++ b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
-@@ -73,10 +73,10 @@ describe("prepareOpenCodeRuntimeConfig", () => {
-     await expect(fs.access(prepared.env.XDG_CONFIG_HOME)).rejects.toThrow();
-   });
- 
--  it("does not create a remote config when permissions are enabled and no runtime settings need transport", async () => {
-+  it.each([undefined, "paperclip/combo/medium"])("keeps remote opt-out without MCP a no-op (model=%s)", async (model) => {
-     const prepared = await prepareOpenCodeRuntimeConfig({
-       env: {},
--      config: { dangerouslySkipPermissions: false },
-+      config: { dangerouslySkipPermissions: false, ...(model ? { model } : {}) },
-       targetIsRemote: true,
-     });
- 
 @@ -1069,4 +1069,223 @@ describe("prepareOpenCodeRuntimeConfig", () => {
      expect(prepared.notes).toEqual([]);
      await prepared.cleanup();
@@ -366,7 +353,7 @@ index ba07e7e4f85354bef3aa2415e8ed3c233de73f5c..4b757c873578a6153700ecac9c12711e
 +  });
  });
 diff --git a/packages/paperclip-runner/docs/capability-contract.md b/packages/paperclip-runner/docs/capability-contract.md
-index 9459e2dec4ad2ab4daca23ec649e70998c00de4d..1fdb7dc4b0f87eedf2df88475df47c1a086602ab 100644
+index 9459e2dec..1fdb7dc4b 100644
 --- a/packages/paperclip-runner/docs/capability-contract.md
 +++ b/packages/paperclip-runner/docs/capability-contract.md
 @@ -47,34 +47,34 @@ The skill/reference inventory and eval cases are the only normative behavior sou
@@ -433,7 +420,7 @@ index 9459e2dec4ad2ab4daca23ec649e70998c00de4d..1fdb7dc4b0f87eedf2df88475df47c1a
  | skill:skills/paperclip/references/api-reference.md:response-schemas:9 | optional_agent_tool | skills/paperclip/references/api-reference.md:9 |
  | skill:skills/paperclip/references/api-reference.md:agent-record-get-api-agents-me-or-get-api-agents-agentid:11 | optional_agent_tool | skills/paperclip/references/api-reference.md:11 |
 diff --git a/packages/paperclip-runner/generated/capability/capabilities.yaml b/packages/paperclip-runner/generated/capability/capabilities.yaml
-index 35412456c81b7ec3df54ea864fe63365252bc3c4..11190e82b7cad406d69e88a9a9c341f50606672a 100644
+index 35412456c..11190e82b 100644
 --- a/packages/paperclip-runner/generated/capability/capabilities.yaml
 +++ b/packages/paperclip-runner/generated/capability/capabilities.yaml
 @@ -56,252 +56,252 @@
@@ -746,7 +733,7 @@ index 35412456c81b7ec3df54ea864fe63365252bc3c4..11190e82b7cad406d69e88a9a9c341f5
        "primaryDisposition": "optional_agent_tool",
        "semanticOperation": "scoped_discovery",
 diff --git a/packages/paperclip-runner/generated/capability/capability-contract.md b/packages/paperclip-runner/generated/capability/capability-contract.md
-index 3deca717f354e7cd0e71848f4400f3fcd683af11..aa19e0616216435c61f651219310a8f30bd9dcac 100644
+index 3deca717f..aa19e0616 100644
 --- a/packages/paperclip-runner/generated/capability/capability-contract.md
 +++ b/packages/paperclip-runner/generated/capability/capability-contract.md
 @@ -5,6 +5,6 @@ Generated by `scripts/generate-capability-contract.mjs`; do not edit generated f
@@ -758,7 +745,7 @@ index 3deca717f354e7cd0e71848f4400f3fcd683af11..aa19e0616216435c61f651219310a8f3
  
  Every row has exactly one primary disposition, a source anchor, a semantic operation, and a mock-state expectation.
 diff --git a/packages/paperclip-runner/spec/capability/capabilities.yaml b/packages/paperclip-runner/spec/capability/capabilities.yaml
-index 155ced36537edab1ae8af7ca18d34d1fbb70baa6..d8d8b25ff07671f7117969dddd9a8aa3a23298b4 100644
+index 155ced365..d8d8b25ff 100644
 --- a/packages/paperclip-runner/spec/capability/capabilities.yaml
 +++ b/packages/paperclip-runner/spec/capability/capabilities.yaml
 @@ -105,9 +105,9 @@
@@ -1243,7 +1230,7 @@ index 155ced36537edab1ae8af7ca18d34d1fbb70baa6..d8d8b25ff07671f7117969dddd9a8aa3
      {
 diff --git a/scripts/paperclip-context-reader/README.md b/scripts/paperclip-context-reader/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..e3fddaebe06324dc6a1aeb07c5ca0500561af920
+index 000000000..e3fddaebe
 --- /dev/null
 +++ b/scripts/paperclip-context-reader/README.md
 @@ -0,0 +1,14 @@
@@ -1263,7 +1250,7 @@ index 0000000000000000000000000000000000000000..e3fddaebe06324dc6a1aeb07c5ca0500
 +`verify-skill-aliases.mjs` checks deployment-owned aliases against their declared stable runtime target. It reports drift without rewriting links or replacing external skills. The deployment operator supplies the owned alias inventory. It is chained after existing update checks in the live installation.
 diff --git a/scripts/paperclip-context-reader/read-context.mjs b/scripts/paperclip-context-reader/read-context.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..9788188552e0107b5436365515c7a0d3bc23891f
+index 000000000..978818855
 --- /dev/null
 +++ b/scripts/paperclip-context-reader/read-context.mjs
 @@ -0,0 +1,116 @@
@@ -1385,7 +1372,7 @@ index 0000000000000000000000000000000000000000..9788188552e0107b5436365515c7a0d3
 +}
 diff --git a/scripts/paperclip-context-reader/read-context.test.mjs b/scripts/paperclip-context-reader/read-context.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..fc111d46666194d4e97d518bbc0c325fcb831e16
+index 000000000..fc111d466
 --- /dev/null
 +++ b/scripts/paperclip-context-reader/read-context.test.mjs
 @@ -0,0 +1,93 @@
@@ -1484,7 +1471,7 @@ index 0000000000000000000000000000000000000000..fc111d46666194d4e97d518bbc0c325f
 +});
 diff --git a/scripts/paperclip-context-reader/verify-skill-aliases.mjs b/scripts/paperclip-context-reader/verify-skill-aliases.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..60d3f0a79cb6be773641e1ccf4fa75fd00485fc4
+index 000000000..60d3f0a79
 --- /dev/null
 +++ b/scripts/paperclip-context-reader/verify-skill-aliases.mjs
 @@ -0,0 +1,12 @@
@@ -1502,7 +1489,7 @@ index 0000000000000000000000000000000000000000..60d3f0a79cb6be773641e1ccf4fa75fd
 +}
 diff --git a/scripts/paperclip-maintenance/v1/README.md b/scripts/paperclip-maintenance/v1/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..f6d3f0e0af88459519e4d698bb702ba6dc492a66
+index 000000000..f6d3f0e0a
 --- /dev/null
 +++ b/scripts/paperclip-maintenance/v1/README.md
 @@ -0,0 +1,53 @@
@@ -1561,7 +1548,7 @@ index 0000000000000000000000000000000000000000..f6d3f0e0af88459519e4d698bb702ba6
 +Prepare function-preserving changes with exact source hashes and appropriate independent review. Apply only the accepted candidate, check current source identity and overlapping work immediately before replacement, then read back the installed files and affected behavior. Preserve real permission, review, recovery and unknown-action gates. Record bounded results and remaining coverage, release only this run's semantic claims, and save the native task disposition so the next ordinary schedule can continue without a new generic user approval.
 diff --git a/scripts/paperclip-maintenance/v1/maintenance.py b/scripts/paperclip-maintenance/v1/maintenance.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..ce86a10ecb14b5dff5191232d27415c0621f86cf
+index 000000000..ce86a10ec
 --- /dev/null
 +++ b/scripts/paperclip-maintenance/v1/maintenance.py
 @@ -0,0 +1,475 @@
@@ -2042,7 +2029,7 @@ index 0000000000000000000000000000000000000000..ce86a10ecb14b5dff5191232d27415c0
 +if __name__=='__main__':main()
 diff --git a/scripts/paperclip-maintenance/v1/test_maintenance.py b/scripts/paperclip-maintenance/v1/test_maintenance.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..e5974aa87489ef8a70488e58e06abc12b8e5c665
+index 000000000..e5974aa87
 --- /dev/null
 +++ b/scripts/paperclip-maintenance/v1/test_maintenance.py
 @@ -0,0 +1,237 @@
@@ -2285,7 +2272,7 @@ index 0000000000000000000000000000000000000000..e5974aa87489ef8a70488e58e06abc12
 +if __name__=='__main__':unittest.main(verbosity=2)
 diff --git a/server/src/__tests__/execution-control-scheduler.test.ts b/server/src/__tests__/execution-control-scheduler.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..301a54cf51cc57f7f39763afecfc2a887dc04411
+index 000000000..301a54cf5
 --- /dev/null
 +++ b/server/src/__tests__/execution-control-scheduler.test.ts
 @@ -0,0 +1,90 @@
@@ -2380,7 +2367,7 @@ index 0000000000000000000000000000000000000000..301a54cf51cc57f7f39763afecfc2a88
 +  });
 +});
 diff --git a/server/src/__tests__/heartbeat-case-handoff.test.ts b/server/src/__tests__/heartbeat-case-handoff.test.ts
-index 0dbc629e73f81038a0d82b487cb871b3242a54b9..e6fe523e4c72115ab24cdc94d8797a08d1e9dfb9 100644
+index 0dbc629e7..e6fe523e4 100644
 --- a/server/src/__tests__/heartbeat-case-handoff.test.ts
 +++ b/server/src/__tests__/heartbeat-case-handoff.test.ts
 @@ -5,7 +5,7 @@ import { rm } from "node:fs/promises";
@@ -2514,7 +2501,7 @@ index 0dbc629e73f81038a0d82b487cb871b3242a54b9..e6fe523e4c72115ab24cdc94d8797a08
      const f = await fixture(), heartbeat = heartbeatService(db);
      const queued = await heartbeat.wakeup(f.agentId, f.options);
 diff --git a/server/src/__tests__/heartbeat-process-recovery.test.ts b/server/src/__tests__/heartbeat-process-recovery.test.ts
-index 0b50e0c64b13a91ec4dfec43eac7a7ee3124a299..4432a7a317279b3fd362fe8ea92e6d45daff32f1 100644
+index 0b50e0c64..4432a7a31 100644
 --- a/server/src/__tests__/heartbeat-process-recovery.test.ts
 +++ b/server/src/__tests__/heartbeat-process-recovery.test.ts
 @@ -1060,7 +1060,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
@@ -2785,7 +2772,7 @@ index 0b50e0c64b13a91ec4dfec43eac7a7ee3124a299..4432a7a317279b3fd362fe8ea92e6d45
      const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
        status: "in_progress",
 diff --git a/server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts b/server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts
-index f0501ccb514afe9c0eab942b8fb3253d8ee31dc2..ad9add29a5e8f6021da845950e637e53737b23ce 100644
+index f0501ccb5..ad9add29a 100644
 --- a/server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts
 +++ b/server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts
 @@ -13,7 +13,14 @@ import {
@@ -3162,7 +3149,7 @@ index f0501ccb514afe9c0eab942b8fb3253d8ee31dc2..ad9add29a5e8f6021da845950e637e53
      { runtimeMode: "native", status: "done", reassigned: false },
      { runtimeMode: "legacy", status: "done", reassigned: false },
 diff --git a/server/src/__tests__/issue-recovery-actions.test.ts b/server/src/__tests__/issue-recovery-actions.test.ts
-index e1151c9c8998859195208c219b4655f5f73f0d93..7a274354904fb23816f059f91b3eac9dd8a6fa43 100644
+index e1151c9c8..7a2743549 100644
 --- a/server/src/__tests__/issue-recovery-actions.test.ts
 +++ b/server/src/__tests__/issue-recovery-actions.test.ts
 @@ -4,7 +4,7 @@ import os from "node:os";
@@ -3364,7 +3351,7 @@ index e1151c9c8998859195208c219b4655f5f73f0d93..7a274354904fb23816f059f91b3eac9d
      const fixture = await seedCompany();
      const { companyId, coderId, sourceIssueId } = fixture;
 diff --git a/server/src/__tests__/issue-update-comment-wakeup-routes.test.ts b/server/src/__tests__/issue-update-comment-wakeup-routes.test.ts
-index 842159d91bfebc7d113ba9443a678fc883d0b38c..836b3af07a1b5d76cf2b95ba8f6c4c0bfd2cb691 100644
+index 842159d91..836b3af07 100644
 --- a/server/src/__tests__/issue-update-comment-wakeup-routes.test.ts
 +++ b/server/src/__tests__/issue-update-comment-wakeup-routes.test.ts
 @@ -1,6 +1,7 @@
@@ -3401,7 +3388,7 @@ index 842159d91bfebc7d113ba9443a678fc883d0b38c..836b3af07a1b5d76cf2b95ba8f6c4c0b
      const existing = makeIssue({
        assigneeAgentId: ASSIGNEE_AGENT_ID,
 diff --git a/server/src/index.ts b/server/src/index.ts
-index ef5da7d36e46fb969ff1da90213136b8e2dfad58..dde7a35980f8703230a91181852c0dd914f017db 100644
+index ef5da7d36..dde7a3598 100644
 --- a/server/src/index.ts
 +++ b/server/src/index.ts
 @@ -1213,6 +1213,8 @@ async function startServerWithDatabaseTeardown(
@@ -3414,7 +3401,7 @@ index ef5da7d36e46fb969ff1da90213136b8e2dfad58..dde7a35980f8703230a91181852c0dd9
      heartbeatSchedulerInterval = setInterval(() => {
        if (!isWarmStandby() && !isIdleTaskDrainActive()) callback();
 diff --git a/server/src/modules/run-dispatch/adapters/postgres.ts b/server/src/modules/run-dispatch/adapters/postgres.ts
-index e45cd770bba00b8248a2b74e14d69894c8de7d5f..fc8b2c76bd39dd9f4d207d396a079696f888b1ac 100644
+index e45cd770b..fc8b2c76b 100644
 --- a/server/src/modules/run-dispatch/adapters/postgres.ts
 +++ b/server/src/modules/run-dispatch/adapters/postgres.ts
 @@ -1,3 +1,4 @@
@@ -3497,7 +3484,7 @@ index e45cd770bba00b8248a2b74e14d69894c8de7d5f..fc8b2c76bd39dd9f4d207d396a079696
                ? { preDispatchResponseWait: { version: 1, providerWorkStarted: false } }
                : {}),
 diff --git a/server/src/modules/wake-queue/adapters/postgres.test.ts b/server/src/modules/wake-queue/adapters/postgres.test.ts
-index 9fcacd4cb75cc273b6c3fa28454649c3265bebb5..504a6fdae8e78b7ef4001d5e01f2615d2a59de68 100644
+index 9fcacd4cb..504a6fdae 100644
 --- a/server/src/modules/wake-queue/adapters/postgres.test.ts
 +++ b/server/src/modules/wake-queue/adapters/postgres.test.ts
 @@ -953,6 +953,105 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
@@ -3607,7 +3594,7 @@ index 9fcacd4cb75cc273b6c3fa28454649c3265bebb5..504a6fdae8e78b7ef4001d5e01f2615d
      const companyId = await seedCompany();
      const agentId = await seedAgent({ companyId });
 diff --git a/server/src/modules/wake-queue/adapters/postgres.ts b/server/src/modules/wake-queue/adapters/postgres.ts
-index 4502147557b16f24a2e4100da6cec50311522dc9..11d734d962a6ab3573090422c0a882c39d550f0d 100644
+index 450214755..11d734d96 100644
 --- a/server/src/modules/wake-queue/adapters/postgres.ts
 +++ b/server/src/modules/wake-queue/adapters/postgres.ts
 @@ -5,7 +5,7 @@ import { isCompletedOnboardingHandoffWake } from "../../../services/chat-complet
@@ -3688,7 +3675,7 @@ index 4502147557b16f24a2e4100da6cec50311522dc9..11d734d962a6ab3573090422c0a882c3
          // Explicit retry admission requires the exact source's task claim.
          // Preserve it only when the existing queue-first recovery policy
 diff --git a/server/src/modules/wake-queue/application/ports.ts b/server/src/modules/wake-queue/application/ports.ts
-index 6469b7af31fff20df85b8af982b8f1b7339bbb06..b76f175af8883d959cbc7f065d18ddcb9cdbbe72 100644
+index 6469b7af3..b76f175af 100644
 --- a/server/src/modules/wake-queue/application/ports.ts
 +++ b/server/src/modules/wake-queue/application/ports.ts
 @@ -14,6 +14,8 @@ export type { InvokableAgentSnapshot, IssueSnapshot, ReleaseRecoveryBlockedNotic
@@ -3710,7 +3697,7 @@ index 6469b7af31fff20df85b8af982b8f1b7339bbb06..b76f175af8883d959cbc7f065d18ddcb
      companyId: string;
      issueId: string;
 diff --git a/server/src/modules/wake-queue/application/use-cases.test.ts b/server/src/modules/wake-queue/application/use-cases.test.ts
-index 790c16166c219ad40b4db72ff43d81f986d29c53..68b2ac11857ddce662e947de8d9cde2e0b7b18e7 100644
+index 790c16166..68b2ac118 100644
 --- a/server/src/modules/wake-queue/application/use-cases.test.ts
 +++ b/server/src/modules/wake-queue/application/use-cases.test.ts
 @@ -212,6 +212,49 @@ describe("releaseIssueExecution", () => {
@@ -3764,7 +3751,7 @@ index 790c16166c219ad40b4db72ff43d81f986d29c53..68b2ac11857ddce662e947de8d9cde2e
      "checks late completed-delegation mentions without dropping independent input (%s)", async (scenario) => {
        const originalCommentIds = ["closing-comment", "second-comment"];
 diff --git a/server/src/modules/wake-queue/application/use-cases.ts b/server/src/modules/wake-queue/application/use-cases.ts
-index ab89c39331ce2250dea86b26a7fc51098d535d5a..48657692f0a21e5a377d5f0e4afee9207377eee2 100644
+index ab89c3933..48657692f 100644
 --- a/server/src/modules/wake-queue/application/use-cases.ts
 +++ b/server/src/modules/wake-queue/application/use-cases.ts
 @@ -11,6 +11,7 @@ import {
@@ -3784,7 +3771,7 @@ index ab89c39331ce2250dea86b26a7fc51098d535d5a..48657692f0a21e5a377d5f0e4afee920
      });
      if (!candidate) break;
 diff --git a/server/src/modules/wake-queue/domain/policy.test.ts b/server/src/modules/wake-queue/domain/policy.test.ts
-index 1d73e887ecccc25ba4b138968b27da2e2c488c64..f1ec4b161626d67e5a6bef3c9e0ee57ccc2c576a 100644
+index 1d73e887e..f1ec4b161 100644
 --- a/server/src/modules/wake-queue/domain/policy.test.ts
 +++ b/server/src/modules/wake-queue/domain/policy.test.ts
 @@ -30,6 +30,7 @@ const basePreDrainFacts: PreDrainFacts = {
@@ -3812,7 +3799,7 @@ index 1d73e887ecccc25ba4b138968b27da2e2c488c64..f1ec4b161626d67e5a6bef3c9e0ee57c
        name: "proceed: none of the pre-drain conditions apply",
        facts: basePreDrainFacts,
 diff --git a/server/src/modules/wake-queue/domain/policy.ts b/server/src/modules/wake-queue/domain/policy.ts
-index 11b904bdc619ba6ce43c97ea2a215a248146178b..0da7b48e049a7e5560bac0e5c80347ca3c04825d 100644
+index 11b904bdc..0da7b48e0 100644
 --- a/server/src/modules/wake-queue/domain/policy.ts
 +++ b/server/src/modules/wake-queue/domain/policy.ts
 @@ -74,6 +74,8 @@ export type PreDrainFacts = {
@@ -3834,7 +3821,7 @@ index 11b904bdc619ba6ce43c97ea2a215a248146178b..0da7b48e049a7e5560bac0e5c80347ca
    }
  
 diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
-index b2cecd741aced55ee8085dd3266fbc4fa0ec6131..f28691046dc3372cc6c78e40b18b5a6d50bb7fd7 100644
+index b2cecd741..f28691046 100644
 --- a/server/src/routes/issues.ts
 +++ b/server/src/routes/issues.ts
 @@ -1,4 +1,5 @@
@@ -4005,7 +3992,7 @@ index b2cecd741aced55ee8085dd3266fbc4fa0ec6131..f28691046dc3372cc6c78e40b18b5a6d
                    ? "issue_reopened_via_comment"
                    : "issue_commented",
 diff --git a/server/src/routes/openapi.ts b/server/src/routes/openapi.ts
-index 45fb61d34459303db2e176924796fd875a68a7d4..9a4b0771189aeda4710779c8f7b9945d4ee8ebf0 100644
+index 45fb61d34..9a4b07711 100644
 --- a/server/src/routes/openapi.ts
 +++ b/server/src/routes/openapi.ts
 @@ -10724,6 +10724,15 @@ registerCurrentRoute({
@@ -4025,7 +4012,7 @@ index 45fb61d34459303db2e176924796fd875a68a7d4..9a4b0771189aeda4710779c8f7b9945d
    method: "post",
    path: "/api/issues/{id}/recovery-actions/resume-workspace-finalization",
 diff --git a/server/src/services/case-handoffs.test.ts b/server/src/services/case-handoffs.test.ts
-index 9f585d4abddb93ae526cc47093a5d8360698c807..41faa8bf5b44eed6d9cd6279b2a6433feaa86003 100644
+index 9f585d4ab..41faa8bf5 100644
 --- a/server/src/services/case-handoffs.test.ts
 +++ b/server/src/services/case-handoffs.test.ts
 @@ -5,7 +5,7 @@ import express from "express";
@@ -4047,7 +4034,7 @@ index 9f585d4abddb93ae526cc47093a5d8360698c807..41faa8bf5b44eed6d9cd6279b2a6433f
      await db.delete(principalPermissionGrants); await db.delete(companyMemberships); await db.delete(authUsers);
      await db.delete(agents); await db.delete(companies);
 diff --git a/server/src/services/execution-recovery-resolution.ts b/server/src/services/execution-recovery-resolution.ts
-index e56141565b99ce421c408db221cc9f6177112bc8..fc3f04550897203a66c0df4a5b629486a50bdcac 100644
+index e56141565..fc3f04550 100644
 --- a/server/src/services/execution-recovery-resolution.ts
 +++ b/server/src/services/execution-recovery-resolution.ts
 @@ -2,6 +2,7 @@ import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notificatio
@@ -4268,7 +4255,7 @@ index e56141565b99ce421c408db221cc9f6177112bc8..fc3f04550897203a66c0df4a5b629486
              .update(issueRecoveryActions)
              .set({
 diff --git a/server/src/services/heartbeat/queue.test.ts b/server/src/services/heartbeat/queue.test.ts
-index 9af4a5ac9564cc2c1a828f41d801d39caf97bba6..31db6c12a04fe982691094acd7e1e663ff1eef20 100644
+index 9af4a5ac9..31db6c12a 100644
 --- a/server/src/services/heartbeat/queue.test.ts
 +++ b/server/src/services/heartbeat/queue.test.ts
 @@ -113,6 +113,205 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
@@ -4478,7 +4465,7 @@ index 9af4a5ac9564cc2c1a828f41d801d39caf97bba6..31db6c12a04fe982691094acd7e1e663
      const { company, agent, issue, wake, run } = await fixture("queued");
      const [record] = await db.insert(cases).values({ companyId: company.id, caseNumber: 1, identifier: "QM-CASE-1",
 diff --git a/server/src/services/heartbeat/queue.ts b/server/src/services/heartbeat/queue.ts
-index c2516d3026736517dc655b18fb71e753169e61a7..4828402ec730c39eba631968317e6e5328118618 100644
+index c2516d302..4828402ec 100644
 --- a/server/src/services/heartbeat/queue.ts
 +++ b/server/src/services/heartbeat/queue.ts
 @@ -2,6 +2,10 @@ import { authorizationService } from "../authorization.js";
@@ -4825,7 +4812,7 @@ index c2516d3026736517dc655b18fb71e753169e61a7..4828402ec730c39eba631968317e6e53
              // Offer the input to the active external agent, but keep a durable queued wake
              // until it reads the comment. A finish racing the event tick must
 diff --git a/server/src/services/heartbeat/retries.ts b/server/src/services/heartbeat/retries.ts
-index 329a4da75697ed4bad92f1b88c6c8baed5d03eee..6f6d2edb28a9260c0ce8cb2da2882165708abbf5 100644
+index 329a4da75..6f6d2edb2 100644
 --- a/server/src/services/heartbeat/retries.ts
 +++ b/server/src/services/heartbeat/retries.ts
 @@ -412,6 +412,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
@@ -4840,7 +4827,7 @@ index 329a4da75697ed4bad92f1b88c6c8baed5d03eee..6f6d2edb28a9260c0ce8cb2da2882165
        return { outcome: "not_scheduled" as const,
          reason: "Repair the invalid tool definitions before starting a new attempt.",
 diff --git a/server/src/services/heartbeat/run-lifecycle.ts b/server/src/services/heartbeat/run-lifecycle.ts
-index 5f299e855faabb3fdc9224bf54d0f4369efa212c..5bd10710a0f0601e1a9df381c088491998ac7719 100644
+index 5f299e855..5bd10710a 100644
 --- a/server/src/services/heartbeat/run-lifecycle.ts
 +++ b/server/src/services/heartbeat/run-lifecycle.ts
 @@ -1,5 +1,6 @@
@@ -4897,7 +4884,7 @@ index 5f299e855faabb3fdc9224bf54d0f4369efa212c..5bd10710a0f0601e1a9df381c0884919
        patch = {
          ...patch,
 diff --git a/server/src/services/heartbeat/run-preparation.ts b/server/src/services/heartbeat/run-preparation.ts
-index 02d9bcaa86c3debe609b03053108cfebe8fb32d2..8eed1616e262446d1f58b2626f03266cc8715ca1 100644
+index 02d9bcaa8..8eed1616e 100644
 --- a/server/src/services/heartbeat/run-preparation.ts
 +++ b/server/src/services/heartbeat/run-preparation.ts
 @@ -863,12 +863,18 @@ export interface WakeupOptions {
@@ -4921,7 +4908,7 @@ index 02d9bcaa86c3debe609b03053108cfebe8fb32d2..8eed1616e262446d1f58b2626f03266c
    /** Keep causally distinct external chat continuations out of an existing run. */
    allowRunCoalescing?: boolean;
 diff --git a/server/src/services/issue-comment-wakeup.test.ts b/server/src/services/issue-comment-wakeup.test.ts
-index c8563c9b5c409484cc4a0d348b318793658b3027..9438ce83611b5de0e74ef0d707be5a785731af6e 100644
+index c8563c9b5..9438ce836 100644
 --- a/server/src/services/issue-comment-wakeup.test.ts
 +++ b/server/src/services/issue-comment-wakeup.test.ts
 @@ -1,7 +1,19 @@
@@ -4946,7 +4933,7 @@ index c8563c9b5c409484cc4a0d348b318793658b3027..9438ce83611b5de0e74ef0d707be5a78
      expect(
        shouldWakeAssigneeForIssueComment({
 diff --git a/server/src/services/issue-comment-wakeup.ts b/server/src/services/issue-comment-wakeup.ts
-index 1a586658d7b0ecd947347a4dede471ddc2fb5a23..b3bb0599b53a16733773090157ecee62e8f74cda 100644
+index 1a586658d..b3bb0599b 100644
 --- a/server/src/services/issue-comment-wakeup.ts
 +++ b/server/src/services/issue-comment-wakeup.ts
 @@ -1,14 +1,27 @@
@@ -4989,7 +4976,7 @@ index 1a586658d7b0ecd947347a4dede471ddc2fb5a23..b3bb0599b53a16733773090157ecee62
      return false;
    }
 diff --git a/server/src/services/issues.ts b/server/src/services/issues.ts
-index edb59485f5c725d9699a3e65736b4d0b2902471a..84b3398fa83cd0eb4714fe52e9b66043553d7f3f 100644
+index edb59485f..84b3398fa 100644
 --- a/server/src/services/issues.ts
 +++ b/server/src/services/issues.ts
 @@ -12932,7 +12932,7 @@ export function issueService(db: Db) {
@@ -5002,7 +4989,7 @@ index edb59485f5c725d9699a3e65736b4d0b2902471a..84b3398fa83cd0eb4714fe52e9b66043
            presentation,
            metadata,
 diff --git a/server/src/services/legacy-execution-recovery.ts b/server/src/services/legacy-execution-recovery.ts
-index f8d477cad326704d9d8cc8f5c3451644320caf81..ba3d258f4d4ce2da5a1cd79a46043d7145abef93 100644
+index f8d477cad..ba3d258f4 100644
 --- a/server/src/services/legacy-execution-recovery.ts
 +++ b/server/src/services/legacy-execution-recovery.ts
 @@ -1,4 +1,5 @@
@@ -5161,7 +5148,7 @@ index f8d477cad326704d9d8cc8f5c3451644320caf81..ba3d258f4d4ce2da5a1cd79a46043d71
        resultJson: preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,
          input.recordRestoreFailureOnly ? { ...current.resultJson, ...patch.resultJson } : patch.resultJson),
 diff --git a/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts b/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
-index 8df1cc9af8bfaa07863fd5db42490a13cbd11dcd..f493fc9a782c81bcf0908f8c88371a852bfbc512 100644
+index 8df1cc9af..f493fc9a7 100644
 --- a/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
 +++ b/server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts
 @@ -30,6 +30,10 @@ describe("saved assigned results through actual PRP", () => {
@@ -5289,7 +5276,7 @@ index 8df1cc9af8bfaa07863fd5db42490a13cbd11dcd..f493fc9a782c81bcf0908f8c88371a85
  });
 diff --git a/server/src/services/non-dispatch-receipt.ts b/server/src/services/non-dispatch-receipt.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..073fafad2e8017933cd621283c46f58f781d3994
+index 000000000..073fafad2
 --- /dev/null
 +++ b/server/src/services/non-dispatch-receipt.ts
 @@ -0,0 +1,231 @@
@@ -5526,7 +5513,7 @@ index 0000000000000000000000000000000000000000..073fafad2e8017933cd621283c46f58f
 +}
 diff --git a/server/src/services/non-dispatch-revalidation.ts b/server/src/services/non-dispatch-revalidation.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..fa39809128bc6bc482e0632393d3d1d384f1b7c1
+index 000000000..fa3980912
 --- /dev/null
 +++ b/server/src/services/non-dispatch-revalidation.ts
 @@ -0,0 +1,227 @@
@@ -5759,7 +5746,7 @@ index 0000000000000000000000000000000000000000..fa39809128bc6bc482e0632393d3d1d3
 +}
 diff --git a/server/src/services/recovery/disposition-repair-guidance.test.ts b/server/src/services/recovery/disposition-repair-guidance.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b4beaf0d16979315c897d50aa973fc72bfd4c8cf
+index 000000000..b4beaf0d1
 --- /dev/null
 +++ b/server/src/services/recovery/disposition-repair-guidance.test.ts
 @@ -0,0 +1,43 @@
@@ -5807,7 +5794,7 @@ index 0000000000000000000000000000000000000000..b4beaf0d16979315c897d50aa973fc72
 +  });
 +});
 diff --git a/server/src/services/recovery/legacy-continuation.test.ts b/server/src/services/recovery/legacy-continuation.test.ts
-index e4cd9a3837457b148634e68f5474fa8d1a5c61c0..62597a68e07efbbd884d0a329e2e6ba840b8d180 100644
+index e4cd9a383..62597a68e 100644
 --- a/server/src/services/recovery/legacy-continuation.test.ts
 +++ b/server/src/services/recovery/legacy-continuation.test.ts
 @@ -11,9 +11,53 @@ describe("legacy continuation authority", () => {
@@ -5874,7 +5861,7 @@ index e4cd9a3837457b148634e68f5474fa8d1a5c61c0..62597a68e07efbbd884d0a329e2e6ba8
    it("preserves the episode through two attempts and exhaustion", () => {
      const first = decideLegacyContinuation(input);
 diff --git a/server/src/services/recovery/legacy-continuation.ts b/server/src/services/recovery/legacy-continuation.ts
-index dc319eaedd356b9264d3eedfe100ad63bf104a20..f4a8fb0129bb405cf1eba23ff119c3320f3ee49d 100644
+index dc319eaed..f4a8fb012 100644
 --- a/server/src/services/recovery/legacy-continuation.ts
 +++ b/server/src/services/recovery/legacy-continuation.ts
 @@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
@@ -5934,7 +5921,7 @@ index dc319eaedd356b9264d3eedfe100ad63bf104a20..f4a8fb0129bb405cf1eba23ff119c332
    const nextAttempt = episode.attempt + 1;
    return {
 diff --git a/server/src/services/recovery/service.ts b/server/src/services/recovery/service.ts
-index 7d4232e37c6c707c93714627155b81506fc7b426..962ebb89a7eff952ed2b06fab6d77f0b7da57b9a 100644
+index 7d4232e37..962ebb89a 100644
 --- a/server/src/services/recovery/service.ts
 +++ b/server/src/services/recovery/service.ts
 @@ -13,7 +13,7 @@ import { executionRetryAccounting } from "../execution-recovery-attempt.js";
@@ -6100,7 +6087,7 @@ index 7d4232e37c6c707c93714627155b81506fc7b426..962ebb89a7eff952ed2b06fab6d77f0b
          });
          if (queued) {
 diff --git a/server/src/services/tool-gateway.ts b/server/src/services/tool-gateway.ts
-index f4c7dd3b442cebadeeb109753806cf319215eab0..1888eeb1ba77a41742971627ee865cb16bae1b0f 100644
+index f4c7dd3b4..1888eeb1b 100644
 --- a/server/src/services/tool-gateway.ts
 +++ b/server/src/services/tool-gateway.ts
 @@ -6508,6 +6508,7 @@ export function createToolGatewayService(
@@ -6112,7 +6099,7 @@ index f4c7dd3b442cebadeeb109753806cf319215eab0..1888eeb1ba77a41742971627ee865cb1
            504,
            `Remote MCP tool call exceeded its ${ms} ms caller deadline. The provider may still have processed the action; its outcome is unknown. Check its state before an explicit retry.`,
 diff --git a/skills/paperclip/SKILL.md b/skills/paperclip/SKILL.md
-index 06977ec673e8227b21583d1a38c350d8e33fb07d..2db31867607b1acb04248affe1b53d468d58225e 100644
+index 06977ec67..2db318676 100644
 --- a/skills/paperclip/SKILL.md
 +++ b/skills/paperclip/SKILL.md
 @@ -145,10 +145,12 @@ Read enough ancestor/comment context to understand _why_ the task exists and wha
