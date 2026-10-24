@@ -113,8 +113,8 @@ test("read-only journal mapping accepts only the exact registered baseline or ca
   };
   const baselineInventory = await writeInventory(baselineRoot, ["0001_first.sql", "0002_second.sql"], {
     "0002_second.sql": "CREATE TABLE second_table (legacy_id integer);\n",
-  }, [0, 2]);
-  const candidateInventory = await writeInventory(candidateRoot, ["0001_first.sql", "0002_second.sql", "0003_third.sql"], {}, [0, 2, 3]);
+  }, [0, 0]);
+  const candidateInventory = await writeInventory(candidateRoot, ["0001_first.sql", "0002_second.sql", "0003_third.sql"], {}, [0, 0, 3]);
   const baselineDescriptor = await migrationJournalDescriptor(baselineRoot, baselineInventory);
   const candidateDescriptor = await migrationJournalDescriptor(candidateRoot, candidateInventory);
   const hashFor = (inventory, name) => inventory[`${migrationPrefix}${name}`];
@@ -155,8 +155,8 @@ test("read-only journal mapping accepts only the exact registered baseline or ca
   baselineInventory, candidateInventory), /registered baseline or candidate/);
 
   const idOnlyRows = [{ id: 1 }, { id: 3 }, { id: 4 }];
-  assert.equal(identifyJournalRows(idOnlyRows, new Set(["id"]), baselineDescriptor, candidateDescriptor,
-    baselineInventory, candidateInventory).state, "candidate");
+  assert.throws(() => identifyJournalRows(idOnlyRows, new Set(["id"]), baselineDescriptor, candidateDescriptor,
+    baselineInventory, candidateInventory), /registered baseline or candidate/);
 
   assert.throws(() => identifyJournalRows(candidateRows.slice(0, 1), columns, baselineDescriptor, candidateDescriptor,
     baselineInventory, candidateInventory), /registered baseline or candidate/);

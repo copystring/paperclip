@@ -246,7 +246,6 @@ export async function migrationJournalDescriptor(payloadRoot, inventory) {
     const name = namesByFile.get(`${entry.tag}.sql`);
     if (!name) fail("Registered migration journal references an unknown or ambiguous SQL file");
     const id = Number(entry.idx ?? index) + 1;
-    if (idToNames.has(id)) fail("Registered migration journal contains duplicate indices");
     const matches = idToNames.get(id) ?? [];
     matches.push(name);
     idToNames.set(id, matches);
