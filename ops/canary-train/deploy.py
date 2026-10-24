@@ -320,11 +320,15 @@ class Deployer:
                 if release.get("target_commitish") != manifest["controllerCommit"]:
                     raise DeployError("Release target commit does not match the manifest")
                 run = self.verify_workflow_run(manifest)
-                self._verified_workflow_contexts[self._manifest_identity(manifest)] = {
+                # Bind the successful workflow context to the exact release
+                # identity returned to callers. The tag was checked above,
+                # and run() carries this same identity into staging.
+                verified_manifest = {**manifest, "tag": release["tag_name"]}
+                self._verified_workflow_contexts[self._manifest_identity(verified_manifest)] = {
                     "runId": manifest["runId"], "runAttempt": manifest["runAttempt"],
                     "controllerCommit": run["head_sha"], "sourceCommit": manifest["sourceCommit"],
                 }
-                return release, manifest, assets
+                return release, verified_manifest, assets
             except ReleaseNotReady as exc:
                 not_ready = exc
                 continue
