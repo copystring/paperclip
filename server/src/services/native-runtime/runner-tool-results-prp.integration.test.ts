@@ -7,7 +7,7 @@ import { startRunnerApiTestServer } from "../../__tests__/helpers/runner-api-ser
 import { createRunnerdCodexTransport, defaultCapabilityRunnerdBinary } from "../../vendor/paperclip-runner/index.js";
 import { createAssignedMcpTools } from "./assigned-mcp-tools.js";
 import { PaperclipRunnerToolAuthority } from "./paperclip-runner-tool-authority.js";
-import { RUNNER_TOOL_RESULT_MAX_BYTES } from "./runner-tool-results.js";
+import { READ_TOOL_RESULT, RUNNER_TOOL_RESULT_MAX_BYTES } from "./runner-tool-results.js";
 import type { ToolGatewayService } from "../tool-gateway.js";
 
 describe("saved assigned results through actual PRP", () => {
@@ -95,11 +95,44 @@ for await (const line of createInterface({input:process.stdin})) {
       prpIdentity: { runnerInstanceId: "saved-test", environmentLeaseId: "saved-test-lease", runId: fixture.runId,
         normalizedSessionId: "saved-test-session", turnId: "saved-test-turn", itemId: "saved-test-item" },
     });
+    const transferStartedAt = { value: null as number | null };
+    const transferCalls: Array<{
+      tool: string;
+      phase: string;
+      offsetBytes: number | null;
+      page: number | null;
+      startedMs: number;
+      completedMs: number;
+      gapMs: number;
+      resultBytes: number;
+      wrapperBytes: number;
+    }> = [];
+    let activeTransferCall: Omit<(typeof transferCalls)[number], "completedMs" | "gapMs" | "resultBytes" | "wrapperBytes"> | null = null;
+    let activePhase = "large";
+    let page = 0;
+    let lastCompletedAt: number | undefined;
+    let transferClosed = false;
+    let transferFailure: Error | undefined;
+    let failedTransferCall: { tool: string; phase: string; offsetBytes: number | null; page: number | null; startedMs: number; failedMs: number; errorType: string } | null = null;
+    let stallTimer: ReturnType<typeof setTimeout> | undefined;
+    let rejectTransferStall: ((error: Error) => void) | undefined;
+    const transferStalled = new Promise<never>((_resolve, reject) => { rejectTransferStall = reject; });
+    // The deferred is observed by the request/notification races below even
+    // when the provider never starts a transfer.
+    void transferStalled.catch(() => undefined);
     const sizes: Array<{ result: number; wrapper: number }> = [];
+    const elapsedMs = () => Math.round(performance.now() - (transferStartedAt.value ?? testStartedAt));
     const failureEvidence = () => {
       const evidence = bundle.evidence();
       return {
         sizes: sizes.slice(-8),
+        transfer: {
+          elapsedMs: elapsedMs(),
+          lastCalls: transferCalls.slice(-8),
+          activeCall: activeTransferCall,
+          failedCall: failedTransferCall,
+          maxCompletionGapMs: Math.max(0, ...transferCalls.map((call) => call.gapMs)),
+        },
         notifications: notifications.slice(-12),
         runnerExited: evidence.runnerExited,
         runnerExitCode: evidence.runnerExitCode,
@@ -109,21 +142,94 @@ for await (const line of createInterface({input:process.stdin})) {
         diagnostics: evidence.diagnostics.slice(-8).map((message) => message.slice(0, 300)),
       };
     };
+    const testStartedAt = performance.now();
+    const armTransferStall = (label: string) => {
+      if (transferClosed || transferFailure) return;
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        transferFailure = new Error(`PRP transfer made no Authority progress for 15000ms after ${label}: ${JSON.stringify(failureEvidence())}`);
+        rejectTransferStall?.(transferFailure);
+      }, 15_000);
+    };
+    const failTransfer = (error: Error) => {
+      if (transferClosed || transferFailure) return;
+      transferFailure = error;
+      clearTimeout(stallTimer);
+      stallTimer = undefined;
+      rejectTransferStall?.(error);
+    };
+    const requestDuringTransfer = (method: string, params: Record<string, unknown>) =>
+      Promise.race([bundle.transport.request(method, params), transferStalled]);
     bundle.transport.setServerRequestHandler(async request => {
+      if (transferFailure) throw transferFailure;
       const params = request.params;
-      const result = await authority.execute({ tool: String(params.tool), arguments: params.arguments, callId: String(params.callId) });
-      const response = { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] };
-      sizes.push({ result: Buffer.byteLength(JSON.stringify(result)), wrapper: Buffer.byteLength(JSON.stringify(response)) });
-      return response;
+      const tool = String(params.tool);
+      const args = typeof params.arguments === "object" && params.arguments !== null
+        ? params.arguments as Record<string, unknown>
+        : {};
+      if (tool !== READ_TOOL_RESULT) {
+        activePhase = args.variant === "inline" ? "inline" : "large";
+        page = 0;
+      } else {
+        page += 1;
+      }
+      const transferStart = transferStartedAt.value ?? performance.now();
+      transferStartedAt.value ??= transferStart;
+      const offsetBytes = Number.isSafeInteger(args.offsetBytes) ? Number(args.offsetBytes) : null;
+      const startedMs = Math.round(performance.now() - transferStart);
+      const progress = {
+        tool,
+        phase: activePhase,
+        offsetBytes,
+        page: tool === READ_TOOL_RESULT ? page : null,
+        startedMs,
+      };
+      activeTransferCall = progress;
+      if (!stallTimer && transferCalls.length === 0) {
+        armTransferStall(`${tool} phase=${activePhase} page=${progress.page ?? "action"} offset=${offsetBytes ?? "n/a"} started`);
+      }
+      try {
+        const result = await authority.execute({ tool, arguments: params.arguments, callId: String(params.callId) });
+        if (transferFailure) throw transferFailure;
+        const response = { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] };
+        const resultBytes = Buffer.byteLength(JSON.stringify(result));
+        const wrapperBytes = Buffer.byteLength(JSON.stringify(response));
+        const completedAt = performance.now();
+        const completedMs = Math.round(completedAt - transferStart);
+        transferCalls.push({ ...progress, completedMs,
+          gapMs: Math.round(completedAt - (lastCompletedAt ?? transferStart)),
+          resultBytes, wrapperBytes });
+        lastCompletedAt = completedAt;
+        sizes.push({ result: resultBytes, wrapper: wrapperBytes });
+        activeTransferCall = null;
+        armTransferStall(`${tool} phase=${activePhase} page=${progress.page ?? "action"} offset=${offsetBytes ?? "n/a"} response-complete`);
+        return response;
+      } catch (error) {
+        failedTransferCall = {
+          tool,
+          phase: activePhase,
+          offsetBytes,
+          page: progress.page,
+          startedMs,
+          failedMs: Math.round(performance.now() - transferStart),
+          errorType: error instanceof Error ? error.name : "UnknownError",
+        };
+        clearTimeout(stallTimer);
+        stallTimer = undefined;
+        activeTransferCall = null;
+        failTransfer(new Error("PRP Authority request failed"));
+        throw error;
+      }
     });
-    let timer: ReturnType<typeof setTimeout> | undefined;
     let testFailure: unknown;
     let verified = false;
     const notifications: Array<{ method: string; type: unknown; status?: string }> = [];
     try {
-      await bundle.transport.request("initialize", {});
-      await bundle.transport.request("thread/start", { cwd: fixture.workspace, dynamicTools: authority.definitions() });
-      await bundle.transport.request("turn/start", { input: [{ type: "text", text: "Read every saved result page" }] });
+      await requestDuringTransfer("initialize", {});
+      await requestDuringTransfer("thread/start", { cwd: fixture.workspace, dynamicTools: authority.definitions() });
+      transferStartedAt.value = performance.now();
+      armTransferStall("waiting for first Authority response");
+      await requestDuringTransfer("turn/start", { input: [{ type: "text", text: "Read every saved result page" }] });
       await Promise.race([
         (async () => { for await (const notification of bundle.transport.notifications()) {
           notifications.push({ method: notification.method, type: (notification.params.item as { type?: string })?.type,
@@ -132,22 +238,34 @@ for await (const line of createInterface({input:process.stdin})) {
           if (notification.method === "turn/completed") {
             const status = (notification.params.turn as { status?: string })?.status;
             if (status !== "completed") throw new Error(`PRP turn ended with status ${status ?? "unknown"}: ${JSON.stringify(failureEvidence())}`);
+            clearTimeout(stallTimer);
+            stallTimer = undefined;
             return;
           }
           if (notification.method === "turn/failed" || notification.method === "item/failed") {
+            clearTimeout(stallTimer);
+            stallTimer = undefined;
             throw new Error(`PRP emitted terminal ${notification.method}: ${JSON.stringify(failureEvidence())}`);
           }
         } })(),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`Escaped pages did not reach the provider: ${JSON.stringify(failureEvidence())}`)), 15_000); }),
+        transferStalled,
       ]);
       expect(verified, JSON.stringify(failureEvidence())).toBe(true);
       expect(executeTool.mock.calls.map(([call]) => call.parameters)).toEqual([{ variant: "large" }, { variant: "inline" }]);
       expect(sizes.every(size => size.wrapper <= RUNNER_TOOL_RESULT_MAX_BYTES)).toBe(true);
       expect(bundle.evidence().diagnostics).toContain("runnerd authenticated to the durable PRP control plane");
+      console.info(`[PRP fixture] complete ${JSON.stringify({
+        transferMs: elapsedMs(),
+        calls: transferCalls.length,
+        maxCompletionGapMs: Math.max(0, ...transferCalls.map((call) => call.gapMs)),
+        lastCalls: transferCalls.slice(-8),
+      })}`);
     } catch (error) {
       testFailure = new Error(`PRP saved-result test failed: ${error instanceof Error ? error.message : String(error)}; bounded evidence: ${JSON.stringify(failureEvidence())}`, { cause: error });
     } finally {
-      clearTimeout(timer);
+      transferClosed = true;
+      clearTimeout(stallTimer);
+      stallTimer = undefined;
       try {
         await bundle.transport.close();
       } catch (cleanupError) {
