@@ -881,10 +881,40 @@ async function main() {
   process.stdout.write(`${JSON.stringify(receipt)}\n`);
 }
 
+async function flushCliStreams() {
+  await Promise.all([process.stdout, process.stderr].map((stream) => new Promise((resolve, reject) => {
+    stream.write("", (error) => error ? reject(error) : resolve());
+  })));
+}
+
+export async function runCli(operation = main) {
+  let exitCode = 0;
+  // Some imported database helpers keep async work on unref'd handles. Hold a
+  // referenced timer for the lifetime of the awaited CLI operation so Node
+  // cannot run beforeExit while that promise is still pending.
+  const keepAlive = setInterval(() => {}, 60_000);
+  try {
+    try {
+      await operation();
+    } catch (error) {
+      const safe = error instanceof Error ? error.message : "Migration precondition probe failed";
+      try {
+        process.stderr.write(`${JSON.stringify({ ok: false, error: safe.slice(0, 600) })}\n`);
+      } catch {
+        // Preserve failure status even if stderr itself is unavailable.
+      }
+      exitCode = 1;
+    }
+    await flushCliStreams();
+  } catch {
+    exitCode = 1;
+  } finally {
+    clearInterval(keepAlive);
+  }
+  return exitCode;
+}
+
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  main().catch((error) => {
-    const safe = error instanceof Error ? error.message : "Migration precondition probe failed";
-    process.stderr.write(`${JSON.stringify({ ok: false, error: safe.slice(0, 600) })}\n`);
-    process.exitCode = 1;
-  });
+  const exitCode = await runCli();
+  process.exit(exitCode);
 }
