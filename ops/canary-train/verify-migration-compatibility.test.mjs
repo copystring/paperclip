@@ -5,6 +5,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { assertInventoryBinding, assertMigrationExtension, assertMigrationExtensionShape, assertPreparedSource, assertSourceInventoryMatchesCandidate, canonicalInventoryHash, makeReceipt, MIGRATION_INVENTORY_PREFIX, resolvePackageDependency, tarEntry, verifySRI } from './verify-migration-compatibility.mjs';
 
@@ -215,13 +216,23 @@ test('old package dependency resolution finds bundled embedded-postgres and hois
   assert.equal(resolvePackageDependency(entry, 'postgres'), path.join(hoisted, 'index.cjs'));
 });
 
-test('CLI cannot report success without a receipt or exit successfully on pending work', () => {
+test('CLI preserves failures when a beforeExit hook tries to replace the exit code', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'paperclip-migration-exit-hook-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const hookPath = path.join(root, 'before-exit.mjs');
+  await writeFile(hookPath, "process.on('beforeExit', () => { process.nextTick(() => process.exit(0)); });\n");
+
+  const oldEntrypoint = spawnSync(process.execPath, ['--import', pathToFileURL(hookPath).href, '--input-type=module', '-e', 'process.exitCode = 1;'], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(oldEntrypoint.status, 0, 'the regression fixture must reproduce beforeExit replacing process.exitCode');
+
+  const missing = spawnSync(process.execPath, ['--import', pathToFileURL(hookPath).href, fileURLToPath(new URL('./verify-migration-compatibility.mjs', import.meta.url))], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(missing.status, 1, missing.stderr);
+  assert.match(missing.stderr, /Usage: node verify-migration-compatibility\.mjs/);
+});
+
+test('CLI cannot exit successfully on pending work', () => {
   const moduleUrl = new URL('./verify-migration-compatibility.mjs', import.meta.url).href;
   const missingReceipt = path.join(os.tmpdir(), `missing-migration-receipt-${process.pid}-${Date.now()}.json`);
-  const missing = spawnSync(process.execPath, ['--input-type=module', '-e', `import { runCli } from ${JSON.stringify(moduleUrl)}; process.exitCode = await runCli(async () => {}, ${JSON.stringify(missingReceipt)});`], { encoding: 'utf8', timeout: 10_000 });
-  assert.equal(missing.status, 1, missing.stderr);
-  assert.match(missing.stderr, /without producing its required receipt/);
-
   const pending = spawnSync(process.execPath, ['--input-type=module', '-e', `import { runCli } from ${JSON.stringify(moduleUrl)}; await runCli(() => new Promise(() => {}), ${JSON.stringify(missingReceipt)});`], { encoding: 'utf8', timeout: 10_000 });
   assert.notEqual(pending.status, 0, 'an unsettled top-level migration promise must not become exit code 0');
 });

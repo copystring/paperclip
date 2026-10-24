@@ -535,5 +535,7 @@ async function main() {
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  process.exitCode = await runCli(main, process.argv[2]);
+  const exitCode = await runCli(main, process.argv[2]);
+  await Promise.all([process.stdout, process.stderr].map((stream) => new Promise((resolve) => stream.write('', resolve))));
+  process.exit(exitCode);
 }
