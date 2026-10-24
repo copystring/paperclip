@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       canary_version:
-        description: Exact published YYYY.MMDD.0-canary.N version to qualify or release
+        description: Exact published YYYY.MDD.P-canary.N or YYYY.MMDD.P-canary.N version to qualify or release
         required: false
         type: string
       qualification_only:

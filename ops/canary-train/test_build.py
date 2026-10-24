@@ -39,6 +39,17 @@ def make_npm_tarball(name: str, version: str, stamp: dict | None = None) -> tupl
 
 
 class IntegrityAndProvenanceTests(unittest.TestCase):
+    def test_canary_calver_accepts_unpadded_months_patches_and_leap_day(self):
+        accepted = (
+            "2026.327.0-canary.0",       # March 27
+            "2026.407.3-canary.12",      # April 7, nonzero patch
+            "2026.1024.1-canary.17",     # October 24
+            "2024.229.0-canary.1",       # leap day
+        )
+        for version in accepted:
+            with self.subTest(version=version):
+                self.assertEqual(build.validate_canary_version(version), version)
+
     def test_resolves_canary_package_documents_from_registry_tag_urls(self):
         version = "2026.1018.0-canary.9"
         source = "a" * 40
@@ -90,6 +101,12 @@ class IntegrityAndProvenanceTests(unittest.TestCase):
         invalid_versions = (
             "2026.1024.0",
             "2026.1024.0-stable.1",
+            "2026.1324.0-canary.1",
+            "2026.400.0-canary.1",
+            "2026.431.0-canary.1",
+            "2023.229.0-canary.1",
+            "2026.1024.01-canary.1",
+            "2026.1024.1-canary.01",
             "https://registry.npmjs.org/paperclipai/canary",
             "2026.1024.0-canary.17/../../latest",
             "2026.0230.0-canary.17",

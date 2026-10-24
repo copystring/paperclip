@@ -25,7 +25,7 @@ from typing import Any, Iterable
 HEX40 = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 PACKAGE_NAME = re.compile(r"^(?:@[a-z0-9_.-]+/)?[a-z0-9_.-]+$")
-CALVER_CANARY_VERSION = re.compile(r"^(\d{4})\.(\d{4})\.0-canary\.(\d+)$")
+CALVER_CANARY_VERSION = re.compile(r"^(\d{4})\.([1-9]|1[0-2])(\d{2})\.(0|[1-9]\d*)-canary\.(0|[1-9]\d*)$")
 DEFAULT_PACKAGES = ("paperclipai", "@paperclipai/server")
 REGISTRY = "https://registry.npmjs.org"
 GITHUB_API = "https://api.github.com"
@@ -309,10 +309,10 @@ def validate_canary_version(version: str) -> str:
     """Accept only a dated Paperclip prerelease, never an arbitrary registry selector."""
     match = CALVER_CANARY_VERSION.fullmatch(version) if isinstance(version, str) else None
     if not match:
-        raise TrainError("canary version must use YYYY.MMDD.0-canary.N format")
-    year, month_day, _sequence = match.groups()
+        raise TrainError("canary version must use YYYY.MDD.P-canary.N or YYYY.MMDD.P-canary.N format")
+    year, month_text, day_text, _patch, _sequence = match.groups()
     try:
-        date(int(year), int(month_day[:2]), int(month_day[2:]))
+        date(int(year), int(month_text), int(day_text))
     except ValueError as exc:
         raise TrainError("canary version contains an invalid calendar date") from exc
     return version
