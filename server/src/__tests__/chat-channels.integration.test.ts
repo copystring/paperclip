@@ -28,13 +28,14 @@ import { resolveGitHubReviewInstructions } from "../services/chat-channels/githu
 import { githubResponseCommentService } from "../services/chat-github-response-comments.js";
 import { githubReviewCheckService } from "../services/chat-github-checks.js";
 import { githubAutomaticReviewEvent } from "../services/chat-github-events.js";
-import { githubBotToolsForSession, syncGitHubBotTools } from "../services/chat-github-tools.js";
+import { githubBotToolsForSession, githubGuestBotConnectionForSession, syncGitHubBotTools } from "../services/chat-github-tools.js";
 import { buildPaperclipRuntimeMcpServers } from "../services/heartbeat/run-preparation.js";
 import { createAssignedMcpTools } from "../services/native-runtime/assigned-mcp-tools.js";
 import { createToolGatewayService } from "../services/tool-gateway.js";
 import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
 import { initializeRunIdentity } from "../services/run-identity.js";
-import { chatGitHubRegistrations, chatGitHubReviews, chatGitHubConfigurations, toolCatalogEntries } from "@paperclipai/db";
+import { chatRunSourceMessageId } from "../services/chat-channels/run-origin.js";
+import { chatGitHubRegistrations, chatGitHubReviews, chatGitHubConfigurations } from "@paperclipai/db";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as cloudRuntimeIdentity from "../services/cloud-runtime-identity.js";
 import {
@@ -88,6 +89,8 @@ import {
   chatExternalPrincipals,
   chatIdentityLinks,
   joinRequests,
+  toolApplications,
+  toolCatalogEntries,
   chatMessageLinks,
   chatPublications,
   chatSdkState,
@@ -115,6 +118,9 @@ import {
   projects,
   projectWorkspaces,
   toolConnections,
+  toolProfiles,
+  toolProfileEntries,
+  toolProfileBindings,
 } from "@paperclipai/db";
 import { defaultGitHubReviewPolicy, type ChatProvider } from "@paperclipai/shared";
 import { isPaperclipExternalChatTurn } from "@paperclipai/adapter-utils/server-utils";
@@ -3159,6 +3165,112 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       expect(new Set(tools.map(tool => tool.name)).size).toBe(7);
       expect(await githubBotToolsForSession(db, { ...f.session, issueId: randomUUID() })).toEqual([]);
       expect(await readChatConversationsByEndpointId(f.endpoint.id)).toHaveLength(2);
+    });
+    it("keeps delegated GitHub chat discovery task-scoped without failing general MCP discovery", async () => {
+      const f = await toolReplyFixture("github:paperclipai/paperclip:418");
+      const parentIdentity = await initializeRunIdentity(db, {
+        companyId: f.companyId,
+        runId: f.run.id,
+        issueId: f.conversation.issueId!,
+        responsibleUserId: "owner-user",
+        messageIds: [String(f.run.contextSnapshot?.wakeCommentId)],
+        cause: "user_message",
+      });
+      const [childIssue] = await db.insert(issues).values({
+        companyId: f.companyId,
+        title: "Delegated ordinary task",
+        assigneeAgentId: f.assignedAgentId,
+      }).returning();
+      const [childRun] = await db.insert(heartbeatRuns).values({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        nativeIssueId: childIssue.id,
+        status: "running",
+      }).returning();
+      await initializeRunIdentity(db, {
+        companyId: f.companyId,
+        runId: childRun.id,
+        issueId: childIssue.id,
+        responsibleUserId: "owner-user",
+        parentContextId: parentIdentity.id,
+        cause: "delegation",
+      });
+
+      const childSession = { companyId: f.companyId, agentId: f.assignedAgentId, issueId: childIssue.id, runId: childRun.id };
+      const [child] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, childRun.id));
+      await expect(chatRunSourceMessageId(db, child!)).rejects.toMatchObject({ status: 403 });
+      expect(await githubBotToolsForSession(db, childSession)).toEqual([]);
+      await expect(githubGuestBotConnectionForSession(db, childSession)).resolves.toBeNull();
+
+      const [application] = await db.insert(toolApplications).values({
+        companyId: f.companyId,
+        applicationKey: `delegated-mcp-${randomUUID().slice(0, 8)}`,
+        name: `Delegated MCP ${randomUUID()}`,
+        type: "mcp_http",
+      }).returning();
+      const [connection] = await db.insert(toolConnections).values({
+        companyId: f.companyId,
+        applicationId: application.id,
+        name: "Assigned ordinary MCP",
+        uid: `delegated-mcp-${randomUUID()}`,
+        transport: "mcp_remote",
+        authKind: "none",
+        status: "active",
+        enabled: true,
+        healthStatus: "healthy",
+        config: { url: "https://mcp.example.test/mcp" },
+      }).returning();
+      await db.insert(toolCatalogEntries).values({
+        companyId: f.companyId,
+        applicationId: application.id,
+        connectionId: connection.id,
+        name: "ordinary_read",
+        toolName: "ordinary_read",
+        description: "Read an assigned fixture value.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        versionHash: createHash("sha256").update("ordinary_read").digest("hex"),
+        status: "active",
+      });
+      const [profile] = await db.insert(toolProfiles).values({
+        companyId: f.companyId,
+        profileKey: `delegated-mcp-${randomUUID()}`,
+        name: `Delegated MCP profile ${randomUUID()}`,
+        status: "active",
+        defaultAction: "deny",
+      }).returning();
+      await db.insert(toolProfileEntries).values({
+        companyId: f.companyId,
+        profileId: profile.id,
+        selectorType: "connection",
+        connectionId: connection.id,
+        effect: "include",
+      });
+      await db.insert(toolProfileBindings).values({
+        companyId: f.companyId,
+        profileId: profile.id,
+        targetType: "agent",
+        targetId: f.assignedAgentId,
+      });
+
+      const gateway = createToolGatewayService(db);
+      const gatewaySession = await gateway.createSession({
+        companyId: f.companyId,
+        agentId: f.assignedAgentId,
+        runId: childRun.id,
+      });
+      const gatewayTools = await gateway.listToolsForSession(gatewaySession.token);
+      expect(gatewayTools.some(tool => tool.providerType === "paperclip_github_chat")).toBe(false);
+      expect(gatewayTools).toEqual(expect.arrayContaining([
+        expect.objectContaining({ connectionId: connection.id, upstreamToolName: "ordinary_read" }),
+      ]));
+
+      const { id: _conversationId, ...childConversation } = f.conversation;
+      await db.insert(chatConversations).values({
+        ...childConversation,
+        issueId: childIssue.id,
+        externalThreadId: `github:paperclipai/paperclip:delegated:${randomUUID()}`,
+      });
+      await expect(githubGuestBotConnectionForSession(db, childSession)).rejects.toMatchObject({ status: 403 });
     });
     describe("replies in review finding threads behind an active run", () => {
       const pr = "github:paperclipai/paperclip:17044";
