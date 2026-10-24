@@ -3153,7 +3153,7 @@ index f0501ccb5..ad9add29a 100644
      { runtimeMode: "native", status: "done", reassigned: false },
      { runtimeMode: "legacy", status: "done", reassigned: false },
 diff --git a/server/src/__tests__/issue-recovery-actions.test.ts b/server/src/__tests__/issue-recovery-actions.test.ts
-index e1151c9c8..7a2743549 100644
+index e1151c9c8..17a5a9bfb 100644
 --- a/server/src/__tests__/issue-recovery-actions.test.ts
 +++ b/server/src/__tests__/issue-recovery-actions.test.ts
 @@ -4,7 +4,7 @@ import os from "node:os";
@@ -3165,11 +3165,18 @@ index e1151c9c8..7a2743549 100644
  import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
  import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
  import {
-@@ -2069,6 +2069,188 @@ describeEmbeddedPostgres("issue recovery actions", () => {
+@@ -2069,6 +2069,383 @@ describeEmbeddedPostgres("issue recovery actions", () => {
      expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
    });
  
-+  async function seedPendingReviewReconciliation(settledNoReplayHold = false, stageType: "review" | "approval" = "review") {
++  async function seedPendingReviewReconciliation(
++    settledNoReplayHold = false,
++    stageType: "review" | "approval" = "review",
++    initialStatus: "in_review" | "blocked" = "in_review",
++    targetStatus: "in_review" | "todo" = "in_review",
++    withSuccessor = false,
++    blocker?: "process" | "lease" | "owner",
++  ) {
 +    const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
 +    const stageId = randomUUID();
 +    const reviewState = {
@@ -3186,7 +3193,7 @@ index e1151c9c8..7a2743549 100644
 +      changesRequestedCount: 3,
 +    };
 +    await db.update(issues).set({
-+      status: "in_review",
++      status: initialStatus,
 +      executionState: reviewState,
 +      executionPolicy: {
 +        mode: "normal", commentRequired: true,
@@ -3195,7 +3202,14 @@ index e1151c9c8..7a2743549 100644
 +      },
 +    }).where(eq(issues.id, sourceIssueId));
 +    const previousRunId = randomUUID();
-+    await seedHeartbeatRun({ companyId, agentId: managerId, runId: previousRunId, issueId: sourceIssueId, status: "failed" });
++    await seedHeartbeatRun({ companyId, agentId: initialStatus === "blocked" ? coderId : managerId, runId: previousRunId, issueId: sourceIssueId, status: "failed" });
++    if (blocker === "process") {
++      await db.update(heartbeatRuns).set({ processPid: process.pid }).where(eq(heartbeatRuns.id, previousRunId));
++    } else if (blocker === "lease") {
++      await db.insert(environmentLeases).values({ companyId, issueId: sourceIssueId, heartbeatRunId: previousRunId });
++    } else if (blocker === "owner") {
++      await db.update(issues).set({ assigneeAgentId: managerId }).where(eq(issues.id, sourceIssueId));
++    }
 +    const [action] = await db.insert(issueRecoveryActions).values({
 +      companyId, sourceIssueId, kind: "active_run_watchdog", status: settledNoReplayHold ? "resolved" : "active", outcome: settledNoReplayHold ? "blocked" : null,
 +      ownerType: "board", ownerUserId: null, ownerAgentId: null, previousOwnerAgentId: null,
@@ -3205,26 +3219,51 @@ index e1151c9c8..7a2743549 100644
 +      wakePolicy: { type: "board_escalation" },
 +    }).returning();
 +    const [before] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
++    if (withSuccessor) {
++      await seedHeartbeatRun({ companyId, agentId: managerId, runId: randomUUID(), issueId: sourceIssueId, status: "queued" });
++    }
 +    const app = createApp();
++    const rejected = targetStatus === "todo" || withSuccessor || blocker !== undefined;
 +    const response = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
-+      actionId: action!.id, outcome: "restored", sourceIssueStatus: "in_review",
++      actionId: action!.id, outcome: "restored", sourceIssueStatus: targetStatus,
 +      executionReconciliation: {
 +        runId: previousRunId, providerStopped: true, actionOutcome: "not_performed",
 +        outcomeEvidence: "Provider and process receipts confirm the prior run stopped without an external effect.",
 +      },
-+    }).expect(200);
++    });
++    expect(response.status, JSON.stringify(response.body)).toBe(rejected ? 409 : 200);
++    if (rejected) {
++      const expectedError = targetStatus === "todo"
++        ? /pending review stage/i
++        : withSuccessor
++          ? /already queued or running/i
++          : blocker === "process"
++            ? /previous provider is still running/i
++            : blocker === "lease"
++              ? /environment has not finished releasing/i
++              : /recovery source or task owner changed/i;
++      expect(response.body.error).toMatch(expectedError);
++      const [unchanged] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
++      expect(unchanged!.status).toBe("blocked");
++      expect(unchanged!.executionState).toEqual(reviewState);
++      const [unchangedAction] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
++      if (targetStatus === "todo") expect(unchangedAction!.evidence).toMatchObject({ automaticRecovery: { replay: "blocked" } });
++      return { companyId, sourceIssueId, managerId, coderId, action: unchangedAction!, before: unchanged! };
++    }
 +    expect(response.body.issue.status).toBe("in_review");
 +    const [after] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
-+    expect(after!.executionState).toEqual(before!.executionState);
-+    expect(after!.statusVersion).toBe(before!.statusVersion);
++    expect(after!.executionState).toMatchObject(reviewState);
++    if (initialStatus === "in_review") expect(after!.executionState).toEqual(before!.executionState);
++    expect(after!.statusVersion).toBe(initialStatus === "blocked" ? before!.statusVersion + 1 : before!.statusVersion);
++    expect(after!.assigneeAgentId).toBe(initialStatus === "blocked" ? managerId : coderId);
 +    const [recorded] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
 +    expect(recorded!.evidence).toMatchObject({ continuationDelivery: "pending", reviewContinuation: {
-+      statusVersion: before!.statusVersion,
++      statusVersion: after!.statusVersion,
 +      participantAgentId: managerId,
-+      assigneeAgentId: coderId,
++      assigneeAgentId: after!.assigneeAgentId,
 +      state: reviewState,
 +    } });
-+    return { companyId, sourceIssueId, managerId, coderId, action: recorded!, before: before! };
++    return { companyId, sourceIssueId, managerId, coderId, action: recorded!, before: before!, after: after! };
 +  }
 +
 +  it.each(["review", "approval"] as const)("reconciles a stopped run into the unchanged native %s participant without deciding the review", async (stageType) => {
@@ -3322,10 +3361,157 @@ index e1151c9c8..7a2743549 100644
 +    expect(issue!.executionState).toEqual(before!.executionState);
 +  });
 +
-+  it.each(["status", "stage", "participant", "policy", "live_run"] as const)(
++  it.each(["review", "approval"] as const)(
++    "restores a blocked settled hold into the unchanged native %s reviewer and admits only that stage",
++    async (stageType) => {
++      const { companyId, sourceIssueId, managerId, action, before, after } =
++        await seedPendingReviewReconciliation(true, stageType, "blocked");
++      expect(action.evidence).toMatchObject({
++        continuationDelivery: "pending",
++        reviewContinuation: {
++          statusVersion: after!.statusVersion,
++          participantAgentId: managerId,
++          assigneeAgentId: managerId,
++          state: before!.executionState,
++        },
++      });
++      const heartbeat = await holdReviewDispatchSlot(companyId, managerId);
++      await Promise.all([
++        deliverReconciledExecutions(db, heartbeat.wakeup),
++        deliverReconciledExecutions(db, heartbeat.wakeup),
++      ]);
++      const [wake] = await db.select().from(agentWakeupRequests).where(
++        eq(agentWakeupRequests.idempotencyKey, `execution-reconciliation:${action.id}`),
++      );
++      expect(wake?.runId).toBeTruthy();
++      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wake!.runId!));
++      expect(run).toMatchObject({
++        agentId: managerId,
++        status: "queued",
++        retryOfRunId: null,
++        contextSnapshot: {
++          forceFreshSession: true,
++          source: "execution.review.reconciled",
++          executionStage: {
++            wakeRole: stageType === "approval" ? "approver" : "reviewer",
++            stageId: (before!.executionState as any).currentStageId,
++            stageType,
++          },
++        },
++      });
++      expect(run!.contextSnapshot).not.toHaveProperty("previousRunId");
++      expect(run!.contextSnapshot).not.toHaveProperty("retryOfRunId");
++      const [issue] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
++      expect(issue).toMatchObject({
++        status: "in_review",
++        assigneeAgentId: managerId,
++        statusVersion: after!.statusVersion,
++        executionState: before!.executionState,
++      });
++      const [delivered] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
++      expect(delivered!.evidence).toMatchObject({ continuationDelivery: "delivered", continuationRunId: run!.id });
++    },
++  );
++
++  it("restores an active blocked technical hold into its current agent reviewer", async () => {
++    const { sourceIssueId, managerId, action, before, after } =
++      await seedPendingReviewReconciliation(false, "review", "blocked");
++    expect(action.status).toBe("resolved");
++    expect(action.evidence).toMatchObject({
++      continuationDelivery: "pending",
++      reviewContinuation: {
++        statusVersion: after!.statusVersion,
++        participantAgentId: managerId,
++        assigneeAgentId: managerId,
++        state: before!.executionState,
++      },
++    });
++    expect(after!.status).toBe("in_review");
++    expect(after!.executionState).toMatchObject(before!.executionState);
++  });
++
++  it("rejects blocked-to-todo restoration while a native reviewer still owns a pending stage", async () => {
++    await seedPendingReviewReconciliation(true, "review", "blocked", "todo");
++  });
++
++  it("does not admit a blocked-review reconciliation when a successor is already queued", async () => {
++    await seedPendingReviewReconciliation(true, "review", "blocked", "in_review", true);
++  });
++
++  it.each(["process", "lease", "owner"] as const)(
++    "keeps blocked-review reconciliation closed when its %s proof is unsafe or stale",
++    async (blocker) => {
++      await seedPendingReviewReconciliation(true, "review", "blocked", "in_review", false, blocker);
++    },
++  );
++
++  it("does not turn a blocked human review into an agent reviewer continuation", async () => {
++    const { companyId, coderId, sourceIssueId } = await seedCompany();
++    const reviewerUserId = randomUUID();
++    await db.insert(authUsers).values({
++      id: reviewerUserId,
++      name: "Human reviewer",
++      email: `${reviewerUserId}@example.test`,
++      emailVerified: true,
++      createdAt: new Date(),
++      updatedAt: new Date(),
++    });
++    const stageId = randomUUID();
++    const reviewState = {
++      status: "pending",
++      currentStageId: stageId,
++      currentStageIndex: 0,
++      currentStageType: "review",
++      currentParticipant: { type: "user", agentId: null, userId: reviewerUserId },
++      returnAssignee: { type: "agent", agentId: coderId, userId: null },
++      reviewRequest: { instructions: "A person must review this result." },
++      completedStageIds: [],
++      lastDecisionId: null,
++      lastDecisionOutcome: null,
++      changesRequestedCount: 0,
++    };
++    await db.update(issues).set({
++      status: "blocked",
++      executionState: reviewState,
++      executionPolicy: {
++        mode: "normal", commentRequired: true,
++        stages: [{ id: stageId, type: "review", approvalsNeeded: 1,
++          participants: [{ id: randomUUID(), type: "user", agentId: null, userId: reviewerUserId }] }],
++      },
++    }).where(eq(issues.id, sourceIssueId));
++    const runId = randomUUID();
++    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
++    const [action] = await db.insert(issueRecoveryActions).values({
++      companyId, sourceIssueId, kind: "active_run_watchdog", status: "resolved", outcome: "blocked",
++      ownerType: "board", returnOwnerAgentId: coderId, cause: "uncertain_external_action", fingerprint: runId,
++      nextAction: "Preserve the pending human review.",
++      evidence: { runId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
++    }).returning();
++
++    const response = await request(createApp()).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
++      actionId: action!.id,
++      outcome: "restored",
++      sourceIssueStatus: "in_review",
++      executionReconciliation: {
++        runId,
++        providerStopped: true,
++        actionOutcome: "not_performed",
++        outcomeEvidence: "Provider and process receipts confirm the prior run stopped without an external effect.",
++      },
++    }).expect(409);
++    expect(response.body.error).toMatch(/pending agent review or approval/i);
++    const [issue] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
++    expect(issue).toMatchObject({ status: "blocked", assigneeAgentId: coderId, executionState: reviewState });
++    const [unchangedAction] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
++    expect(unchangedAction!.evidence).toMatchObject({ automaticRecovery: { replay: "blocked" } });
++    expect(unchangedAction!.evidence).not.toHaveProperty("reviewContinuation");
++  });
++
++  it.each(["status", "stage", "participant", "policy", "owner", "foreign_owner", "live_run"] as const)(
 +    "invalidates a reconciled review continuation when current %s no longer matches",
 +    async (change) => {
-+      const { companyId, sourceIssueId, managerId, action } = await seedPendingReviewReconciliation();
++      const { companyId, sourceIssueId, managerId, coderId, action } =
++        await seedPendingReviewReconciliation(true, "review", "blocked");
 +      if (change === "status") await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, sourceIssueId));
 +      if (change === "policy") {
 +        const [issue] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
@@ -3341,6 +3527,15 @@ index e1151c9c8..7a2743549 100644
 +          ...state,
 +          ...(change === "stage" ? { currentStageId: randomUUID() } : { currentParticipant: { ...state.currentParticipant, agentId: randomUUID() } }),
 +        } }).where(eq(issues.id, sourceIssueId));
++      }
++      if (change === "owner") await db.update(issues).set({ assigneeAgentId: coderId }).where(eq(issues.id, sourceIssueId));
++      if (change === "foreign_owner") {
++        const foreignAgentId = randomUUID();
++        await db.insert(agents).values({
++          id: foreignAgentId, companyId, name: "Unrelated reviewer", role: "qa", status: "idle",
++          adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
++        });
++        await db.update(issues).set({ assigneeAgentId: foreignAgentId }).where(eq(issues.id, sourceIssueId));
 +      }
 +      if (change === "live_run") await seedHeartbeatRun({ companyId, agentId: managerId, runId: randomUUID(), issueId: sourceIssueId, status: "queued" });
 +      const wake = vi.fn(async () => ({ id: randomUUID() } as any));
@@ -3825,7 +4020,7 @@ index 11b904bdc..0da7b48e0 100644
    }
  
 diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
-index b2cecd741..f28691046 100644
+index b2cecd741..2acff94c1 100644
 --- a/server/src/routes/issues.ts
 +++ b/server/src/routes/issues.ts
 @@ -1,4 +1,5 @@
@@ -3834,15 +4029,17 @@ index b2cecd741..f28691046 100644
  import { parseObject } from "../adapters/utils.js";
  import { prepareRestrictedWorkspaceRetry } from "../services/restricted-workspace-retry.js";
  import { issueSummariesQuerySchema, type IssueSummary } from "@paperclipai/shared";
-@@ -34,6 +35,7 @@ import { EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from
+@@ -34,6 +35,9 @@ import { EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from
  import {
    validateExecutionReconciliation,
    markExecutionReconciliation,
 +  captureReconciledReviewContinuation,
++  hasPendingReconciledReview,
++  rebindReconciledReviewContinuation,
  } from "../services/execution-recovery-resolution.js";
  import {
    storedSteeringAcknowledgement,
-@@ -273,7 +275,7 @@ import {
+@@ -273,7 +277,7 @@ import {
  } from "../attachment-types.js";
  import { retainBacklogHumanAssignment } from "../services/human-directed-work.js";
  import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
@@ -3851,7 +4048,7 @@ index b2cecd741..f28691046 100644
  import { createSecretProposalsService } from "../services/secret-proposals.js";
  import { notifySecretProposalResolution } from "../services/secret-proposal-notifications.js";
  import {
-@@ -9516,6 +9518,32 @@ export function issueRoutes(
+@@ -9516,6 +9520,32 @@ export function issueRoutes(
      res.status(202).json(receipt);
    });
  
@@ -3884,15 +4081,30 @@ index b2cecd741..f28691046 100644
    router.post("/issues/:id/recovery-actions/resume-workspace-finalization", validate(resumeWorkspaceFinalizationSchema), async (req, res) => {
      assertBoard(req);
      const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
-@@ -9633,6 +9661,7 @@ export function issueRoutes(
+@@ -9633,6 +9663,22 @@ export function issueRoutes(
            .for("update")
            .then((rows) => rows[0] ?? null);
          if (!lockedIssue) throw notFound("Issue not found");
 +        let reviewContinuationBinding: ReturnType<typeof captureReconciledReviewContinuation> = null;
++
++        if (
++          outcome === "restored" && sourceIssueStatus === "todo" &&
++          lockedIssue.status === "blocked" &&
++          hasPendingReconciledReview({
++            status: lockedIssue.status,
++            executionState: lockedIssue.executionState,
++            executionPolicy: lockedIssue.executionPolicy,
++          })
++        ) {
++          throw conflict(
++            "This task has a pending review stage. Restore it to In Review for the current reviewer; do not return it to the executor.",
++            { code: "pending_review_requires_reviewer_continuation" },
++          );
++        }
  
          // Retained files are a source-scoped obligation, independent of the
          // current task owner/generation and any newer active recovery incident.
-@@ -9700,13 +9729,33 @@ export function issueRoutes(
+@@ -9700,13 +9746,37 @@ export function issueRoutes(
                assertBoard(req);
                if (
                  activeRecoveryAction ||
@@ -3911,9 +4123,10 @@ index b2cecd741..f28691046 100644
 +                  assigneeAgentId: lockedIssue.assigneeAgentId,
 +                  executionState: lockedIssue.executionState,
 +                  executionPolicy: lockedIssue.executionPolicy,
++                  allowBlockedSource: lockedIssue.status === "blocked",
 +                });
-+                if (lockedIssue.status !== "in_review" || !reviewContinuationBinding) {
-+                  throw conflict("A settled no-replay hold can continue only the unchanged current pending review.");
++                if (!reviewContinuationBinding || !["in_review", "blocked"].includes(lockedIssue.status)) {
++                  throw conflict("A settled no-replay hold can continue only an unchanged pending agent review or approval.");
 +                }
 +              }
 +              await validateExecutionReconciliation({
@@ -3923,28 +4136,34 @@ index b2cecd741..f28691046 100644
 +                agentId: lockedIssue.assigneeAgentId,
 +                sourceRunId: settled.evidence.runId ?? settled.evidence.sourceRunId,
 +                decision: executionReconciliation,
++                ...(lockedIssue.status === "blocked" && reviewContinuationBinding
++                  ? { reviewContinuation: reviewContinuationBinding }
++                  : {}),
 +              });
                const [reopened] = await tx
                  .update(issueRecoveryActions)
                  .set({ status: "active", outcome: null, resolvedAt: null })
-@@ -9871,6 +9920,29 @@ export function issueRoutes(
+@@ -9871,6 +9941,35 @@ export function issueRoutes(
                activeRecoveryAction.evidence.sourceRunId,
              decision: executionReconciliation,
            });
 +        } else if (
-+          sourceIssueStatus === "in_review" && lockedIssue.status === "in_review" &&
++          sourceIssueStatus === "in_review" &&
 +          outcome === "restored" && requiresExecutionReconciliation(activeRecoveryAction.cause)
 +        ) {
 +          assertBoard(req);
-+          reviewContinuationBinding ??= captureReconciledReviewContinuation({
-+            status: lockedIssue.status,
-+            statusVersion: lockedIssue.statusVersion,
-+            assigneeAgentId: lockedIssue.assigneeAgentId,
-+            executionState: lockedIssue.executionState,
-+            executionPolicy: lockedIssue.executionPolicy,
-+          });
 +          if (!reviewContinuationBinding) {
-+            throw conflict("Only the unchanged current pending review can be continued after reconciliation.");
++            reviewContinuationBinding = captureReconciledReviewContinuation({
++              status: lockedIssue.status,
++              statusVersion: lockedIssue.statusVersion,
++              assigneeAgentId: lockedIssue.assigneeAgentId,
++              executionState: lockedIssue.executionState,
++              executionPolicy: lockedIssue.executionPolicy,
++              allowBlockedSource: lockedIssue.status === "blocked",
++            });
++          }
++          if (!reviewContinuationBinding || !["in_review", "blocked"].includes(lockedIssue.status)) {
++            throw conflict("Only an unchanged pending agent review or approval can be continued after reconciliation.");
 +          }
 +          await validateExecutionReconciliation({
 +            db: tx as unknown as Db,
@@ -3953,19 +4172,64 @@ index b2cecd741..f28691046 100644
 +            agentId: lockedIssue.assigneeAgentId,
 +            sourceRunId: activeRecoveryAction.evidence.runId ?? activeRecoveryAction.evidence.sourceRunId,
 +            decision: executionReconciliation,
++            ...(lockedIssue.status === "blocked"
++              ? { reviewContinuation: reviewContinuationBinding }
++              : {}),
 +          });
          } else if (executionReconciliation) {
            throw conflict(
              "An execution reconciliation must target the current execution recovery action and continue the task.",
-@@ -9933,6 +10005,7 @@ export function issueRoutes(
-             chatRetry
-               ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
-               : undefined,
-+            reviewContinuationBinding ? { reviewContinuation: reviewContinuationBinding } : undefined,
-           );
+@@ -9922,19 +10021,6 @@ export function issueRoutes(
+           }
          }
+ 
+-        if (executionReconciliation) {
+-          // The authorized chat retry is the sole durable delivery owner.
+-          // Never also enqueue a generic successor that lacks chat provenance.
+-          await markExecutionReconciliation(
+-            tx as unknown as Db,
+-            activeRecoveryAction,
+-            executionReconciliation,
+-            actor.actorId,
+-            chatRetry
+-              ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
+-              : undefined,
+-          );
+-        }
          let issue = lockedIssue;
-@@ -15654,6 +15727,11 @@ export function issueRoutes(
+         const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
+         if (outcome === "blocked" && sourceStatusChanged) {
+@@ -10080,6 +10166,29 @@ export function issueRoutes(
+           issue = updatedIssue;
+         }
+ 
++        if (executionReconciliation) {
++          if (reviewContinuationBinding && lockedIssue.status === "blocked" && sourceIssueStatus === "in_review") {
++            const rebound = rebindReconciledReviewContinuation(reviewContinuationBinding, issue);
++            if (!rebound) {
++              throw conflict("The pending review changed while restoring it. Refresh before continuing the reviewer.");
++            }
++            reviewContinuationBinding = rebound;
++          }
++          // Bind delivery to the committed issue version and current review
++          // owner. The transaction rolls back both the issue transition and
++          // recovery evidence if either check fails.
++          await markExecutionReconciliation(
++            tx as unknown as Db,
++            activeRecoveryAction,
++            executionReconciliation,
++            actor.actorId,
++            chatRetry
++              ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
++              : undefined,
++            reviewContinuationBinding ? { reviewContinuation: reviewContinuationBinding } : undefined,
++          );
++        }
++
+         const recordedOutcome =
+           outcome === "restored" &&
+           issue.status === "todo" &&
+@@ -15654,6 +15763,11 @@ export function issueRoutes(
                reopened,
                currentStatus: issue.status,
              });
@@ -3977,7 +4241,7 @@ index b2cecd741..f28691046 100644
  
            if (
              assigneeId &&
-@@ -15667,6 +15745,9 @@ export function issueRoutes(
+@@ -15667,6 +15781,9 @@ export function issueRoutes(
                reason: reopened
                  ? "issue_reopened_via_comment"
                  : "issue_commented",
@@ -3987,7 +4251,7 @@ index b2cecd741..f28691046 100644
                payload: {
                  issueId: id,
                  commentId: comment.id,
-@@ -15692,6 +15773,7 @@ export function issueRoutes(
+@@ -15692,6 +15809,7 @@ export function issueRoutes(
                  commentId: comment.id,
                  wakeCommentId: comment.id,
                  source: reopened ? "issue.comment.reopen" : "issue.comment",
@@ -4038,7 +4302,7 @@ index 9f585d4ab..41faa8bf5 100644
      await db.delete(principalPermissionGrants); await db.delete(companyMemberships); await db.delete(authUsers);
      await db.delete(agents); await db.delete(companies);
 diff --git a/server/src/services/execution-recovery-resolution.ts b/server/src/services/execution-recovery-resolution.ts
-index e56141565..fc3f04550 100644
+index e56141565..97ef97a5b 100644
 --- a/server/src/services/execution-recovery-resolution.ts
 +++ b/server/src/services/execution-recovery-resolution.ts
 @@ -2,6 +2,7 @@ import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notificatio
@@ -4049,7 +4313,7 @@ index e56141565..fc3f04550 100644
  import { canonicalExecutionUuid } from "./execution-identity.js";
  import { claimedAdapterType, conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
  import { persistActivity } from "./activity-log.js";
-@@ -23,12 +24,58 @@ import {
+@@ -23,12 +24,116 @@ import {
    EXECUTION_RECONCILIATION_CAUSES,
    type ExecutionReconciliation,
  } from "@paperclipai/shared";
@@ -4081,6 +4345,27 @@ index e56141565..fc3f04550 100644
 +  };
 +}
 +
++function resolvePendingReviewState(executionState: unknown, executionPolicy: unknown) {
++  const state = parseIssueExecutionState(executionState);
++  const policy = normalizeIssueExecutionPolicy(executionPolicy);
++  const stage = policy?.stages.find((candidate) => candidate.id === state?.currentStageId);
++  const participant = state?.currentParticipant;
++  const participantConfigured = participant && stage?.participants.some((candidate) =>
++    participant.type === "agent"
++      ? candidate.type === "agent" && candidate.agentId === participant.agentId
++      : candidate.type === "user" && candidate.userId === participant.userId,
++  );
++  if (
++    !state || state.status !== "pending" ||
++    !["review", "approval"].includes(state.currentStageType ?? "") ||
++    !state.currentStageId || !participant || !policy || !stage ||
++    stage.type !== state.currentStageType ||
++    policy.stages.indexOf(stage) !== state.currentStageIndex ||
++    !participantConfigured
++  ) return null;
++  return { state, policy, stage, participant };
++}
++
 +/** Capture only a real, currently pending native review owned by an agent. */
 +export function captureReconciledReviewContinuation(input: {
 +  status: string;
@@ -4088,28 +4373,117 @@ index e56141565..fc3f04550 100644
 +  assigneeAgentId: string | null;
 +  executionState: unknown;
 +  executionPolicy: unknown;
++  allowBlockedSource?: boolean;
 +}): ReconciledReviewContinuationBinding | null {
-+  const state = input.status === "in_review" ? parseIssueExecutionState(input.executionState) : null;
-+  const policy = input.status === "in_review" ? normalizeIssueExecutionPolicy(input.executionPolicy) : null;
-+  const policyStage = policy?.stages.find((stage) => stage.id === state?.currentStageId);
-+  const participantAgentId = state?.currentParticipant?.type === "agent"
-+    ? state.currentParticipant.agentId
++  const sourceStatusAllowed = input.status === "in_review" ||
++    (input.allowBlockedSource === true && input.status === "blocked");
++  const pending = sourceStatusAllowed
++    ? resolvePendingReviewState(input.executionState, input.executionPolicy)
++    : null;
++  const participantAgentId = pending?.participant.type === "agent"
++    ? pending.participant.agentId
 +    : null;
 +  if (
-+    !state || state.status !== "pending" ||
-+    !["review", "approval"].includes(state.currentStageType ?? "") ||
-+    !state.currentStageId || !participantAgentId || !policy || !policyStage ||
-+    policyStage.type !== state.currentStageType ||
-+    policy.stages.indexOf(policyStage) !== state.currentStageIndex ||
-+    !policyStage.participants.some((participant) => participant.type === "agent" && participant.agentId === participantAgentId)
++    !pending || !participantAgentId
 +  ) return null;
-+  return { statusVersion: input.statusVersion, state, policy, participantAgentId, assigneeAgentId: input.assigneeAgentId };
++  return {
++    statusVersion: input.statusVersion,
++    state: pending.state,
++    policy: pending.policy,
++    participantAgentId,
++    assigneeAgentId: input.assigneeAgentId,
++  };
++}
++
++/** Detect a coherent pending review even when the task is held as blocked. */
++export function hasPendingReconciledReview(input: {
++  status: string;
++  executionState: unknown;
++  executionPolicy: unknown;
++}): boolean {
++  if (input.status !== "blocked" && input.status !== "in_review") return false;
++  return resolvePendingReviewState(input.executionState, input.executionPolicy) !== null;
++}
++
++/** Bind delivery to the post-transition version only if the same review survived. */
++export function rebindReconciledReviewContinuation(
++  previous: ReconciledReviewContinuationBinding,
++  issue: {
++    status: string;
++    statusVersion: number;
++    assigneeAgentId: string | null;
++    executionState: unknown;
++    executionPolicy: unknown;
++  },
++): ReconciledReviewContinuationBinding | null {
++  const current = captureReconciledReviewContinuation(issue);
++  if (!current || issue.status !== "in_review" ||
++      current.participantAgentId !== previous.participantAgentId ||
++      current.assigneeAgentId !== previous.participantAgentId ||
++      !isDeepStrictEqual(
++        { ...current.state, monitor: current.state.monitor ?? null },
++        { ...previous.state, monitor: previous.state.monitor ?? null },
++      ) ||
++      !isDeepStrictEqual(current.policy, previous.policy)) return null;
++  return current;
 +}
 +
  /** An operator records observed outcomes; this is not permission to blindly retry. */
  export async function validateExecutionReconciliation(input: {
    db: Db;
-@@ -176,8 +223,11 @@ export async function markExecutionReconciliation(
+@@ -37,6 +142,8 @@ export async function validateExecutionReconciliation(input: {
+   agentId: string | null;
+   sourceRunId: unknown;
+   decision: ExecutionReconciliation | undefined;
++  /** Exact pending review captured while its issue is held as blocked. */
++  reviewContinuation?: ReconciledReviewContinuationBinding;
+   /** Board-only source repair: never authorize a continuation of this run. */
+   workspaceRepairOnly?: boolean;
+ }) {
+@@ -67,6 +174,13 @@ export async function validateExecutionReconciliation(input: {
+     review?.status === "pending" &&
+     review.currentParticipant?.type === "agent" &&
+     review.currentParticipant.agentId === run?.agentId;
++  const blockedReviewBindingMatches = input.reviewContinuation !== undefined &&
++    task?.status === "blocked" &&
++    task.statusVersion === input.reviewContinuation.statusVersion &&
++    task.assigneeAgentId === input.reviewContinuation.assigneeAgentId &&
++    isDeepStrictEqual(parseIssueExecutionState(task.executionState), input.reviewContinuation.state) &&
++    isDeepStrictEqual(normalizeIssueExecutionPolicy(task.executionPolicy), input.reviewContinuation.policy) &&
++    run?.agentId === input.reviewContinuation.participantAgentId;
+   const retainedWorkspace = hasRequiredWorkspaceRecovery(run?.resultJson);
+   const repairOnly = input.workspaceRepairOnly === true && retainedWorkspace;
+   const terminalRepairSource = ["failed", "interrupted", "timed_out", "cancelled"].includes(run?.status ?? "") ||
+@@ -75,7 +189,8 @@ export async function validateExecutionReconciliation(input: {
+     (input.workspaceRepairOnly && !retainedWorkspace) ||
+     !run ||
+     !task ||
+-    (!repairOnly && (task.assigneeAgentId !== agentId || (run.agentId !== agentId && !isCurrentReviewer))) ||
++    (!repairOnly && (task.assigneeAgentId !== agentId ||
++      (run.agentId !== agentId && !isCurrentReviewer && !blockedReviewBindingMatches))) ||
+     (run.nativeIssueId ?? run.contextSnapshot?.issueId) !== issueId ||
+     !terminalRepairSource
+   ) {
+@@ -154,6 +269,18 @@ export async function validateExecutionReconciliation(input: {
+     throw conflict(
+       "The previous execution environment has not finished releasing its authority.",
+     );
++  if (input.reviewContinuation) {
++    const activeSuccessors = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
++      eq(heartbeatRuns.companyId, companyId),
++      inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
++      or(
++        eq(heartbeatRuns.nativeIssueId, issueId),
++        and(isNull(heartbeatRuns.nativeIssueId), sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}::text`),
++      ),
++    )).limit(1);
++    if (activeSuccessors.length)
++      throw conflict("Another execution is already queued or running for this review. Inspect it before continuing.");
++  }
+   if (!repairOnly) await buildExecutionContinuation({
+     db,
+     companyId,
+@@ -176,8 +303,11 @@ export async function markExecutionReconciliation(
    decision: ExecutionReconciliation,
    actorId: string,
    deliveryOwner?: { kind: "chat_failed_run_retry"; actionId: string },
@@ -4122,7 +4496,7 @@ index e56141565..fc3f04550 100644
    if (options?.workspaceRepairOnly && (deliveryOwner || !hasRequiredWorkspaceRecovery(action.evidence))) {
      throw conflict("Workspace repair must target the retained source without a continuation owner.");
    }
-@@ -230,6 +280,7 @@ export async function markExecutionReconciliation(
+@@ -230,6 +360,7 @@ export async function markExecutionReconciliation(
              recordedAt: new Date().toISOString(),
            },
            continuationDelivery: options?.workspaceRepairOnly ? "not_requested" : deliveryOwner ? "delegated" : "pending",
@@ -4130,7 +4504,7 @@ index e56141565..fc3f04550 100644
            ...(deliveryOwner ? { continuationDeliveryOwner: deliveryOwner } : {}),
          },
        })
-@@ -260,7 +311,9 @@ export async function deliverReconciledExecutions(
+@@ -260,7 +391,9 @@ export async function deliverReconciledExecutions(
      try {
        const decision = action.evidence.executionReconciliation as
          ExecutionReconciliation | undefined;
@@ -4141,7 +4515,7 @@ index e56141565..fc3f04550 100644
        const pendingDecision = and(
          eq(issueRecoveryActions.companyId, action.companyId),
          eq(issueRecoveryActions.id, action.id),
-@@ -277,10 +330,32 @@ export async function deliverReconciledExecutions(
+@@ -277,10 +410,32 @@ export async function deliverReconciledExecutions(
              eq(issues.id, action.sourceIssueId),
            ),
          );
@@ -4177,7 +4551,7 @@ index e56141565..fc3f04550 100644
        ) {
          await db
            .update(issueRecoveryActions)
-@@ -290,39 +365,61 @@ export async function deliverReconciledExecutions(
+@@ -290,39 +445,61 @@ export async function deliverReconciledExecutions(
            .where(pendingDecision);
          continue;
        }
@@ -4259,10 +4633,10 @@ index e56141565..fc3f04550 100644
              .update(issueRecoveryActions)
              .set({
 diff --git a/server/src/services/heartbeat/queue.test.ts b/server/src/services/heartbeat/queue.test.ts
-index 9af4a5ac9..31db6c12a 100644
+index 9af4a5ac9..8e03f67b9 100644
 --- a/server/src/services/heartbeat/queue.test.ts
 +++ b/server/src/services/heartbeat/queue.test.ts
-@@ -113,6 +113,205 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
+@@ -113,6 +113,211 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
      return { ...seeded, recipient, pending };
    }
  
@@ -4301,7 +4675,13 @@ index 9af4a5ac9..31db6c12a 100644
 +
 +  function wireRealRelease(db: Db) {
 +    const deps = callbacks(db);
-+    deps.getAgent.mockResolvedValue(null);
++    deps.getAgent.mockImplementation(async (agentId) => {
++      const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
++      if (!agent) throw new Error("Queue fixture agent is missing");
++      return agent;
++    });
++    // Exercise real queue promotion without granting provider dispatch.
++    deps.canStartNewExternalBotWork.mockResolvedValue(false);
 +    const release = createReleaseIssueExecution({ issueLock: createPostgresWakeQueueAdapter(db, {
 +      resolveResponsibleUserId: async () => "queue-test-user",
 +      getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
