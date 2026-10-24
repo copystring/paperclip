@@ -75,6 +75,8 @@ jobs:
             args+=(--canary-version "$CANARY_VERSION")
           fi
           python3 ops/canary-train/build.py "${args[@]}"
+      - name: Verify composed native integration scheduling
+        run: node "$RUNNER_TEMP/migration-source/scripts/__tests__/run-vitest-stable-shard.test.mjs"
       - name: Verify migration fixtures before merge
         run: |
           mkdir -p "$RUNNER_TEMP/migration-fixture-receipt"
