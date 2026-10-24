@@ -2,13 +2,112 @@ import { existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { startRunnerApiTestServer } from "../../__tests__/helpers/runner-api-server.js";
 import { createRunnerdCodexTransport, defaultCapabilityRunnerdBinary } from "../../vendor/paperclip-runner/index.js";
 import { createAssignedMcpTools } from "./assigned-mcp-tools.js";
 import { PaperclipRunnerToolAuthority } from "./paperclip-runner-tool-authority.js";
 import { READ_TOOL_RESULT, RUNNER_TOOL_RESULT_MAX_BYTES } from "./runner-tool-results.js";
 import type { ToolGatewayService } from "../tool-gateway.js";
+
+function createPrpTransferWatchdog(timeoutMs: number, evidence: () => unknown) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let started = false;
+  let closed = false;
+  let failure: Error | undefined;
+  let rejectWatchdog: ((error: Error) => void) | undefined;
+  const promise = new Promise<never>((_resolve, reject) => { rejectWatchdog = reject; });
+  void promise.catch(() => undefined);
+  const schedule = (label: string) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      failure = new Error(`PRP transfer made no Authority progress for ${timeoutMs}ms after ${label}: ${JSON.stringify(evidence())}`);
+      rejectWatchdog?.(failure);
+    }, timeoutMs);
+  };
+  return {
+    promise,
+    get failure() { return failure; },
+    start(label: string) {
+      if (started || closed || failure) return;
+      started = true;
+      schedule(label);
+    },
+    responseCompleted(label: string) {
+      if (!started || closed || failure) return;
+      schedule(label);
+    },
+    fail(error: Error) {
+      if (closed || failure) return;
+      failure = error;
+      clearTimeout(timer);
+      timer = undefined;
+      rejectWatchdog?.(error);
+    },
+    close() {
+      closed = true;
+      clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+}
+
+describe("PRP transfer watchdog", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("fails when the first Authority response never arrives", async () => {
+    vi.useFakeTimers();
+    const watchdog = createPrpTransferWatchdog(15_000, () => ({ phase: "waiting" }));
+    watchdog.start("waiting for first Authority response");
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(watchdog.failure).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(watchdog.promise).rejects.toThrow("15000ms");
+  });
+
+  it("does not reset on request start, but advances after a completed response", async () => {
+    vi.useFakeTimers();
+    const requestStartWatchdog = createPrpTransferWatchdog(15_000, () => ({}));
+    requestStartWatchdog.start("first response");
+    await vi.advanceTimersByTimeAsync(10_000);
+    requestStartWatchdog.start("request started");
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(requestStartWatchdog.failure).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(requestStartWatchdog.promise).rejects.toThrow("first response");
+
+    const responseWatchdog = createPrpTransferWatchdog(15_000, () => ({}));
+    responseWatchdog.start("first response");
+    await vi.advanceTimersByTimeAsync(10_000);
+    responseWatchdog.responseCompleted("first response completed");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(responseWatchdog.failure).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(responseWatchdog.failure).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(responseWatchdog.promise).rejects.toThrow("first response completed");
+  });
+
+  it("rejects the observed promise immediately on an Authority error", async () => {
+    vi.useFakeTimers();
+    const watchdog = createPrpTransferWatchdog(15_000, () => ({}));
+    watchdog.start("request in progress");
+    const failure = new Error("Authority request failed");
+    watchdog.fail(failure);
+    await expect(watchdog.promise).rejects.toBe(failure);
+    expect(watchdog.failure).toBe(failure);
+  });
+
+  it("does not rearm after close", async () => {
+    vi.useFakeTimers();
+    const watchdog = createPrpTransferWatchdog(15_000, () => ({}));
+    watchdog.start("request in progress");
+    watchdog.close();
+    watchdog.responseCompleted("late response");
+    await vi.advanceTimersByTimeAsync(15_001);
+    expect(watchdog.failure).toBeUndefined();
+  });
+});
 
 describe("saved assigned results through actual PRP", () => {
   let server: Awaited<ReturnType<typeof startRunnerApiTestServer>>;
@@ -111,15 +210,7 @@ for await (const line of createInterface({input:process.stdin})) {
     let activePhase = "large";
     let page = 0;
     let lastCompletedAt: number | undefined;
-    let transferClosed = false;
-    let transferFailure: Error | undefined;
     let failedTransferCall: { tool: string; phase: string; offsetBytes: number | null; page: number | null; startedMs: number; failedMs: number; errorType: string } | null = null;
-    let stallTimer: ReturnType<typeof setTimeout> | undefined;
-    let rejectTransferStall: ((error: Error) => void) | undefined;
-    const transferStalled = new Promise<never>((_resolve, reject) => { rejectTransferStall = reject; });
-    // The deferred is observed by the request/notification races below even
-    // when the provider never starts a transfer.
-    void transferStalled.catch(() => undefined);
     const sizes: Array<{ result: number; wrapper: number }> = [];
     const elapsedMs = () => Math.round(performance.now() - (transferStartedAt.value ?? testStartedAt));
     const failureEvidence = () => {
@@ -143,25 +234,12 @@ for await (const line of createInterface({input:process.stdin})) {
       };
     };
     const testStartedAt = performance.now();
-    const armTransferStall = (label: string) => {
-      if (transferClosed || transferFailure) return;
-      clearTimeout(stallTimer);
-      stallTimer = setTimeout(() => {
-        transferFailure = new Error(`PRP transfer made no Authority progress for 15000ms after ${label}: ${JSON.stringify(failureEvidence())}`);
-        rejectTransferStall?.(transferFailure);
-      }, 15_000);
-    };
-    const failTransfer = (error: Error) => {
-      if (transferClosed || transferFailure) return;
-      transferFailure = error;
-      clearTimeout(stallTimer);
-      stallTimer = undefined;
-      rejectTransferStall?.(error);
-    };
+    const transferWatchdog = createPrpTransferWatchdog(15_000, failureEvidence);
+    const transferStalled = transferWatchdog.promise;
     const requestDuringTransfer = (method: string, params: Record<string, unknown>) =>
       Promise.race([bundle.transport.request(method, params), transferStalled]);
     bundle.transport.setServerRequestHandler(async request => {
-      if (transferFailure) throw transferFailure;
+      if (transferWatchdog.failure) throw transferWatchdog.failure;
       const params = request.params;
       const tool = String(params.tool);
       const args = typeof params.arguments === "object" && params.arguments !== null
@@ -185,12 +263,9 @@ for await (const line of createInterface({input:process.stdin})) {
         startedMs,
       };
       activeTransferCall = progress;
-      if (!stallTimer && transferCalls.length === 0) {
-        armTransferStall(`${tool} phase=${activePhase} page=${progress.page ?? "action"} offset=${offsetBytes ?? "n/a"} started`);
-      }
       try {
         const result = await authority.execute({ tool, arguments: params.arguments, callId: String(params.callId) });
-        if (transferFailure) throw transferFailure;
+        if (transferWatchdog.failure) throw transferWatchdog.failure;
         const response = { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] };
         const resultBytes = Buffer.byteLength(JSON.stringify(result));
         const wrapperBytes = Buffer.byteLength(JSON.stringify(response));
@@ -202,7 +277,7 @@ for await (const line of createInterface({input:process.stdin})) {
         lastCompletedAt = completedAt;
         sizes.push({ result: resultBytes, wrapper: wrapperBytes });
         activeTransferCall = null;
-        armTransferStall(`${tool} phase=${activePhase} page=${progress.page ?? "action"} offset=${offsetBytes ?? "n/a"} response-complete`);
+        transferWatchdog.responseCompleted(`${tool} phase=${activePhase} page=${progress.page ?? "action"} offset=${offsetBytes ?? "n/a"} response-complete`);
         return response;
       } catch (error) {
         failedTransferCall = {
@@ -214,10 +289,8 @@ for await (const line of createInterface({input:process.stdin})) {
           failedMs: Math.round(performance.now() - transferStart),
           errorType: error instanceof Error ? error.name : "UnknownError",
         };
-        clearTimeout(stallTimer);
-        stallTimer = undefined;
         activeTransferCall = null;
-        failTransfer(new Error("PRP Authority request failed"));
+        transferWatchdog.fail(new Error("PRP Authority request failed", { cause: error }));
         throw error;
       }
     });
@@ -228,7 +301,7 @@ for await (const line of createInterface({input:process.stdin})) {
       await requestDuringTransfer("initialize", {});
       await requestDuringTransfer("thread/start", { cwd: fixture.workspace, dynamicTools: authority.definitions() });
       transferStartedAt.value = performance.now();
-      armTransferStall("waiting for first Authority response");
+      transferWatchdog.start("waiting for first Authority response");
       await requestDuringTransfer("turn/start", { input: [{ type: "text", text: "Read every saved result page" }] });
       await Promise.race([
         (async () => { for await (const notification of bundle.transport.notifications()) {
@@ -238,13 +311,11 @@ for await (const line of createInterface({input:process.stdin})) {
           if (notification.method === "turn/completed") {
             const status = (notification.params.turn as { status?: string })?.status;
             if (status !== "completed") throw new Error(`PRP turn ended with status ${status ?? "unknown"}: ${JSON.stringify(failureEvidence())}`);
-            clearTimeout(stallTimer);
-            stallTimer = undefined;
+            transferWatchdog.close();
             return;
           }
           if (notification.method === "turn/failed" || notification.method === "item/failed") {
-            clearTimeout(stallTimer);
-            stallTimer = undefined;
+            transferWatchdog.close();
             throw new Error(`PRP emitted terminal ${notification.method}: ${JSON.stringify(failureEvidence())}`);
           }
         } })(),
@@ -263,9 +334,7 @@ for await (const line of createInterface({input:process.stdin})) {
     } catch (error) {
       testFailure = new Error(`PRP saved-result test failed: ${error instanceof Error ? error.message : String(error)}; bounded evidence: ${JSON.stringify(failureEvidence())}`, { cause: error });
     } finally {
-      transferClosed = true;
-      clearTimeout(stallTimer);
-      stallTimer = undefined;
+      transferWatchdog.close();
       try {
         await bundle.transport.close();
       } catch (cleanupError) {
