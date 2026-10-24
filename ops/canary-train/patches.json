@@ -83,7 +83,7 @@
       "integrationPatch": {
         "number": 11,
         "path": "backport-11.patch",
-        "sha256": "b7fd57bd6cad6de1651b4a3cc59be96c3446cf4b83d26fefdab9c3a226dd560b"
+        "sha256": "387e5345ecc4d7ee431c316d92bafd6d009076b6233a4c8162942b576df8d9c5"
       }
     },
     {

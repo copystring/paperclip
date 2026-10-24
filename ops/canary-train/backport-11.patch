@@ -1,5 +1,5 @@
 diff --git a/packages/adapters/opencode-local/src/server/execute.remote.test.ts b/packages/adapters/opencode-local/src/server/execute.remote.test.ts
-index e6c590b7d..53699142b 100644
+index e6c590b7d9e8bc526ff244d7534cf2381c08d276..53699142b87d58974a41dd14772dad9c7d3221c0 100644
 --- a/packages/adapters/opencode-local/src/server/execute.remote.test.ts
 +++ b/packages/adapters/opencode-local/src/server/execute.remote.test.ts
 @@ -260,12 +260,17 @@ describe("opencode remote execution", () => {
@@ -27,7 +27,7 @@ index e6c590b7d..53699142b 100644
      expect(prepareWorkspaceForSshExecution).toHaveBeenCalledTimes(1);
      expect(syncDirectoryToSsh).toHaveBeenCalledTimes(2);
 diff --git a/packages/adapters/opencode-local/src/server/execute.test.ts b/packages/adapters/opencode-local/src/server/execute.test.ts
-index 0836f0b14..ef0149c1e 100644
+index 0836f0b145b8e8aa76472750f4a4dbe5e7dcf797..ef0149c1e4a165fdd8d86b6a264fb34ab03c5459 100644
 --- a/packages/adapters/opencode-local/src/server/execute.test.ts
 +++ b/packages/adapters/opencode-local/src/server/execute.test.ts
 @@ -720,13 +720,16 @@ describe("OpenCode runtime MCP handoff", () => {
@@ -55,155 +55,107 @@ index 0836f0b14..ef0149c1e 100644
      expect(JSON.stringify({ result, logs: logOutput })).not.toContain(secret);
      await expect(fs.access(configPath)).rejects.toThrow();
 diff --git a/packages/adapters/opencode-local/src/server/runtime-config.test.ts b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
-index 2bb1c96b7..618af224e 100644
+index 2bb1c96b706bc544d20be1839c685cd129cb9187..6a402cd7f56698d0684f5ee154748fdfe3d23208 100644
 --- a/packages/adapters/opencode-local/src/server/runtime-config.test.ts
 +++ b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
-@@ -975,4 +975,212 @@ describe("prepareOpenCodeRuntimeConfig", () => {
-     expect(prepared.notes).toEqual([]);
-     await prepared.cleanup();
-   });
-+
-+  it.each([false, true])("adds run-scoped MCP servers without changing permission policy (skip=%s)", async (skip) => {
-+    const configHome = await makeConfigHome({
-+      permission: { bash: "ask", "mcp__existing__write": "deny" },
-+      mcp: {
-+        "paperclip-assigned": { type: "remote", url: "https://user.example/mcp", enabled: true },
-+        existing: { type: "remote", url: "https://existing.example/mcp", enabled: true },
+@@ -1,4 +1,5 @@
+ import fs from "node:fs/promises";
++import { createHash } from "node:crypto";
+ import os from "node:os";
+ import path from "node:path";
+ import { pathToFileURL } from "node:url";
+@@ -34,6 +35,57 @@ async function makeConfigHome(initialConfig?: Record<string, unknown>) {
+ }
+ 
+ describe("prepareOpenCodeRuntimeConfig", () => {
++  it.each([true, false])("transports explicit provider settings to a remote runtime without copying host config (skipPermissions=%s)", async (skipPermissions) => {
++    const configHome = await makeConfigHome({ theme: "host-only", permission: { bash: "deny" } });
++    const prepared = await prepareOpenCodeRuntimeConfig({
++      env: {
++        XDG_CONFIG_HOME: configHome,
++        PAPERCLIP_OPENCODE_PROVIDERS: JSON.stringify({ gateway: {
++          npm: "@ai-sdk/openai-compatible",
++          options: { baseURL: "https://gateway.example/v1", apiKey: "{env:GATEWAY_KEY}" },
++          models: { "gateway/model": { name: "Gateway Model" } },
++        } }),
++        GATEWAY_KEY: "runtime-key-value",
++        PAPERCLIP_OPENCODE_SMALL_MODEL: "gateway/model",
 +      },
-+      provider: { custom: { models: { "example/model": {} } } },
-+      small_model: "example/model",
-+    });
-+    const token = "run-scoped-fixture-secret";
-+    const prepared = await prepareOpenCodeRuntimeConfig({
-+      env: { XDG_CONFIG_HOME: configHome },
-+      config: { dangerouslySkipPermissions: skip },
-+      runtimeMcp: [
-+        { name: "paperclip-assigned", connectionId: `assignment:${"a".repeat(64)}`, url: "https://paperclip.example/mcp/one", token },
-+        { name: "paperclip-assigned", connectionId: `assignment:${"b".repeat(64)}`, url: "https://paperclip.example/mcp/two", token: "second-run-token" },
-+      ],
-+    });
-+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
-+
-+    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
-+    const runtimeConfig = JSON.parse(await fs.readFile(runtimeConfigPath, "utf8")) as {
-+      mcp: Record<string, unknown>;
-+      permission?: unknown;
-+      provider?: unknown;
-+      small_model?: unknown;
-+    };
-+    expect(runtimeConfig.mcp).toMatchObject({
-+      "paperclip-assigned": { url: "https://user.example/mcp" },
-+      existing: { url: "https://existing.example/mcp" },
-+    });
-+    const assignedEntries = Object.entries(runtimeConfig.mcp).filter(([, server]) =>
-+      typeof server === "object" && server !== null && "url" in server &&
-+      (server.url === "https://paperclip.example/mcp/one" || server.url === "https://paperclip.example/mcp/two"),
-+    );
-+    expect(assignedEntries).toHaveLength(2);
-+    const firstServer = assignedEntries.find(([, server]) =>
-+      typeof server === "object" && server !== null && "url" in server && server.url === "https://paperclip.example/mcp/one",
-+    );
-+    const secondServer = assignedEntries.find(([, server]) =>
-+      typeof server === "object" && server !== null && "url" in server && server.url === "https://paperclip.example/mcp/two",
-+    );
-+    expect(firstServer?.[1]).toMatchObject({
-+      type: "remote", enabled: true, oauth: false, timeout: 30_000,
-+      url: "https://paperclip.example/mcp/one",
-+      headers: { Authorization: `Bearer ${token}` },
-+    });
-+    expect(secondServer?.[1]).toMatchObject({
-+      type: "remote", url: "https://paperclip.example/mcp/two",
-+      headers: { Authorization: "Bearer second-run-token" },
-+    });
-+    const generatedNames = assignedEntries.map(([name]) => name);
-+    expect(generatedNames).toHaveLength(2);
-+    expect(generatedNames.every((name) => /^paperclip-assigned(?:_\d+)?$/.test(name) && name.length <= 22)).toBe(true);
-+    expect(new Set(generatedNames).size).toBe(generatedNames.length);
-+    const gatewayMetaActionNames = [
-+      `mcp.app-gallery-files:${"read_sensitive_metadata".padEnd(103 - "mcp.app-gallery-files:".length, "x")}`,
-+      `mcp.app-gallery-files:${"update_sensitive_metadata".padEnd(104 - "mcp.app-gallery-files:".length, "y")}`,
-+    ];
-+    const composedToolNames = generatedNames.flatMap((serverName) =>
-+      gatewayMetaActionNames.map((toolName) => `${serverName}__${toolName}`),
-+    );
-+    expect(gatewayMetaActionNames.map((name) => name.length)).toEqual([103, 104]);
-+    expect(generatedNames.every((name) => name.length <= 22)).toBe(true);
-+    expect(composedToolNames.every((name) => name.length <= 128)).toBe(true);
-+    expect(new Set(composedToolNames).size).toBe(composedToolNames.length);
-+    expect(JSON.stringify(runtimeConfig.mcp)).not.toContain("a".repeat(64));
-+    expect(JSON.stringify(runtimeConfig.mcp)).not.toContain("b".repeat(64));
-+    expect(runtimeConfig.permission).toEqual(skip ? "allow" : { bash: "ask", "mcp__existing__write": "deny" });
-+    expect(runtimeConfig.provider).toMatchObject({ custom: { models: { "example/model": {} } } });
-+    if (skip) {
-+      expect(runtimeConfig.provider).toHaveProperty("openrouter.options.headers", OPENROUTER_ATTRIBUTION_HEADERS);
-+    } else {
-+      expect(runtimeConfig.provider).not.toHaveProperty("openrouter");
-+    }
-+    expect(runtimeConfig.small_model).toBe("example/model");
-+    if (process.platform !== "win32") {
-+      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
-+    }
-+    expect(JSON.stringify(prepared.notes)).not.toContain(token);
-+    expect(JSON.parse(await fs.readFile(path.join(configHome, "opencode", "opencode.json"), "utf8"))).toMatchObject({
-+      permission: { bash: "ask" },
-+      mcp: { "paperclip-assigned": { url: "https://user.example/mcp" } },
-+    });
-+
-+    await prepared.cleanup();
-+    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
-+    await expect(fs.access(prepared.env.XDG_CONFIG_HOME)).rejects.toThrow();
-+  });
-+
-+
-+  it("injects run-scoped MCP servers into an isolated remote runtime config", async () => {
-+    const configHome = await makeConfigHome({
-+      theme: "host-only-theme",
-+      permission: { bash: "deny" },
-+      mcp: { hostOnly: { type: "remote", url: "https://host.example/mcp", headers: { Authorization: "Bearer host-only-secret" } } },
-+    });
-+    const token = "remote-run-scoped-fixture-secret";
-+    const url = "https://paperclip.example/api/mcp/remote-run";
-+    const prepared = await prepareOpenCodeRuntimeConfig({
-+      env: { XDG_CONFIG_HOME: configHome },
-+      config: { dangerouslySkipPermissions: false },
-+      runtimeMcp: [{ name: "Assigned remote tools", connectionId: "remote-run-assignment", url, token }],
++      config: { model: "gateway/model", dangerouslySkipPermissions: skipPermissions },
 +      targetIsRemote: true,
 +    });
 +    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
++
 +    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
 +    const runtimeConfig = JSON.parse(await fs.readFile(runtimeConfigPath, "utf8")) as {
-+      mcp: Record<string, unknown>;
-+      permission?: unknown;
 +      theme?: unknown;
++      provider?: { gateway?: { options?: { apiKey?: unknown } } };
++      small_model?: unknown;
++      permission?: unknown;
 +    };
-+    const assigned = Object.entries(runtimeConfig.mcp).find(([, server]) =>
-+      typeof server === "object" && server !== null && "url" in server && server.url === url,
-+    );
-+    expect(assigned).toBeDefined();
-+    expect(assigned?.[0]).toBe("Assigned_remote_tools");
-+    expect(assigned?.[1]).toMatchObject({
-+      type: "remote",
-+      url,
-+      enabled: true,
-+      oauth: false,
-+      headers: { Authorization: `Bearer ${token}` },
-+    });
-+    expect(Object.keys(runtimeConfig.mcp)).toEqual([assigned?.[0]]);
-+    expect(runtimeConfig.permission).toBeUndefined();
++    expect(prepared.runtimeConfigHome).toBe(prepared.env.XDG_CONFIG_HOME);
 +    expect(runtimeConfig.theme).toBeUndefined();
-+    expect(JSON.stringify(runtimeConfig)).not.toContain("host-only-secret");
-+    expect(JSON.stringify(prepared.notes)).not.toContain(token);
-+    expect(prepared.taskToolsPath).toBeDefined();
-+    if (process.platform !== "win32") {
-+      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
-+    }
++    expect(runtimeConfig.provider?.gateway?.options?.apiKey).toBe("runtime-key-value");
++    expect(runtimeConfig.small_model).toBe("gateway/model");
++    expect(runtimeConfig.permission).toBe(skipPermissions ? "allow" : undefined);
++    expect(prepared.notes.join(" ")).not.toContain("runtime-key-value");
++    expect(prepared.taskToolsPath).toBeUndefined();
 +
 +    await prepared.cleanup();
 +    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
 +    await expect(fs.access(prepared.env.XDG_CONFIG_HOME)).rejects.toThrow();
 +  });
 +
-+  it("keeps a readable short label and deterministically bounds long labels", async () => {
++  it.each([undefined, "paperclip/combo/medium"])("keeps remote opt-out without MCP a no-op (model=%s)", async (model) => {
++    const prepared = await prepareOpenCodeRuntimeConfig({
++      env: {},
++      config: { dangerouslySkipPermissions: false, ...(model ? { model } : {}) },
++      targetIsRemote: true,
++    });
++
++    expect(prepared.runtimeConfigHome).toBeNull();
++    expect(prepared.env.XDG_CONFIG_HOME).toBeUndefined();
++    expect(prepared.notes).toEqual([]);
++    await prepared.cleanup();
++  });
++
+   it("attributes custom OpenRouter aliases and inline overrides without changing other endpoints", async () => {
+     const other = { options: { baseURL: "https://other.example/v1", headers: { "X-Title": "Other" } } };
+     const configHome = await makeConfigHome({ provider: { other, openrouter: other } });
+@@ -588,7 +640,10 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+ 
+   it("adds only delivered HTTP MCP servers with a Bearer header and preserves user servers on collision", async () => {
+     const connectionId = "fixture-connection";
+-    const collidedName = "Paperclip_assigned";
++    const suffix = createHash("sha256").update(`${connectionId}\0${0}`).digest("hex").toUpperCase();
++    const collidedName = `paperclip_${suffix.slice(0, 12)}`;
++    const assignedName = `paperclip_${suffix.slice(0, 10)}_1`;
++    expect(collidedName.length).toBeLessThanOrEqual(22);
+     const suppliedToken = "fixture-token-not-a-real-credential";
+     const configHome = await makeConfigHome({
+       mcp: {
+@@ -618,13 +673,15 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+     expect(runtimeConfig.theme).toBe("system");
+     expect(runtimeConfig.mcp[collidedName]).toEqual({ type: "local", command: ["user-owned-server"] });
+     expect(runtimeConfig.mcp.other).toEqual({ type: "remote", url: "https://user.example/mcp", enabled: true });
+-    expect(runtimeConfig.mcp[`${collidedName}_2`]).toMatchObject({
++    expect(runtimeConfig.mcp[assignedName]).toMatchObject({
+       type: "remote",
+       url: "https://paperclip.example/mcp/gateways/run-scoped",
+       enabled: true,
+       oauth: false,
+       headers: { Authorization: `Bearer ${suppliedToken}` },
++      timeout: 30_000,
+     });
++    expect(assignedName.length).toBeLessThanOrEqual(22);
+     expect(serializedConfig).toContain(`Bearer ${suppliedToken}`);
+     expect(prepared.notes.join("\n")).not.toContain(suppliedToken);
+     expect(Object.keys(prepared.env).filter((key) => key.startsWith("PAPERCLIP_OPENCODE_MCP_TOKEN_"))).toEqual([]);
+@@ -638,6 +695,43 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+     await expect(fs.access(prepared.env.XDG_CONFIG_HOME)).rejects.toThrow();
+   });
+ 
++  it("uses a stable bounded MCP name for long connection labels", async () => {
 +    const configHome = await makeConfigHome();
 +    const servers = [{
 +      name: "Paperclip project tools with a long descriptive label",
@@ -221,7 +173,7 @@ index 2bb1c96b7..618af224e 100644
 +      await fs.readFile(path.join(first.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
 +    ) as { mcp: Record<string, unknown> };
 +    const [firstName] = Object.keys(firstConfig.mcp);
-+    expect(firstName).toMatch(/^Paperclip_pro_[0-9a-f]{8}$/);
++    expect(firstName).toMatch(/^paperclip_[A-F0-9]{12}$/);
 +    expect(firstName.length).toBeLessThanOrEqual(22);
 +
 +    await first.cleanup();
@@ -240,42 +192,52 @@ index 2bb1c96b7..618af224e 100644
 +    cleanupPaths.delete(second.env.XDG_CONFIG_HOME);
 +  });
 +
-+  it("does not follow a user config symlink when writing the run secret", async () => {
-+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-symlink-test-"));
-+    cleanupPaths.add(root);
-+    const configHome = path.join(root, "config");
-+    const externalConfig = path.join(root, "external.json");
-+    const configDir = path.join(configHome, "opencode");
-+    await fs.mkdir(configDir, { recursive: true });
-+    await fs.writeFile(externalConfig, JSON.stringify({ theme: "system" }), "utf8");
-+    await fs.symlink(externalConfig, path.join(configDir, "opencode.json"));
-+
-+    const prepared = await prepareOpenCodeRuntimeConfig({
-+      env: { XDG_CONFIG_HOME: configHome },
-+      config: { dangerouslySkipPermissions: false },
-+      runtimeMcp: [{
-+        name: "Assigned tools",
-+        connectionId: "connection-1",
-+        url: "https://paperclip.example/mcp",
-+        token: "fixture-secret",
-+      }],
-+    });
-+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
-+    const runtimeConfigPath = path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json");
-+    expect((await fs.lstat(runtimeConfigPath)).isSymbolicLink()).toBe(false);
-+    expect(await fs.readFile(externalConfig, "utf8")).toBe(JSON.stringify({ theme: "system" }));
-+    if (process.platform !== "win32") {
-+      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
-+    }
-+    await prepared.cleanup();
-+    cleanupPaths.delete(prepared.env.XDG_CONFIG_HOME);
-+  });
- });
+   it("replaces a copied config symlink without modifying its user-owned target", async () => {
+     const configHome = await makeConfigHome();
+     const sourceTarget = path.join(configHome, "user-owned.json");
 diff --git a/packages/adapters/opencode-local/src/server/runtime-config.ts b/packages/adapters/opencode-local/src/server/runtime-config.ts
-index f70e9a67e..36f26f2b9 100644
+index f70e9a67e69b3e3b95d6e9061b5da1c112f5b54b..820fd2937280f995956350a396a2953bd843fbe9 100644
 --- a/packages/adapters/opencode-local/src/server/runtime-config.ts
 +++ b/packages/adapters/opencode-local/src/server/runtime-config.ts
-@@ -436,9 +436,10 @@ export async function prepareOpenCodeRuntimeConfig(input: {
+@@ -129,7 +129,7 @@ function buildRuntimeMcpConfig(
+ ): Record<string, unknown> {
+   const mcp: Record<string, unknown> = { ...existing };
+   const usedNames = new Set(Object.keys(mcp));
+-  for (const server of servers) {
++  for (const [index, server] of servers.entries()) {
+     let endpoint: URL;
+     try {
+       endpoint = new URL(server.url);
+@@ -140,20 +140,16 @@ function buildRuntimeMcpConfig(
+         !server.connectionId.trim() || !server.token.trim() || /[\r\n]/.test(server.token)) {
+       throw new Error("A Paperclip runtime MCP server has an invalid HTTP binding.");
+     }
+-    const safeServerName = server.name.replace(/[^a-zA-Z0-9_-]/g, "_") || "connection";
+-    let suffix = 1;
++    const identity = `${server.connectionId}\0${index}`;
++    const hash = createHash("sha256").update(identity).digest("hex").toUpperCase();
++    const prefix = "paperclip_";
++    let collision = 0;
+     let name: string;
+     do {
+-      const collisionSuffix = suffix === 1 ? "" : `_${suffix}`;
+-      const nameBudget = MAX_RUNTIME_MCP_SERVER_NAME_LENGTH - collisionSuffix.length;
+-      if (safeServerName.length <= nameBudget) {
+-        name = `${safeServerName}${collisionSuffix}`;
+-      } else {
+-        const hash = createHash("sha256").update(safeServerName).digest("hex").slice(0, 8);
+-        const prefixLength = nameBudget - hash.length - 1;
+-        name = `${safeServerName.slice(0, prefixLength)}_${hash}${collisionSuffix}`;
+-      }
+-      suffix += 1;
++      const collisionSuffix = collision === 0 ? "" : `_${collision}`;
++      const hashLength = MAX_RUNTIME_MCP_SERVER_NAME_LENGTH - prefix.length - collisionSuffix.length;
++      name = `${prefix}${hash.slice(0, hashLength)}${collisionSuffix}`;
++      collision += 1;
+     } while (usedNames.has(name));
+     usedNames.add(name);
+     mcp[name] = {
+@@ -436,9 +432,15 @@ export async function prepareOpenCodeRuntimeConfig(input: {
    targetIsRemote?: boolean;
  }): Promise<PreparedOpenCodeRuntimeConfig> {
    const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
@@ -283,12 +245,73 @@ index f70e9a67e..36f26f2b9 100644
    const runtimeMcpServers = input.runtimeMcp ?? input.runtimeMcpServers ?? [];
    const selectedModel = configuredModelRef(input.config.model);
 -  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || input.targetIsRemote)) {
-+  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || targetIsRemote)) {
++  const hasExplicitRemoteSettings = Boolean(
++    (input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS)?.trim() ||
++    (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim(),
++  );
++  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || targetIsRemote) &&
++      (!targetIsRemote || !hasExplicitRemoteSettings)) {
      return {
        env: input.env,
        notes: [],
+@@ -446,7 +448,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
+       cleanup: async () => {},
+     };
+   }
+-  const sourceConfigDir = input.targetIsRemote ? null : path.join(resolveXdgConfigHome(input.env), "opencode");
++  const sourceConfigDir = targetIsRemote ? null : path.join(resolveXdgConfigHome(input.env), "opencode");
+   const runtimeConfigHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-config-"));
+   const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
+   const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
+@@ -488,7 +490,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
+     // hard-coded) so the gateway URL, key env, and model list stay declarative.
+     const existingProvider = isPlainObject(existingConfig.provider) ? existingConfig.provider : {};
+     let nextProvider = existingProvider;
+-    if (skipPermissions) {
++    if (skipPermissions || targetIsRemote) {
+       const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
+       const gatewayProviders = parseProviderConfig(
+         input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS,
+@@ -536,13 +538,13 @@ export async function prepareOpenCodeRuntimeConfig(input: {
+ 
+     const nextConfig: Record<string, unknown> = { ...existingConfig };
+     if (skipPermissions) nextConfig.permission = "allow";
+-    if (skipPermissions && Object.keys(nextProvider).length > 0) {
++    if ((skipPermissions || targetIsRemote) && Object.keys(nextProvider).length > 0) {
+       nextConfig.provider = nextProvider;
+     }
+ 
+     let timeoutPluginInstalled = false;
+     let timeoutAuthContent: string | undefined;
+-    if (!input.targetIsRemote && selectedModel) {
++    if (!targetIsRemote && selectedModel) {
+       const fileProvider = isPlainObject(nextProvider[selectedModel.provider])
+         ? nextProvider[selectedModel.provider] as Record<string, unknown>
+         : {};
+@@ -644,7 +646,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
+     // for the anthropic provider); when that provider is repointed at a gateway that
+     // does not serve that exact model, the title-gen call fails and aborts the run.
+     // Setting small_model to a gateway-served model keeps every call on supported models.
+-    const smallModel = skipPermissions
++    const smallModel = skipPermissions || targetIsRemote
+       ? (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim()
+       : undefined;
+     if (smallModel) {
+@@ -670,8 +672,10 @@ export async function prepareOpenCodeRuntimeConfig(input: {
+     await fs.chmod(temporaryConfigPath, 0o600);
+     await fs.rename(temporaryConfigPath, runtimeConfigPath);
+ 
+-    const taskToolsPath = path.join(runtimeConfigHome, "paperclip-task-tools.mjs");
+-    await fs.writeFile(taskToolsPath, PAPERCLIP_TASK_TOOLS_SOURCE, { encoding: "utf8", mode: 0o600, flag: "wx" });
++    const taskToolsPath = targetIsRemote ? undefined : path.join(runtimeConfigHome, "paperclip-task-tools.mjs");
++    if (taskToolsPath) {
++      await fs.writeFile(taskToolsPath, PAPERCLIP_TASK_TOOLS_SOURCE, { encoding: "utf8", mode: 0o600, flag: "wx" });
++    }
+ 
+     const attributedEnv = preserveExplicitModelModalities({
+       ...input.env,
 diff --git a/server/src/__tests__/codex-local-execute.test.ts b/server/src/__tests__/codex-local-execute.test.ts
-index 4420280bb..3d1cfcc86 100644
+index 4420280bbeff23e8a000dbe0eed75302e16cc84b..3d1cfcc86f38f437220ab5ab5878d5db71482c1e 100644
 --- a/server/src/__tests__/codex-local-execute.test.ts
 +++ b/server/src/__tests__/codex-local-execute.test.ts
 @@ -828,7 +828,7 @@ if (process.argv.includes("resume")) {
@@ -311,10 +334,55 @@ index 4420280bb..3d1cfcc86 100644
      } finally {
        if (previousHome === undefined) delete process.env.HOME;
 diff --git a/server/src/__tests__/heartbeat-process-recovery.test.ts b/server/src/__tests__/heartbeat-process-recovery.test.ts
-index cf2d0b2cd..bc87bffcb 100644
+index cc898bb57a98ba1b28e8600ecc17faac08718f21..766c86b61957bf0edb5add7b66206dffd22e5d9a 100644
 --- a/server/src/__tests__/heartbeat-process-recovery.test.ts
 +++ b/server/src/__tests__/heartbeat-process-recovery.test.ts
-@@ -1850,12 +1850,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+@@ -13,6 +13,7 @@ import * as aiConnectionRuntime from "../services/ai-connection-runtime.js";
+ import { forbidden, unprocessable } from "../errors.js";
+ import { aiConnectionCredentialNotSharedFailure } from "../services/ai-connection-configuration-failure.js";
+ import * as executionContinuation from "../services/execution-continuation.js";
++import * as museTerminalReconciliation from "../services/native-runtime/muse-terminal-reconciliation.js";
+ import * as environmentOrchestrator from "../services/environment-run-orchestrator.js";
+ import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
+ import { legacyDispositionFingerprint, LEGACY_DISPOSITION_REPAIR_INSTRUCTION } from "../services/recovery/legacy-continuation.js";
+@@ -1612,6 +1613,36 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+     return { companyId, agentId, runId, wakeupRequestId, issueId };
+   }
+ 
++  it("waits for terminal settlement after the active owner is released", async () => {
++    const { runId } = await seedQueuedIssueRunFixture();
++    let settlementEntered = false;
++    let finishSettlement!: () => void;
++    const settlementGate = new Promise<void>(resolve => { finishSettlement = resolve; });
++    const reconcile = vi.spyOn(museTerminalReconciliation, "reconcileMuseNativeTerminalRun")
++      .mockImplementation(async (_database, run) => {
++        if (run.id !== runId) return;
++        settlementEntered = true;
++        await settlementGate;
++      });
++    const heartbeat = heartbeatService(db);
++    let dispatch: Promise<unknown> | undefined;
++    let drained = false;
++    try {
++      dispatch = heartbeat.resumeQueuedRuns();
++      expect(await waitForValue(async () => settlementEntered || null, 5_000)).toBe(true);
++      const drain = heartbeat.waitForRunExecutionDrain(runId).then(() => { drained = true; });
++      await new Promise(resolve => setTimeout(resolve, 50));
++      expect(drained).toBe(false);
++      finishSettlement();
++      await Promise.all([dispatch, drain]);
++      expect(drained).toBe(true);
++    } finally {
++      finishSettlement();
++      await dispatch?.catch(() => undefined);
++      reconcile.mockRestore();
++    }
++  });
++
+   it.each(["owned", "forged"] as const)("keeps unresolved-ref recovery and reporting while persisting only owned diagnostics: %s", async provenance => {
+     const { companyId, agentId, issueId, runId, wakeupRequestId } = await seedQueuedIssueRunFixture();
+     const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "base-ref-heartbeat-"));
+@@ -1851,12 +1882,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
          expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(0);
          if (!cleanupObserved) {
            cleanupObserved = true;
@@ -330,7 +398,7 @@ index cf2d0b2cd..bc87bffcb 100644
            if (scenario === "new_message") {
              await db.insert(issueComments).values({ id: nextCommentId, companyId, issueId, authorType: "user",
                authorUserId: "responsible-user", body: "Use these new instructions." });
-@@ -6528,7 +6525,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+@@ -6555,7 +6583,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
        await waitForPendingRunFailureReports();
  
        const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
@@ -340,7 +408,7 @@ index cf2d0b2cd..bc87bffcb 100644
          resultJson: {
            connectionFailure: { schemaVersion: 1, provider: "git", operation: "clone", reason: "dns_failure" },
            executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
-@@ -10525,8 +10523,15 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+@@ -10552,8 +10581,15 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
      });
      expect(retryRun?.contextSnapshot).toMatchObject({
        issueId,
@@ -359,7 +427,7 @@ index cf2d0b2cd..bc87bffcb 100644
    });
  
 diff --git a/server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts b/server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts
-index df965f6df..f0501ccb5 100644
+index df965f6dff00ba000ab0ef2c9dac188a33f53321..f0501ccb514afe9c0eab942b8fb3253d8ee31dc2 100644
 --- a/server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts
 +++ b/server/src/__tests__/heartbeat-stale-queue-invalidation.test.ts
 @@ -1782,10 +1782,12 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
@@ -407,7 +475,7 @@ index df965f6df..f0501ccb5 100644
    });
  });
 diff --git a/server/src/__tests__/issue-activity-events-routes.test.ts b/server/src/__tests__/issue-activity-events-routes.test.ts
-index 9f9a5f26a..fe3ff135d 100644
+index 9f9a5f26a525710d1f16d4549ba251309315c628..fe3ff135d15a5aec10a4b8accd457f64a2d585a5 100644
 --- a/server/src/__tests__/issue-activity-events-routes.test.ts
 +++ b/server/src/__tests__/issue-activity-events-routes.test.ts
 @@ -194,6 +194,7 @@ function issueUpdateWithReceipt(issue: ReturnType<typeof makeIssue>, patch: Reco
@@ -419,7 +487,7 @@ index 9f9a5f26a..fe3ff135d 100644
      workspaceSelectionActor: _workspaceSelectionActor,
      blockedByIssueIds: _blockedByIssueIds,
 diff --git a/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts b/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
-index 24f8f5d63..a0d3ba21b 100644
+index 24f8f5d6391708324de79315986c735f84cf54ef..a0d3ba21b9fa86c8657f81b9a08f366d52ebd633 100644
 --- a/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
 +++ b/server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
 @@ -13,6 +13,7 @@ const ownerAgentId = "33333333-3333-4333-8333-333333333333";
@@ -498,7 +566,7 @@ index 24f8f5d63..a0d3ba21b 100644
        mockIssueService.update.mockClear();
  
 diff --git a/server/src/__tests__/issue-document-restore-routes.test.ts b/server/src/__tests__/issue-document-restore-routes.test.ts
-index 173f4b865..71ea4936e 100644
+index 173f4b86503a1a86b730dee7e6bffcba918e9525..71ea4936e1763c87d7da0522df8228fe89e90edc 100644
 --- a/server/src/__tests__/issue-document-restore-routes.test.ts
 +++ b/server/src/__tests__/issue-document-restore-routes.test.ts
 @@ -29,6 +29,7 @@ const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
@@ -510,7 +578,7 @@ index 173f4b865..71ea4936e 100644
  const mockInstanceSettingsService = vi.hoisted(() => ({
    get: vi.fn(async () => ({
 diff --git a/server/src/__tests__/issues-service.test.ts b/server/src/__tests__/issues-service.test.ts
-index eadd41ab6..ea5a1a714 100644
+index eadd41ab6fda544a7d8de3d92b34e8768255fbfa..ea5a1a714018060bfa6161fce7c50445543140ed 100644
 --- a/server/src/__tests__/issues-service.test.ts
 +++ b/server/src/__tests__/issues-service.test.ts
 @@ -1,5 +1,5 @@
@@ -639,7 +707,7 @@ index eadd41ab6..ea5a1a714 100644
      const seeded = await seedOwnershipIssue({ checkoutStatus: "failed" });
  
 diff --git a/server/src/agent-run-cancellation.ts b/server/src/agent-run-cancellation.ts
-index e46be0f37..2e1d73f1d 100644
+index e46be0f37193599a0f946cfe396b5593e4e6bc0f..2e1d73f1dfdcb123a1dcdb64e3120322626ffe9b 100644
 --- a/server/src/agent-run-cancellation.ts
 +++ b/server/src/agent-run-cancellation.ts
 @@ -19,7 +19,7 @@ export async function assertAgentRunWriteAllowed(tx: Db, companyId: string, acto
@@ -652,7 +720,7 @@ index e46be0f37..2e1d73f1d 100644
      runtimeMode: heartbeatRuns.runtimeMode, companyId: heartbeatRuns.companyId,
      contextSnapshot: heartbeatRuns.contextSnapshot })
 diff --git a/server/src/legacy-run-task-ownership.test.ts b/server/src/legacy-run-task-ownership.test.ts
-index 9226ed30c..4bd257e26 100644
+index 9226ed30c91c5debe9c02f2724e85b3ba497ece8..4bd257e2631322391d4b9daa54e107834d3b6235 100644
 --- a/server/src/legacy-run-task-ownership.test.ts
 +++ b/server/src/legacy-run-task-ownership.test.ts
 @@ -1,38 +1,45 @@
@@ -729,7 +797,7 @@ index 9226ed30c..4bd257e26 100644
    });
  });
 diff --git a/server/src/legacy-run-task-ownership.ts b/server/src/legacy-run-task-ownership.ts
-index ef6dd30e5..abd6e4f53 100644
+index ef6dd30e563caaa2be10bf956ac114473db94056..abd6e4f539a4d67db4e93199e88219a6a4243091 100644
 --- a/server/src/legacy-run-task-ownership.ts
 +++ b/server/src/legacy-run-task-ownership.ts
 @@ -1,11 +1,21 @@
@@ -792,7 +860,7 @@ index ef6dd30e5..abd6e4f53 100644
 +  );
  }
 diff --git a/server/src/routes/issues.ts b/server/src/routes/issues.ts
-index 2f802ce59..0d3a14b91 100644
+index 5294c7c9a85fcdf7d544d3d59d2e17801199c93f..b2cecd741aced55ee8085dd3266fbc4fa0ec6131 100644
 --- a/server/src/routes/issues.ts
 +++ b/server/src/routes/issues.ts
 @@ -5579,7 +5579,7 @@ export function issueRoutes(
@@ -805,7 +873,7 @@ index 2f802ce59..0d3a14b91 100644
      // Task-watchdog runs receive a scoped *grant* to mutate issues inside the
      // watched subtree. This must be evaluated before the base assignee-ownership
 diff --git a/server/src/services/__tests__/run-failure-report.test.ts b/server/src/services/__tests__/run-failure-report.test.ts
-index f2c833557..1d3e53ecf 100644
+index 2ce0d6891fea63156210af9c05d9da255baf2f00..1d6cc55028f5db662a35fb44814786e352126136 100644
 --- a/server/src/services/__tests__/run-failure-report.test.ts
 +++ b/server/src/services/__tests__/run-failure-report.test.ts
 @@ -255,6 +255,18 @@ describeEmbeddedPostgres("reportRunFailure", () => {
@@ -828,10 +896,10 @@ index f2c833557..1d3e53ecf 100644
      { kind: "runtime", providerWorkStarted: false }])("reports Git failures without unstarted bootstrap proof: %j", async (recovery) => {
      await seedCompanyAndAgent();
 diff --git a/server/src/services/heartbeat.ts b/server/src/services/heartbeat.ts
-index 9470fd173..03fb01ed1 100644
+index ccd5a060e3692c8aa2391c43d9acb820380c8ce4..8e181ed645f1cdfe13d15e289d86e03a191bb1b4 100644
 --- a/server/src/services/heartbeat.ts
 +++ b/server/src/services/heartbeat.ts
-@@ -548,6 +548,9 @@ export { isNonAssigneeWorkspaceBusyRetry };
+@@ -550,6 +550,9 @@ export { isNonAssigneeWorkspaceBusyRetry };
  // Routes and the scheduler construct separate heartbeatService instances, but
  // they must agree on in-process adapter executions when reaping stale runs.
  const activeRunExecutions = new Set<string>();
@@ -841,7 +909,7 @@ index 9470fd173..03fb01ed1 100644
  const deferredIssueExecutionReleases = new Map<string, { suppressImmediateRecovery?: boolean }>();
  // A legacy process adapter's signal exit can race the operator cancellation CAS while
  // its owned process group is still being joined. Keep that exit from becoming
-@@ -1413,16 +1416,22 @@ export function heartbeatService(
+@@ -1417,16 +1420,22 @@ export function heartbeatService(
      return runControl.cancelBudgetScopeWork(...args);
    }
  
@@ -852,9 +920,9 @@ index 9470fd173..03fb01ed1 100644
 +    const activeRun = !options?.deferredPostCommitEffects && activeRunExecutions.has(run.id)
 +      ? await getRun(run.id)
 +      : null;
-+    // The deferred replay below belongs to legacy process/lease cleanup. Native
-+    // completion owns durable finalization and has no matching post-cleanup
-+    // replay, so a native release must not be deferred here.
++    // Only legacy executions have a post-cleanup replay below. Native runs own
++    // their durable finalization, so deferring their issue release would strand
++    // a wake admitted while the executor is active.
 +    if (activeRunExecutions.has(run.id) && activeRun?.runtimeMode === "legacy" && !options?.deferredPostCommitEffects) {
        const previous = deferredIssueExecutionReleases.get(run.id);
        deferredIssueExecutionReleases.set(run.id, {
@@ -868,432 +936,18 @@ index 9470fd173..03fb01ed1 100644
    }
  
    function releaseEnvironmentLeasesForRun(...args: Parameters<typeof runControl.releaseEnvironmentLeasesForRun>) {
-@@ -3663,291 +3672,296 @@ export function heartbeatService(
-         });
+@@ -3881,6 +3890,7 @@ export function heartbeatService(
+         }
+       } finally {
+         controllerLease.stop();
++        settlingRunExecutions.add(run.id);
+         activeRunExecutions.delete(run.id);
+         // A failed owned Stop remains visible until this exact executor settles,
+         // including a graceful exit result arriving after the cancellation error.
+@@ -3891,75 +3901,79 @@ export function heartbeatService(
+           adapterExecutionControls.delete(run.id);
+         }
        }
-     } finally {
--      let caseHandoffCleanupSettled = false;
--      await instructionWorkingCopy?.nativeInstructionReservation?.release().catch(error => logger.warn({ runId: run.id, err: error }, "Managed warm session preparation cleanup failed"));
--      if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
--      let latestRun = await getRun(run.id).catch(() => null);
-       try {
--        if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
--          await writeExecutionControl(db, DELIVERY_QUEUES.executionFinalization, tx => tx
--            .update(heartbeatRuns)
--            .set({ executionControlDeadlineAt: null })
--            .where(eq(heartbeatRuns.id, run.id)));
--        }
--        nativeOwnershipHeld =
--          nativeOwnershipHeld ||
--          Boolean(latestRun && isNativeRunnerOwnershipHeld(latestRun));
--        // Trace capture is debug-only and must settle independently of every
--        // provider outcome. Adapter/setup failures used to skip the success-path
--        // finalizer, leaving metadata permanently stuck at `capturing` even when
--        // runnerd had already closed (or never managed to write) its sidecar.
--        // Same-run native resumes retain the open capture until the resumed
--        // execution reaches a true terminal boundary.
--        if (
--          providerTraceCapture &&
--          !providerTraceFinalized &&
--          !nativeSessionResumeScheduled
--        ) {
--          try {
--            await traceStore.finalize(run.id, run.companyId);
--            providerTraceFinalized = true;
--          } catch (traceFinalizeError) {
--            logger.warn(
--              { err: traceFinalizeError, runId: run.id },
--              "provider trace finalization failed during heartbeat teardown",
--            );
-+        let caseHandoffCleanupSettled = false;
-+        await instructionWorkingCopy?.nativeInstructionReservation?.release().catch(error => logger.warn({ runId: run.id, err: error }, "Managed warm session preparation cleanup failed"));
-+        if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
-+        let latestRun = await getRun(run.id).catch(() => null);
-+        try {
-+          if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
-+            await writeExecutionControl(db, DELIVERY_QUEUES.executionFinalization, tx => tx
-+              .update(heartbeatRuns)
-+              .set({ executionControlDeadlineAt: null })
-+              .where(eq(heartbeatRuns.id, run.id)));
-           }
--        }
--        // Close the invariant "environment lease released implies the run is
--        // terminal". When the teardown reaches this point with the run still
--        // running or queued, force a terminal status before the lease is
--        // released, so the UI never shows a finished task as "Live".
--        if (
--          latestRun &&
--          !nativeSessionResumeScheduled &&
--          !nativeWorkspaceFinalizeScheduled &&
--          !nativeOwnershipHeld
--        ) {
--          latestRun = await terminalizeRunOnLeaseRelease(latestRun).catch(
--            (terminalizeErr) => {
--              logger.error(
--                { err: terminalizeErr, runId: run.id },
--                "failed to terminalize run before environment lease release",
-+          nativeOwnershipHeld =
-+            nativeOwnershipHeld ||
-+            Boolean(latestRun && isNativeRunnerOwnershipHeld(latestRun));
-+          // Trace capture is debug-only and must settle independently of every
-+          // provider outcome. Adapter/setup failures used to skip the success-path
-+          // finalizer, leaving metadata permanently stuck at `capturing` even when
-+          // runnerd had already closed (or never managed to write) its sidecar.
-+          // Same-run native resumes retain the open capture until the resumed
-+          // execution reaches a true terminal boundary.
-+          if (
-+            providerTraceCapture &&
-+            !providerTraceFinalized &&
-+            !nativeSessionResumeScheduled
-+          ) {
-+            try {
-+              await traceStore.finalize(run.id, run.companyId);
-+              providerTraceFinalized = true;
-+            } catch (traceFinalizeError) {
-+              logger.warn(
-+                { err: traceFinalizeError, runId: run.id },
-+                "provider trace finalization failed during heartbeat teardown",
-               );
--              return latestRun;
--            },
--          );
--        }
--        // Warm retention is earned only by a fully successful turn. A failed,
--        // cancelled, or timed-out run stops the reusable sandbox so the next
--        // acquisition must revalidate and explicitly resume it.
--        nativeOwnershipHeld =
--          nativeOwnershipHeld ||
--          Boolean(latestRun && isNativeRunnerOwnershipHeld(latestRun));
--        providerResourceDispositionForRun =
--          providerResourceDispositionForTerminalRun(
--            providerResourceDispositionForRun,
--            latestRun?.status,
--          );
--        if (
--          !nativeSessionResumeScheduled &&
--          !nativeWorkspaceFinalizeScheduled &&
--          !nativeOwnershipHeld
--        ) {
--          // Keep launchers during same-run recovery. At a terminal boundary all
--          // operations have settled; clean before the remote lease can be stopped.
-+            }
-+          }
-+          // Close the invariant "environment lease released implies the run is
-+          // terminal". When the teardown reaches this point with the run still
-+          // running or queued, force a terminal status before the lease is
-+          // released, so the UI never shows a finished task as "Live".
-           if (
--            githubLauncherLocation &&
-             latestRun &&
--            isHeartbeatRunTerminalStatus(latestRun.status)
-+            !nativeSessionResumeScheduled &&
-+            !nativeWorkspaceFinalizeScheduled &&
-+            !nativeOwnershipHeld
-           ) {
--            await cleanupGitHubOperationLaunchers(githubLauncherLocation).catch(
--              (err) => {
--                logger.warn(
--                  { err, runId: run.id },
--                  "failed to clean managed GitHub launchers",
-+            latestRun = await terminalizeRunOnLeaseRelease(latestRun).catch(
-+              (terminalizeErr) => {
-+                logger.error(
-+                  { err: terminalizeErr, runId: run.id },
-+                  "failed to terminalize run before environment lease release",
-                 );
-+                return latestRun;
-               },
-             );
-           }
--          // A retained or unverified process stays above this release boundary.
--          // If no stopped-copy capture occurred, preserve an explicit loss report.
--          await instructionWorkingCopy?.releaseWarmInstructionPreparation?.();
--          const uncapturedInstructions = await instructionCopies.reportUnavailable(run.companyId, run.id);
--          if (uncapturedInstructions?.state === "unavailable") {
--            await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
--              message: "Instruction edits could not be recovered before environment release. No instruction save is claimed.",
--              payload: { state: "unavailable", code: uncapturedInstructions.errorCode } });
--          }
--          await withAdapterExecutionPhase(executionPhaseContext, "instruction_cleanup", releaseInstructionCopy);
--          await withAdapterExecutionPhase(executionPhaseContext, "lease_release", () => releaseEnvironmentLeasesForRun({
--            runId: run.id,
--            companyId: run.companyId,
--            agentId: run.agentId,
--            status: latestRun?.status,
--            failureReason: latestRun?.error ?? undefined,
--            providerResourceDisposition: providerResourceDispositionForRun,
--            nativeLifecycleTelemetry: nativeLifecycleTelemetryForRun,
--          }));
--          await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
--          caseHandoffCleanupSettled = true;
--        }
--        if (
--          runScratch &&
--          latestRun &&
--          isHeartbeatRunTerminalStatus(latestRun.status)
--        ) {
--          const scratchForCleanup = runScratch;
--          let scratchCleanup: Awaited<
--            ReturnType<typeof cleanupHeartbeatRunScratch>
--          > | null = null;
--          try {
--            scratchCleanup = await cleanupHeartbeatRunScratch({
--              scratch: scratchForCleanup,
--              processGroupId: latestRun.processGroupId,
--              isProcessGroupAlive,
--              beforeRemove: caseHandoffCleanupSettled && latestRun.runtimeMode === "legacy"
--                ? () => recordLegacyCaseHandoffCleanupVerified(db, { runId: run.id, controllerBootId: legacyControllerBootId, scratch: scratchForCleanup })
--                : undefined,
--            });
--          } catch (scratchCleanupError) {
--            caseHandoffCleanupSettled = false;
--            logger.warn(
--              {
--                err: scratchCleanupError,
--                runId: run.id,
--                scratchDir: scratchForCleanup.dir,
--              },
--              "failed to clean heartbeat run scratch directory",
-+          // Warm retention is earned only by a fully successful turn. A failed,
-+          // cancelled, or timed-out run stops the reusable sandbox so the next
-+          // acquisition must revalidate and explicitly resume it.
-+          nativeOwnershipHeld =
-+            nativeOwnershipHeld ||
-+            Boolean(latestRun && isNativeRunnerOwnershipHeld(latestRun));
-+          providerResourceDispositionForRun =
-+            providerResourceDispositionForTerminalRun(
-+              providerResourceDispositionForRun,
-+              latestRun?.status,
-             );
--            await appendRunEvent(latestRun, {
--              eventType: "error",
--              stream: "system",
--              level: "warn",
--              message: "run scratch cleanup failed",
--              payload: {
--                dir: scratchForCleanup.dir,
--                error:
--                  scratchCleanupError instanceof Error
--                    ? scratchCleanupError.message
--                    : String(scratchCleanupError),
--              },
--            }).catch(() => undefined);
-+          if (
-+            !nativeSessionResumeScheduled &&
-+            !nativeWorkspaceFinalizeScheduled &&
-+            !nativeOwnershipHeld
-+          ) {
-+            // Keep launchers during same-run recovery. At a terminal boundary all
-+            // operations have settled; clean before the remote lease can be stopped.
-+            if (
-+              githubLauncherLocation &&
-+              latestRun &&
-+              isHeartbeatRunTerminalStatus(latestRun.status)
-+            ) {
-+              await cleanupGitHubOperationLaunchers(githubLauncherLocation).catch(
-+                (err) => {
-+                  logger.warn(
-+                    { err, runId: run.id },
-+                    "failed to clean managed GitHub launchers",
-+                  );
-+                },
-+              );
-+            }
-+            // A retained or unverified process stays above this release boundary.
-+            // If no stopped-copy capture occurred, preserve an explicit loss report.
-+            await instructionWorkingCopy?.releaseWarmInstructionPreparation?.();
-+            const uncapturedInstructions = await instructionCopies.reportUnavailable(run.companyId, run.id);
-+            if (uncapturedInstructions?.state === "unavailable") {
-+              await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
-+                message: "Instruction edits could not be recovered before environment release. No instruction save is claimed.",
-+                payload: { state: "unavailable", code: uncapturedInstructions.errorCode } });
-+            }
-+            await withAdapterExecutionPhase(executionPhaseContext, "instruction_cleanup", releaseInstructionCopy);
-+            await withAdapterExecutionPhase(executionPhaseContext, "lease_release", () => releaseEnvironmentLeasesForRun({
-+              runId: run.id,
-+              companyId: run.companyId,
-+              agentId: run.agentId,
-+              status: latestRun?.status,
-+              failureReason: latestRun?.error ?? undefined,
-+              providerResourceDisposition: providerResourceDispositionForRun,
-+              nativeLifecycleTelemetry: nativeLifecycleTelemetryForRun,
-+            }));
-+            await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
-+            caseHandoffCleanupSettled = true;
-           }
--          if (scratchCleanup) {
--            // Scratch cleanup verifies the owned process group, including
--            // grandchildren. The main adapter's exit is not this proof.
--            if (!scratchCleanup.removed) caseHandoffCleanupSettled = false;
--            await appendRunEvent(latestRun, {
--              eventType: "lifecycle",
--              stream: "system",
--              level: scratchCleanup.removed ? "info" : "warn",
--              message: scratchCleanup.removed
--                ? "run scratch cleaned"
--                : `run scratch cleanup skipped: ${scratchCleanup.reason}`,
--              payload: scratchCleanup,
--            }).catch((scratchCleanupEventError) => {
-+          if (
-+            runScratch &&
-+            latestRun &&
-+            isHeartbeatRunTerminalStatus(latestRun.status)
-+          ) {
-+            const scratchForCleanup = runScratch;
-+            let scratchCleanup: Awaited<
-+              ReturnType<typeof cleanupHeartbeatRunScratch>
-+            > | null = null;
-+            try {
-+              scratchCleanup = await cleanupHeartbeatRunScratch({
-+                scratch: scratchForCleanup,
-+                processGroupId: latestRun.processGroupId,
-+                isProcessGroupAlive,
-+                beforeRemove: caseHandoffCleanupSettled && latestRun.runtimeMode === "legacy"
-+                  ? () => recordLegacyCaseHandoffCleanupVerified(db, { runId: run.id, controllerBootId: legacyControllerBootId, scratch: scratchForCleanup })
-+                  : undefined,
-+              });
-+            } catch (scratchCleanupError) {
-+              caseHandoffCleanupSettled = false;
-               logger.warn(
-                 {
--                  err: scratchCleanupEventError,
-+                  err: scratchCleanupError,
-                   runId: run.id,
-                   scratchDir: scratchForCleanup.dir,
-                 },
--                "failed to record heartbeat run scratch cleanup event",
-+                "failed to clean heartbeat run scratch directory",
-               );
--            });
-+              await appendRunEvent(latestRun, {
-+                eventType: "error",
-+                stream: "system",
-+                level: "warn",
-+                message: "run scratch cleanup failed",
-+                payload: {
-+                  dir: scratchForCleanup.dir,
-+                  error:
-+                    scratchCleanupError instanceof Error
-+                      ? scratchCleanupError.message
-+                      : String(scratchCleanupError),
-+                },
-+              }).catch(() => undefined);
-+            }
-+            if (scratchCleanup) {
-+              // Scratch cleanup verifies the owned process group, including
-+              // grandchildren. The main adapter's exit is not this proof.
-+              if (!scratchCleanup.removed) caseHandoffCleanupSettled = false;
-+              await appendRunEvent(latestRun, {
-+                eventType: "lifecycle",
-+                stream: "system",
-+                level: scratchCleanup.removed ? "info" : "warn",
-+                message: scratchCleanup.removed
-+                  ? "run scratch cleaned"
-+                  : `run scratch cleanup skipped: ${scratchCleanup.reason}`,
-+                payload: scratchCleanup,
-+              }).catch((scratchCleanupEventError) => {
-+                logger.warn(
-+                  {
-+                    err: scratchCleanupEventError,
-+                    runId: run.id,
-+                    scratchDir: scratchForCleanup.dir,
-+                  },
-+                  "failed to record heartbeat run scratch cleanup event",
-+                );
-+              });
-+            }
-+          }
-+          if (latestRun?.status === "interrupted" && latestRun.errorCode === "server_shutdown_interrupted") {
-+            latestRun = await settleInterruptedNativeBootstrap(db, { run: latestRun,
-+              providerDispatchStarted: legacyAdapterEntered || nativeDispatchStarted || nativeOwnershipHeld,
-+            }) ?? latestRun;
-+          }
-+          if (latestRun?.status === "cancelled" && !nativeDispatchStarted && !nativeOwnershipHeld &&
-+              (latestRun.runtimeMode === "native" ||
-+                parseObject(latestRun.resultJson?.startupCancellation).beforeNativeSelection === true)) {
-+            // This executor has finished preparation and lease cleanup without
-+            // handing off to native execution. Keep a durable receipt for admission
-+            // after a restart; cleanup receipts are independently rechecked there.
-+            await db.update(heartbeatRuns).set({
-+              resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
-+                ${JSON.stringify({ startupPreparationSettledAt: new Date().toISOString() })}::jsonb`,
-+            }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
-           }
--        }
--        if (latestRun?.status === "interrupted" && latestRun.errorCode === "server_shutdown_interrupted") {
--          latestRun = await settleInterruptedNativeBootstrap(db, { run: latestRun,
--            providerDispatchStarted: legacyAdapterEntered || nativeDispatchStarted || nativeOwnershipHeld,
--          }) ?? latestRun;
--        }
--        if (latestRun?.status === "cancelled" && !nativeDispatchStarted && !nativeOwnershipHeld &&
--            (latestRun.runtimeMode === "native" ||
--              parseObject(latestRun.resultJson?.startupCancellation).beforeNativeSelection === true)) {
--          // This executor has finished preparation and lease cleanup without
--          // handing off to native execution. Keep a durable receipt for admission
--          // after a restart; cleanup receipts are independently rechecked there.
-           await db.update(heartbeatRuns).set({
--            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
--              ${JSON.stringify({ startupPreparationSettledAt: new Date().toISOString() })}::jsonb`,
--          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
-+            executionStage: "settled",
-+            controllerLeaseExpiresAt: null,
-+          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.runtimeMode, "legacy"),
-+            eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
-+            inArray(heartbeatRuns.status, ["succeeded", "failed", "cancelled", "timed_out", "interrupted"])));
-+
-+          latestRun = await getRun(run.id).catch(() => null);
-+          if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status) && !isNativeRunnerOwnershipHeld(latestRun)) {
-+            await appendRunEvent(run, { eventType: "lifecycle", stream: "system", level: "info", message: "task.run.measured",
-+              payload: { phase: "task.run.measured", durationMs: Date.now() - (latestRun.startedAt ?? latestRun.createdAt).getTime(),
-+                outcome: latestRun.status, durableSettlement: true } }).catch(error => logger.warn({ runId: run.id, error }, "Could not record terminal run duration"));
-+          }
-+        } finally {
-+          controllerLease.stop();
-+          settlingRunExecutions.add(run.id);
-+          activeRunExecutions.delete(run.id);
-+          // A failed owned Stop remains visible until this exact executor settles,
-+          // including a graceful exit result arriving after the cancellation error.
-+          // It is never retained beyond the active execution's cleanup.
-+          failedProcessRunCancellations.delete(run.id);
-+          executionControl.finish();
-+          if (adapterExecutionControls.get(run.id) === executionControl) {
-+            adapterExecutionControls.delete(run.id);
-+          }
-         }
--        await db.update(heartbeatRuns).set({
--          executionStage: "settled",
--          controllerLeaseExpiresAt: null,
--        }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.runtimeMode, "legacy"),
--          eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
--          inArray(heartbeatRuns.status, ["succeeded", "failed", "cancelled", "timed_out", "interrupted"])));
--
--        latestRun = await getRun(run.id).catch(() => null);
--        if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status) && !isNativeRunnerOwnershipHeld(latestRun)) {
--          await appendRunEvent(run, { eventType: "lifecycle", stream: "system", level: "info", message: "task.run.measured",
--            payload: { phase: "task.run.measured", durationMs: Date.now() - (latestRun.startedAt ?? latestRun.createdAt).getTime(),
--              outcome: latestRun.status, durableSettlement: true } }).catch(error => logger.warn({ runId: run.id, error }, "Could not record terminal run duration"));
-+        if (latestRun) await reconcileMuseNativeTerminalRun(db, latestRun);
-+        // Scratch preparation is optional. Its removal cannot be the only proof
-+        // that a local legacy adapter's closed-stdio descendants stopped.
-+        if (caseHandoffCleanupSettled && latestRun?.runtimeMode === "legacy" && legacyLocalAdapterEntered) {
-+          caseHandoffCleanupSettled = hasStoppedLocalProcessTree(latestRun);
-         }
--      } finally {
--        controllerLease.stop();
--        activeRunExecutions.delete(run.id);
--        // A failed owned Stop remains visible until this exact executor settles,
--        // including a graceful exit result arriving after the cancellation error.
--        // It is never retained beyond the active execution's cleanup.
--        failedProcessRunCancellations.delete(run.id);
--        executionControl.finish();
--        if (adapterExecutionControls.get(run.id) === executionControl) {
--          adapterExecutionControls.delete(run.id);
-+        if (caseHandoffCleanupSettled && latestRun && !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled &&
-+            !nativeOwnershipHeld && isHeartbeatRunTerminalStatus(latestRun.status)) {
-+          const handoff = await pendingCaseHandoffForRun(db, run.id);
-+          if (handoff) await recordCaseHandoffExecutionReleased(db, run.id, handoff.issueId);
-         }
--      }
 -      if (latestRun) await reconcileMuseNativeTerminalRun(db, latestRun);
 -      // Scratch preparation is optional. Its removal cannot be the only proof
 -      // that a local legacy adapter's closed-stdio descendants stopped.
@@ -1330,6 +984,18 @@ index 9470fd173..03fb01ed1 100644
 -          await (pending.payload?.queuedCommentInterrupt
 -            ? resumeQueuedCommentInterrupt(run.companyId, pending.id)
 -            : releaseIssueExecutionAndPromote(latestRun, { suppressImmediateRecovery: true })).then(() => {
++      try {
++        if (latestRun) await reconcileMuseNativeTerminalRun(db, latestRun);
++        // Scratch preparation is optional. Its removal cannot be the only proof
++        // that a local legacy adapter's closed-stdio descendants stopped.
++        if (caseHandoffCleanupSettled && latestRun?.runtimeMode === "legacy" && legacyLocalAdapterEntered) {
++          caseHandoffCleanupSettled = hasStoppedLocalProcessTree(latestRun);
++        }
++        if (caseHandoffCleanupSettled && latestRun && !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled &&
++            !nativeOwnershipHeld && isHeartbeatRunTerminalStatus(latestRun.status)) {
++          const handoff = await pendingCaseHandoffForRun(db, run.id);
++          if (handoff) await recordCaseHandoffExecutionReleased(db, run.id, handoff.issueId);
++        }
 +        // Terminalization precedes lease and adapter cleanup. Only now is the
 +        // owner gone; retry pending input for ordinary completions as well as Stop.
 +        let issueExecutionReleasedAfterCleanup = false;
@@ -1396,7 +1062,8 @@ index 9470fd173..03fb01ed1 100644
 +            deferredIssueExecutionReleases.delete(run.id);
 +            logger.error({ err, runId: run.id }, "failed to release issue execution after legacy cleanup");
 +          });
-+        }
+         }
+-        await startNextQueuedRunForAgent(run.agentId);
 +        if (
 +          !nativeSessionResumeScheduled &&
 +          !nativeWorkspaceFinalizeScheduled &&
@@ -1413,14 +1080,13 @@ index 9470fd173..03fb01ed1 100644
 +              });
 +          }
 +          await startNextQueuedRunForAgent(run.agentId);
-         }
--        await startNextQueuedRunForAgent(run.agentId);
++        }
 +      } finally {
 +        settlingRunExecutions.delete(run.id);
        }
      }
    }
-@@ -3984,7 +3998,7 @@ export function heartbeatService(
+@@ -3996,7 +4010,7 @@ export function heartbeatService(
        const intervalMs = options.intervalMs ?? 25;
        const deadline = Date.now() + timeoutMs;
  
@@ -1430,7 +1096,7 @@ index 9470fd173..03fb01ed1 100644
            throw new Error(
              `Timed out waiting for heartbeat run ${runId} execution to drain`,
 diff --git a/server/src/services/heartbeat/queue.ts b/server/src/services/heartbeat/queue.ts
-index ad8e99cee..51dc3be6f 100644
+index c63c15af1edcf6b3ce96bf882f99a3b8dc735de4..c2516d3026736517dc655b18fb71e753169e61a7 100644
 --- a/server/src/services/heartbeat/queue.ts
 +++ b/server/src/services/heartbeat/queue.ts
 @@ -148,7 +148,7 @@ import {
@@ -1442,14 +1108,13 @@ index ad8e99cee..51dc3be6f 100644
  import { withAgentStartLock } from "../agent-start-lock.js";
  import {
    evaluateAgentInvokability,
-@@ -1236,6 +1236,26 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -1236,6 +1236,25 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
          executionLockedAt: claimedAt,
          updatedAt: claimedAt,
        }).where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)));
-+      // A resolved interaction resumes a review task. Claiming the continuation
-+      // transfers the task back to active work, and that visible status change
-+      // must be committed with the run/issue execution lock so observers never
-+      // see an active continuation still parked in review.
++      // A resolved interaction resumes a review task. Commit the visible status
++      // change with the run/issue lock, while retaining an actually pending
++      // review or approval stage until its decision is recorded.
 +      if (isResolvedInteractionContinuationWakeContext(claimedRun.contextSnapshot)) {
 +        await tx.update(issues).set({
 +          status: "in_progress",
@@ -1470,7 +1135,7 @@ index ad8e99cee..51dc3be6f 100644
      const nativeReviewContext = readNativeReviewAssignmentContext(context);
      const queuedCommentIds = queuedCommentIdsFromRunContext(context);
 diff --git a/server/src/services/heartbeat/task-context.ts b/server/src/services/heartbeat/task-context.ts
-index 982005905..596a3b158 100644
+index 982005905a81b4097015f80685281a81ae8d5e2a..596a3b158a69e3819350238e4d03d38b813f2e53 100644
 --- a/server/src/services/heartbeat/task-context.ts
 +++ b/server/src/services/heartbeat/task-context.ts
 @@ -50,6 +50,11 @@ function readNonEmptyString(value: unknown): string | null {
@@ -1508,7 +1173,7 @@ index 982005905..596a3b158 100644
      executionStage.recoveryInstruction = recoveryInstruction;
    }
 diff --git a/server/src/services/issues.ts b/server/src/services/issues.ts
-index 257ccab4b..91c5199e0 100644
+index 9e570680ba6c6eea3b94376f7ac90904ed8e5cbb..edb59485f5c725d9699a3e65736b4d0b2902471a 100644
 --- a/server/src/services/issues.ts
 +++ b/server/src/services/issues.ts
 @@ -17,7 +17,11 @@ import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notificatio
@@ -1524,7 +1189,7 @@ index 257ccab4b..91c5199e0 100644
  import { retryIdempotentDatabaseOperation } from "../database-retry.js";
  import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
  import { documentService } from "./documents.js";
-@@ -224,6 +228,72 @@ import { ensurePersonalPrivateProject } from "./projects.js";
+@@ -225,6 +229,72 @@ import { ensurePersonalPrivateProject } from "./projects.js";
  import { projectSafeChatPublication } from "./chat-publication-projection.js";
  import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
  
@@ -1597,7 +1262,7 @@ index 257ccab4b..91c5199e0 100644
  const ALL_ISSUE_STATUSES = [
    "backlog",
    "todo",
-@@ -11234,7 +11304,7 @@ export function issueService(db: Db) {
+@@ -11239,7 +11309,7 @@ export function issueService(db: Db) {
            const actorRun = await assertAgentRunWriteAllowed(tx, receiptExisting.companyId, {
              agentId: actorAgentId, runId: actorRunId, stopId: actorRunStopId,
            });
@@ -1606,7 +1271,7 @@ index 257ccab4b..91c5199e0 100644
            if (actorRunHandoffId && (
              !actorRun || actorRunHandoffId !== actorRunId ||
              actorRun.runtimeMode !== "legacy" || actorRun.companyId !== receiptExisting.companyId ||
-@@ -11250,6 +11320,19 @@ export function issueService(db: Db) {
+@@ -11255,6 +11325,19 @@ export function issueService(db: Db) {
              });
            }
          }
@@ -1627,7 +1292,7 @@ index 257ccab4b..91c5199e0 100644
            const [review] = await tx.select({ id: toolActionRequests.id }).from(toolActionRequests).where(and(eq(toolActionRequests.companyId, existing.companyId), eq(toolActionRequests.issueId, id), inArray(toolActionRequests.status, ["pending", "approved", "executing"]))).limit(1);
            if (review) throw conflict("This task is waiting for a connection review. Finish unrelated work, then yield in_review without retrying the governed call.", { code: "tool_review_pending", actionRequestId: review.id });
 diff --git a/server/src/services/run-failure-report.ts b/server/src/services/run-failure-report.ts
-index 46f3c090d..f15f718a1 100644
+index c912b19a0d3fc0341e5da83928d99365e1521d1a..cfba8c7ae9dfcd84629fd14cf4f4f9b8eab04bc7 100644
 --- a/server/src/services/run-failure-report.ts
 +++ b/server/src/services/run-failure-report.ts
 @@ -72,13 +72,22 @@ function asRecord(value: unknown): Record<string, unknown> | null {
