@@ -109,7 +109,12 @@
     {
       "number": 25,
       "repository": "copystring/paperclip",
-      "head": "1e6cfb3bbe1276e5991920fe19fdbb63ed589ae3"
+      "head": "5b32c7a63db0f2e6ae5a2ebae18cb7fb8fdf576f",
+      "integrationPatch": {
+        "number": 25,
+        "path": "backport-25.patch",
+        "sha256": "2511961a49fd1b34b9500e369d2c382522168657c6c7bd12f914770976fc9275"
+      }
     },
     {
       "number": 17393,
