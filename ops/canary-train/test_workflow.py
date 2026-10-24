@@ -10,13 +10,44 @@ WORKFLOW = ROOT / ".github/workflows/canary-patched.yml"
 
 
 class DependencyCacheWorkflowTests(unittest.TestCase):
+    def test_manual_canary_input_is_quoted_and_schedule_keeps_latest_default(self):
+        dispatch = self.text.split("  workflow_dispatch:\n", 1)[1].split("  schedule:\n", 1)[0]
+        self.assertIn("canary_version:", dispatch)
+        self.assertIn("type: string", dispatch)
+        self.assertIn("required: false", dispatch)
+        self.assertIn("qualification_only:", dispatch)
+        self.assertIn("type: boolean", dispatch)
+        self.assertIn("default: false", dispatch)
+        self.assertIn("- cron: '23 3 * * *'", self.text)
+        for job in ("migration-fixture-check", "assemble"):
+            block = re.search(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  [a-z_-]+:|\Z)", self.text).group(1)
+            self.assertIn("CANARY_VERSION: ${{ inputs.canary_version }}", block)
+            self.assertIn('args+=(--canary-version "$CANARY_VERSION")', block)
+            self.assertNotIn("${{ inputs.canary_version }}\"", block)
+
+    def test_qualification_only_runs_read_only_checks_and_skips_release_train(self):
+        fixture = re.search(r"(?ms)^  migration-fixture-check:\n(.*?)(?=^  [a-z_-]+:|\Z)", self.text).group(1)
+        assemble = re.search(r"(?ms)^  assemble:\n(.*?)(?=^  [a-z_-]+:|\Z)", self.text).group(1)
+        self.assertIn("inputs.qualification_only == true", fixture)
+        self.assertIn("inputs.qualification_only != true", assemble)
+        self.assertIn("args=(prepare", fixture)
+        self.assertIn('build.py "${args[@]}"', fixture)
+        self.assertIn("verify-migration-compatibility.mjs", fixture)
+        self.assertNotIn("publish.py", fixture)
+        self.assertNotIn("contents: write", fixture)
+        self.assertNotIn("build.py build", fixture)
+        self.assertNotIn("runner-artifacts", fixture)
+        self.assertIn("needs: assemble", self.text)
+        self.assertIn("needs: [assemble, verify-tests, runner-artifacts, migration-compatibility]", self.text)
+
     def test_pull_requests_prove_disposable_migration_fixtures_without_release_jobs(self):
         job = self.text.split('  migration-fixture-check:\n', 1)[1].split('  assemble:\n', 1)[0]
         self.assertIn('needs: controller-tests', job)
-        self.assertIn("github.repository == 'copystring/paperclip' && github.event_name == 'pull_request'", job)
+        self.assertIn("github.event_name == 'pull_request'", job)
         self.assertIn('runs-on: ubuntu-24.04', job)
         self.assertIn('persist-credentials: false', job)
-        self.assertIn('build.py prepare', job)
+        self.assertIn('args=(prepare', job)
+        self.assertIn('build.py "${args[@]}"', job)
         self.assertIn('verify-migration-compatibility.mjs', job)
         self.assertIn('migration-output/provenance.json', job)
         self.assertIn('retention-days: 1', job)

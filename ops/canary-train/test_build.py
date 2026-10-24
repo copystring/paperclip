@@ -62,6 +62,64 @@ class IntegrityAndProvenanceTests(unittest.TestCase):
             "https://registry.npmjs.org/@paperclipai%2Fdb/2026.1018.0-canary.9",
         ])
 
+    def test_explicit_canary_version_uses_exact_registry_versions_while_tags_move(self):
+        version = "2026.1024.0-canary.17"
+        source = "b" * 40
+        bodies = {}
+        metadata = {}
+        for name in (*build.DEFAULT_PACKAGES, "@paperclipai/db"):
+            payload, sri = make_npm_tarball(name, version, {"commit": source} if name == "@paperclipai/server" else None)
+            url = "https://registry.npmjs.org/tarballs/" + name.replace("/", "-") + ".tgz"
+            bodies[url] = payload
+            metadata[build.npm_url(name, version)] = {
+                "name": name, "version": version, "dist": {"tarball": url, "integrity": sri},
+            }
+        with patch.object(build, "http_json", side_effect=lambda url: metadata[url]) as request, \
+             patch.object(build, "http_bytes", side_effect=lambda url: bodies[url]):
+            resolved, docs, commit = build.resolve_canary(version)
+        self.assertEqual(resolved, version)
+        self.assertEqual(commit, source)
+        self.assertEqual([call.args[0] for call in request.call_args_list], [
+            build.npm_url("paperclipai", version),
+            build.npm_url("@paperclipai/server", version),
+            build.npm_url("@paperclipai/db", version),
+        ])
+        self.assertTrue(all(doc["version"] == version for doc in docs.values()))
+
+    def test_explicit_canary_version_rejects_stable_url_injection_and_invalid_dates_before_network(self):
+        invalid_versions = (
+            "2026.1024.0",
+            "2026.1024.0-stable.1",
+            "https://registry.npmjs.org/paperclipai/canary",
+            "2026.1024.0-canary.17/../../latest",
+            "2026.0230.0-canary.17",
+            "2026.1024.0-canary.17;print(1)",
+        )
+        for version in invalid_versions:
+            with self.subTest(version=version), patch.object(build, "http_json") as request:
+                with self.assertRaises(build.TrainError):
+                    build.resolve_canary(version)
+                request.assert_not_called()
+
+    def test_explicit_canary_version_fails_closed_when_registry_metadata_moves_or_mismatches(self):
+        version = "2026.1024.0-canary.17"
+        requested_url = build.npm_url("paperclipai", version)
+        wrong_metadata = {"name": "paperclipai", "version": "2026.1024.0-canary.18", "dist": {"tarball": "https://example.invalid/pkg.tgz"}}
+        with patch.object(build, "http_json", return_value=wrong_metadata) as request, \
+             patch.object(build, "http_bytes") as download:
+            with self.assertRaisesRegex(build.TrainError, "does not match requested Canary"):
+                build.resolve_canary(version)
+        request.assert_called_once_with(requested_url)
+        download.assert_not_called()
+
+        wrong_package = {"name": "other-package", "version": version, "dist": {"tarball": "https://example.invalid/pkg.tgz"}}
+        with patch.object(build, "http_json", return_value=wrong_package) as request, \
+             patch.object(build, "http_bytes") as download:
+            with self.assertRaisesRegex(build.TrainError, "metadata identity mismatch"):
+                build.resolve_canary(version)
+        request.assert_called_once_with(requested_url)
+        download.assert_not_called()
+
     def test_npm_integrity_accepts_correct_sri_and_rejects_tampering(self):
         payload = b"canary package"
         sri = "sha512-" + base64.b64encode(hashlib.sha512(payload).digest()).decode()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from datetime import date
 import gzip
 import hashlib
 import json
@@ -24,6 +25,7 @@ from typing import Any, Iterable
 HEX40 = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 PACKAGE_NAME = re.compile(r"^(?:@[a-z0-9_.-]+/)?[a-z0-9_.-]+$")
+CALVER_CANARY_VERSION = re.compile(r"^(\d{4})\.(\d{4})\.0-canary\.(\d+)$")
 DEFAULT_PACKAGES = ("paperclipai", "@paperclipai/server")
 REGISTRY = "https://registry.npmjs.org"
 GITHUB_API = "https://api.github.com"
@@ -303,16 +305,33 @@ def npm_url(name: str, endpoint: str) -> str:
     return f"{REGISTRY}/{urllib.parse.quote(name, safe='@')}/{endpoint}"
 
 
-def resolve_canary() -> tuple[str, dict[str, dict[str, Any]], str]:
+def validate_canary_version(version: str) -> str:
+    """Accept only a dated Paperclip prerelease, never an arbitrary registry selector."""
+    match = CALVER_CANARY_VERSION.fullmatch(version) if isinstance(version, str) else None
+    if not match:
+        raise TrainError("canary version must use YYYY.MMDD.0-canary.N format")
+    year, month_day, _sequence = match.groups()
+    try:
+        date(int(year), int(month_day[:2]), int(month_day[2:]))
+    except ValueError as exc:
+        raise TrainError("canary version contains an invalid calendar date") from exc
+    return version
+
+
+def resolve_canary(canary_version: str | None = None) -> tuple[str, dict[str, dict[str, Any]], str]:
+    pinned_version = validate_canary_version(canary_version) if canary_version is not None else None
     docs: dict[str, dict[str, Any]] = {}
     versions = {}
     for name in DEFAULT_PACKAGES:
-        doc = http_json(npm_url(name, "canary"))
+        endpoint = pinned_version if pinned_version is not None else "canary"
+        doc = http_json(npm_url(name, endpoint))
         version = doc.get("version")
         if not isinstance(version, str) or not version:
             raise TrainError(f"npm canary tag is missing for {name}")
         if doc.get("name") != name or doc.get("version") != version or not isinstance(doc.get("dist", {}).get("tarball"), str):
-            raise TrainError(f"npm metadata identity mismatch for {name}@{version}")
+            raise TrainError(f"npm metadata identity mismatch for {name}@{endpoint}")
+        if pinned_version is not None and version != pinned_version:
+            raise TrainError(f"npm metadata for {name} does not match requested Canary {pinned_version}")
         docs[name], versions[name] = doc, version
     if versions[DEFAULT_PACKAGES[0]] != versions[DEFAULT_PACKAGES[1]]:
         raise TrainError("npm paperclipai and @paperclipai/server canary versions are not synchronized")
@@ -352,8 +371,9 @@ def is_ancestor(cwd: Path, ancestor: str, commit: str) -> bool:
     return git(cwd, "merge-base", "--is-ancestor", ancestor, commit, check=False).returncode == 0
 
 
-def prepare(workspace: Path, output: Path, manifest: dict[str, Any], manifest_path: Path | None = None) -> dict[str, Any]:
-    version, npm_docs, source_commit = resolve_canary()
+def prepare(workspace: Path, output: Path, manifest: dict[str, Any], manifest_path: Path | None = None,
+            canary_version: str | None = None) -> dict[str, Any]:
+    version, npm_docs, source_commit = resolve_canary(canary_version)
     if workspace.exists() and any(workspace.iterdir()):
         raise TrainError("workspace must be new or empty; refusing to overwrite existing files")
     workspace.parent.mkdir(parents=True, exist_ok=True)
@@ -1341,6 +1361,7 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--output", type=Path, required=True)
         if name == "prepare":
             command.add_argument("--manifest", type=Path, required=True)
+            command.add_argument("--canary-version")
         elif name == "test":
             command.add_argument("--lane", required=True)
         elif name == "build":
@@ -1354,7 +1375,7 @@ def main(argv: list[str] | None = None) -> int:
         workspace, output = args.workspace.resolve(), args.output.resolve()
         if args.command == "prepare":
             manifest = validate_manifest(json.loads(args.manifest.read_text(encoding="utf-8")))
-            result = prepare(workspace, output, manifest, args.manifest)
+            result = prepare(workspace, output, manifest, args.manifest, args.canary_version)
         elif args.command == "plan":
             result = create_test_plan(workspace, output)
         elif args.command == "test":

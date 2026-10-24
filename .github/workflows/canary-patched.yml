@@ -7,6 +7,16 @@ on:
       - .github/workflows/canary-patched.yml
       - .github/workflows/pr.yml
   workflow_dispatch:
+    inputs:
+      canary_version:
+        description: Exact published YYYY.MMDD.0-canary.N version to qualify or release
+        required: false
+        type: string
+      qualification_only:
+        description: Run controller checks and the isolated migration fixture only
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: '23 3 * * *'
 
@@ -37,7 +47,10 @@ jobs:
 
   migration-fixture-check:
     needs: controller-tests
-    if: github.repository == 'copystring/paperclip' && github.event_name == 'pull_request'
+    if: >-
+      github.repository == 'copystring/paperclip' &&
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'workflow_dispatch' && inputs.qualification_only == true))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -51,11 +64,17 @@ jobs:
       - name: Prepare source for disposable migration fixtures
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          python3 ops/canary-train/build.py prepare
-          --manifest "$GITHUB_WORKSPACE/ops/canary-train/patches.json"
-          --workspace "$RUNNER_TEMP/migration-source"
-          --output "$RUNNER_TEMP/migration-output"
+          CANARY_VERSION: ${{ inputs.canary_version }}
+        run: |
+          set -euo pipefail
+          args=(prepare
+            --manifest "$GITHUB_WORKSPACE/ops/canary-train/patches.json"
+            --workspace "$RUNNER_TEMP/migration-source"
+            --output "$RUNNER_TEMP/migration-output")
+          if [[ -n "${CANARY_VERSION:-}" ]]; then
+            args+=(--canary-version "$CANARY_VERSION")
+          fi
+          python3 ops/canary-train/build.py "${args[@]}"
       - name: Verify migration fixtures before merge
         run: |
           mkdir -p "$RUNNER_TEMP/migration-fixture-receipt"
@@ -73,7 +92,9 @@ jobs:
 
   assemble:
     needs: controller-tests
-    if: github.repository == 'copystring/paperclip' && github.event_name != 'pull_request'
+    if: >-
+      github.repository == 'copystring/paperclip' && github.event_name != 'pull_request' &&
+      (github.event_name != 'workflow_dispatch' || inputs.qualification_only != true)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
@@ -91,11 +112,17 @@ jobs:
       - name: Assemble exact published Canary and pinned patches
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          python3 ops/canary-train/build.py prepare
-          --manifest "$GITHUB_WORKSPACE/ops/canary-train/patches.json"
-          --workspace "$RUNNER_TEMP/paperclip-source"
-          --output "$RUNNER_TEMP/paperclip-output"
+          CANARY_VERSION: ${{ inputs.canary_version }}
+        run: |
+          set -euo pipefail
+          args=(prepare
+            --manifest "$GITHUB_WORKSPACE/ops/canary-train/patches.json"
+            --workspace "$RUNNER_TEMP/paperclip-source"
+            --output "$RUNNER_TEMP/paperclip-output")
+          if [[ -n "${CANARY_VERSION:-}" ]]; then
+            args+=(--canary-version "$CANARY_VERSION")
+          fi
+          python3 ops/canary-train/build.py "${args[@]}"
       - name: Skip an already verified candidate
         id: update
         env:
