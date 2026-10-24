@@ -64,7 +64,7 @@ jobs:
       - name: Prepare source for disposable migration fixtures
         env:
           GH_TOKEN: ${{ github.token }}
-          CANARY_VERSION: ${{ inputs.canary_version }}
+          CANARY_VERSION: ${{ github.event_name == 'pull_request' && '2026.1023.0-canary.18' || inputs.canary_version }}
         run: |
           set -euo pipefail
           args=(prepare

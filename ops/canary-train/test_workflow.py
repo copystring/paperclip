@@ -32,7 +32,11 @@ class DependencyCacheWorkflowTests(unittest.TestCase):
         self.assertIn("- cron: '23 3 * * *'", self.text)
         for job in ("migration-fixture-check", "assemble"):
             block = re.search(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  [a-z_-]+:|\Z)", self.text).group(1)
-            self.assertIn("CANARY_VERSION: ${{ inputs.canary_version }}", block)
+            if job == 'migration-fixture-check':
+                self.assertIn("CANARY_VERSION: ${{ github.event_name == 'pull_request' && '2026.1023.0-canary.18' || inputs.canary_version }}", block)
+            else:
+                self.assertIn("CANARY_VERSION: ${{ inputs.canary_version }}", block)
+                self.assertNotIn('2026.1023.0-canary.18', block, 'The production train must keep daily latest selection')
             self.assertIn('args+=(--canary-version "$CANARY_VERSION")', block)
             self.assertNotIn("${{ inputs.canary_version }}\"", block)
 
