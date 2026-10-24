@@ -401,7 +401,7 @@ export async function githubGuestBotConnectionForSession(
     // following chat provenance, which must remain bound to its own task.
     .innerJoin(chatConversations, and(
       eq(chatConversations.companyId, heartbeatRuns.companyId),
-      eq(chatConversations.issueId, boundRunIssueIdSql()),
+      eq(sql<string>`${chatConversations.issueId}::text`, boundRunIssueIdSql()),
       eq(chatConversations.issueId, session.issueId),
     ))
     .innerJoin(chatEndpoints, and(
