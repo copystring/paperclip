@@ -976,6 +976,21 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     await prepared.cleanup();
   });
 
+  it.each([undefined, "paperclip/combo/medium"])("keeps remote opt-out without MCP a no-op (model=%s)", async (model) => {
+    const configHome = await makeConfigHome();
+    const env = { XDG_CONFIG_HOME: configHome };
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env,
+      config: { dangerouslySkipPermissions: false, ...(model ? { model } : {}) },
+      targetIsRemote: true,
+    });
+
+    expect(prepared.env).toBe(env);
+    expect(prepared.runtimeConfigHome).toBeNull();
+    expect(prepared.notes).toEqual([]);
+    await prepared.cleanup();
+  });
+
   it.each([false, true])("adds run-scoped MCP servers without changing permission policy (skip=%s)", async (skip) => {
     const configHome = await makeConfigHome({
       permission: { bash: "ask", "mcp__existing__write": "deny" },

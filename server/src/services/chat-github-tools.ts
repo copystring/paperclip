@@ -397,13 +397,26 @@ export async function githubGuestBotConnectionForSession(
       contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object('wakeCommentId', ${heartbeatRuns.contextSnapshot}->'wakeCommentId')`,
     })
     .from(heartbeatRuns)
+    // Ordinary tasks have no chat sponsorship. Check that scope before
+    // following chat provenance, which must remain bound to its own task.
+    .innerJoin(chatConversations, and(
+      eq(chatConversations.companyId, heartbeatRuns.companyId),
+      eq(sql<string>`${chatConversations.issueId}::text`, boundRunIssueIdSql()),
+      eq(chatConversations.issueId, session.issueId),
+    ))
+    .innerJoin(chatEndpoints, and(
+      eq(chatEndpoints.id, chatConversations.endpointId),
+      eq(chatEndpoints.companyId, session.companyId),
+      eq(chatEndpoints.assignedAgentId, session.agentId),
+      eq(chatEndpoints.provider, "github"),
+    ))
     .where(
       and(
         eq(heartbeatRuns.companyId, session.companyId),
         eq(heartbeatRuns.agentId, session.agentId),
         eq(heartbeatRuns.id, session.runId),
       ),
-    );
+    ).limit(1);
   const commentId = run ? await chatRunSourceMessageId(db, run, { allowLegacyWakeComment: true, provider: "github" }) : null;
   if (typeof commentId !== "string") return null;
   const [source] = await db

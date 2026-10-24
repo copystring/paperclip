@@ -11,6 +11,7 @@ import {
   EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON,
   isConfigurationIncompleteFailedRun,
   isWorkspaceValidationFailedRun,
+  parseObject,
   readNonEmptyString,
 } from "../domain/values.js";
 import type {
@@ -190,6 +191,7 @@ async function runReleaseDrain(
   while (true) {
     const candidate = await ports.transaction.findNextDeferredWake({
       companyId: run.companyId, issueId: issue.id,
+      ...(locked.assignmentHandoffWakeId ? { onlyWakeId: locked.assignmentHandoffWakeId } : {}),
       ...(preservedWakeIds.length ? { excludedWakeIds: preservedWakeIds } : {}),
     });
     if (!candidate) break;

@@ -24,6 +24,22 @@ export function markIdleStartupComplete(options: { scheduledBackups: boolean }) 
   startupComplete = true;
 }
 
+async function missingWithoutInvalidParent(directory: string): Promise<IdleLocalWork> {
+  let parent = path.dirname(directory);
+  while (true) {
+    try {
+      const info = await fs.lstat(parent);
+      return info.isDirectory() && !info.isSymbolicLink() ? "none" : "unknown";
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") return "unknown";
+      const next = path.dirname(parent);
+      if (next === parent) return "none";
+      parent = next;
+    }
+  }
+}
+
 /** Any entry, including malformed JSON, a temp file or a failed probe, is
  * evidence to retain. Recovery readers intentionally skip some such files;
  * they cannot certify that stopping the process is safe. */
@@ -35,7 +51,7 @@ export async function inspectIdleSpool(directory: string): Promise<IdleLocalWork
     try { return (await dir.read()) === null ? "none" : "present"; }
     finally { await dir.close(); }
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "none" : "unknown";
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? missingWithoutInvalidParent(directory) : "unknown";
   }
 }
 
@@ -61,11 +77,12 @@ export async function inspectIdleQuotaRecovery(directory: string): Promise<IdleL
   }
 }
 
-export async function readIdleLocalWork(options: { backupCheckpoint?: boolean } = {}): Promise<IdleLocalWork> {
+export async function readIdleLocalWork(options: { backupCheckpoint?: boolean; purpose?: "restart" } = {}): Promise<IdleLocalWork> {
   if (!startupComplete || !ingressTracked) return "unknown";
-  // This exemption belongs only to a scan which will finish a new backup
-  // under the same admission hold before it can return an empty report.
-  if ((scheduledBackups && !options.backupCheckpoint) || idleWorkSnapshot().active !== 0) return "present";
+  // A backup checkpoint may create its one new backup under the hold. Restart
+  // readiness ignores only the future schedule; actual backup work remains
+  // visible through tracked work and the local probes below.
+  if ((scheduledBackups && !options.backupCheckpoint && options.purpose !== "restart") || idleWorkSnapshot().active !== 0) return "present";
   try {
     const local = [...localWorkProbes].map(probe => probe());
     if (local.includes("unknown")) return "unknown";

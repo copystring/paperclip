@@ -191,6 +191,17 @@ import {
   verifyToolArgumentsSignature,
 } from "./tool-content-guards.js";
 import { extendApprovedExecutionWaitDeadline } from "./approved-execution-wait.js";
+import { beginIdleTrackedWork } from "./task-admission.js";
+
+function withIdleTrackedGatewayCall<T>(operation: () => Promise<T>): Promise<T> {
+  const finish = beginIdleTrackedWork();
+  try {
+    return operation().finally(finish);
+  } catch (error) {
+    finish();
+    throw error;
+  }
+}
 
 const DEFAULT_SESSION_TTL_MS = 15 * 60 * 1000;
 const MAX_SESSION_TTL_MS = 60 * 60 * 1000;
@@ -6467,6 +6478,7 @@ export function createToolGatewayService(
       // deadline does not prove the remote connection is unhealthy, and the
       // provider may have applied a mutation before the response was lost.
       if (controller.signal.aborted) {
+        if (mcpSession) forgetMcpHttpSession(mcpSession);
         throw new ToolGatewayHttpError(
           504,
           `Remote MCP tool call exceeded its ${ms} ms caller deadline. The provider may still have processed the action; its outcome is unknown. Check its state before an explicit retry.`,
@@ -8653,7 +8665,7 @@ export function createToolGatewayService(
     };
   }
 
-  return {
+  const service = {
     async recordRuntimeMcpDeliveryDiagnostic(input: {
       companyId: string;
       agentId: string;
@@ -11614,6 +11626,15 @@ export function createToolGatewayService(
         throw err;
       }
     },
+  };
+  return {
+    ...service,
+    executeTestCall: (input: ExecuteTestCallInput) =>
+      withIdleTrackedGatewayCall(() => service.executeTestCall(input)),
+    executeTool: (input: ExecuteGatewayToolInput) =>
+      withIdleTrackedGatewayCall(() => service.executeTool(input)),
+    executePluginTool: (input: ExecutePluginToolInput) =>
+      withIdleTrackedGatewayCall(() => service.executePluginTool(input)),
   };
 }
 
