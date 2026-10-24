@@ -109,17 +109,17 @@
     {
       "number": 25,
       "repository": "copystring/paperclip",
-      "head": "5b32c7a63db0f2e6ae5a2ebae18cb7fb8fdf576f",
+      "head": "81f5bd59b1357da65d021728ca7f2e293f51904b",
       "integrationPatch": {
         "number": 25,
         "path": "backport-25.patch",
-        "sha256": "5bec1a13e85e9c767e5c50b8ff047dc0bde806d3220604f774d4eefa48036e41"
+        "sha256": "fde46f58f72bba565ec1a93848093eba96eb95c51a2cf4a5993eb293b492e286"
       }
     },
     {
       "number": 17393,
       "repository": "paperclipai/paperclip",
-      "head": "e73a4c7fe67fd862cd05d4a8724a4ff634941b61"
+      "head": "698bd8428d2c9213f7f59b9fa6353ccc595e8d8b"
     }
   ]
 }
