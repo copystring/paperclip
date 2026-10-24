@@ -19,7 +19,7 @@ export async function assertAgentRunWriteAllowed(tx: Db, companyId: string, acto
   stopId?: string | null;
 }) {
   if (!actor.agentId || !actor.runId) return;
-  const [run] = await tx.select({ status: heartbeatRuns.status, resultJson: heartbeatRuns.resultJson,
+  const [run] = await tx.select({ id: heartbeatRuns.id, status: heartbeatRuns.status, resultJson: heartbeatRuns.resultJson,
     agentId: heartbeatRuns.agentId,
     runtimeMode: heartbeatRuns.runtimeMode, companyId: heartbeatRuns.companyId,
     contextSnapshot: heartbeatRuns.contextSnapshot })

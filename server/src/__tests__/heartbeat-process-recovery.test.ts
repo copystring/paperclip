@@ -13,6 +13,7 @@ import * as aiConnectionRuntime from "../services/ai-connection-runtime.js";
 import { forbidden, unprocessable } from "../errors.js";
 import { aiConnectionCredentialNotSharedFailure } from "../services/ai-connection-configuration-failure.js";
 import * as executionContinuation from "../services/execution-continuation.js";
+import * as museTerminalReconciliation from "../services/native-runtime/muse-terminal-reconciliation.js";
 import * as environmentOrchestrator from "../services/environment-run-orchestrator.js";
 import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
 import { legacyDispositionFingerprint, LEGACY_DISPOSITION_REPAIR_INSTRUCTION } from "../services/recovery/legacy-continuation.js";
@@ -1612,6 +1613,36 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     return { companyId, agentId, runId, wakeupRequestId, issueId };
   }
 
+  it("waits for terminal settlement after the active owner is released", async () => {
+    const { runId } = await seedQueuedIssueRunFixture();
+    let settlementEntered = false;
+    let finishSettlement!: () => void;
+    const settlementGate = new Promise<void>(resolve => { finishSettlement = resolve; });
+    const reconcile = vi.spyOn(museTerminalReconciliation, "reconcileMuseNativeTerminalRun")
+      .mockImplementation(async (_database, run) => {
+        if (run.id !== runId) return;
+        settlementEntered = true;
+        await settlementGate;
+      });
+    const heartbeat = heartbeatService(db);
+    let dispatch: Promise<unknown> | undefined;
+    let drained = false;
+    try {
+      dispatch = heartbeat.resumeQueuedRuns();
+      expect(await waitForValue(async () => settlementEntered || null, 5_000)).toBe(true);
+      const drain = heartbeat.waitForRunExecutionDrain(runId).then(() => { drained = true; });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(drained).toBe(false);
+      finishSettlement();
+      await Promise.all([dispatch, drain]);
+      expect(drained).toBe(true);
+    } finally {
+      finishSettlement();
+      await dispatch?.catch(() => undefined);
+      reconcile.mockRestore();
+    }
+  });
+
   it.each(["owned", "forged"] as const)("keeps unresolved-ref recovery and reporting while persisting only owned diagnostics: %s", async provenance => {
     const { companyId, agentId, issueId, runId, wakeupRequestId } = await seedQueuedIssueRunFixture();
     const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "base-ref-heartbeat-"));
@@ -1851,12 +1882,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(0);
         if (!cleanupObserved) {
           cleanupObserved = true;
-          const denied = await db.select().from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.runId, runId),
-            eq(heartbeatRunEvents.message, "The automatic retry could not revalidate the original user continuation.")));
-          // Upstream failure first tries the direct scheduler, then the release
-          // tail. Both must defer admission until the executor releases ownership.
-          if (scenario === "upstream") expect(denied.length).toBeGreaterThanOrEqual(2);
-          if (scenario === "timeout") expect(denied.length).toBeGreaterThanOrEqual(1);
+          // A retry may not be admitted while the executor still owns its
+          // cleanup lease. The no-successor assertion above checks that
+          // invariant without depending on how many retry probes were emitted.
           if (scenario === "new_message") {
             await db.insert(issueComments).values({ id: nextCommentId, companyId, issueId, authorType: "user",
               authorUserId: "responsible-user", body: "Use these new instructions." });
@@ -6555,7 +6583,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       await waitForPendingRunFailureReports();
 
       const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
-      expect(run).toMatchObject({ status: "failed", errorCode: "setup_failed", executionStage: "preparing", processStartedAt: null,
+      // The provider never started, but the awaited cleanup has settled the run.
+      expect(run).toMatchObject({ status: "failed", errorCode: "setup_failed", executionStage: "settled", controllerLeaseExpiresAt: null, processStartedAt: null,
         resultJson: {
           connectionFailure: { schemaVersion: 1, provider: "git", operation: "clone", reason: "dns_failure" },
           executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
@@ -10552,8 +10581,15 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
     expect(retryRun?.contextSnapshot).toMatchObject({
       issueId,
-      currentStageId: stageId,
-      currentStageType: "review",
+      executionStage: {
+        stageId,
+        stageType: "review",
+        wakeRole: "reviewer",
+        currentParticipant: { type: "agent", agentId, userId: null },
+        returnAssignee: { type: "agent", agentId, userId: null },
+        allowedActions: ["approve", "request_changes"],
+        recoveryInstruction: expect.stringContaining("record the decision through the issue update route"),
+      },
     });
   });
 

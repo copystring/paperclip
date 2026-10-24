@@ -255,6 +255,18 @@ describeEmbeddedPostgres("reportRunFailure", () => {
     expect(mockCaptureRunFailure).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { label: "AI selection", createRun: () => aiSelectionRun({ executionStage: "settling" }) },
+    { label: "missing secret", createRun: () => missingSecretRun({ executionStage: "settling" }) },
+    { label: "local path policy", createRun: () => localPathConfigurationRun({ executionStage: "settling" }) },
+    { label: "restricted workspace", createRun: () => restrictedWorkspaceSourceRun({ executionStage: "settling" }) },
+    { label: "Git clone", createRun: () => gitConnectionRun({ executionStage: "settling" }) },
+  ])("keeps typed pre-dispatch $label failures local while the legacy run is settling", async ({ createRun }) => {
+    await seedCompanyAndAgent();
+    await reportRunFailure(db, createRun(), { phase: "setup" });
+    expect(mockCaptureRunFailure).not.toHaveBeenCalled();
+  });
+
   it.each([undefined, { kind: "bootstrap" }, { kind: "bootstrap", providerWorkStarted: true },
     { kind: "runtime", providerWorkStarted: false }])("reports Git failures without unstarted bootstrap proof: %j", async (recovery) => {
     await seedCompanyAndAgent();

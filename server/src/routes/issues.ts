@@ -5579,7 +5579,7 @@ export function issueRoutes(
     }
     if (req.actor.source === "agent_jwt" && req.actor.runId) {
       const run = await heartbeat.getRun(req.actor.runId);
-      if (run?.agentId === actorAgentId) assertLegacyRunTaskOwnership(run, issue);
+      if (run?.agentId === actorAgentId) await assertLegacyRunTaskOwnership(db, run, issue);
     }
     // Task-watchdog runs receive a scoped *grant* to mutate issues inside the
     // watched subtree. This must be evaluated before the base assignee-ownership

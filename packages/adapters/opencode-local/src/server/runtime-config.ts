@@ -436,9 +436,10 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   targetIsRemote?: boolean;
 }): Promise<PreparedOpenCodeRuntimeConfig> {
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
+  const targetIsRemote = input.targetIsRemote === true;
   const runtimeMcpServers = input.runtimeMcp ?? input.runtimeMcpServers ?? [];
   const selectedModel = configuredModelRef(input.config.model);
-  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || input.targetIsRemote)) {
+  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || targetIsRemote)) {
     return {
       env: input.env,
       notes: [],
@@ -446,7 +447,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
       cleanup: async () => {},
     };
   }
-  const sourceConfigDir = input.targetIsRemote ? null : path.join(resolveXdgConfigHome(input.env), "opencode");
+  const sourceConfigDir = targetIsRemote ? null : path.join(resolveXdgConfigHome(input.env), "opencode");
   const runtimeConfigHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-config-"));
   const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
   const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
