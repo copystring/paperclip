@@ -104,6 +104,9 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run preflight:workspace-links
           pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+          pnpm --filter @paperclipai/adapter-opencode-local exec vitest run \
+            src/server/runtime-config.test.ts src/server/execute.remote.test.ts src/server/execute.test.ts \
+            2>&1 | tee "$RUNNER_TEMP/qualification-opencode-tests.log"
           pnpm --filter @paperclipai/server exec vitest run \
             src/services/heartbeat/queue.test.ts \
             src/__tests__/heartbeat-process-recovery.test.ts \
@@ -112,9 +115,6 @@ jobs:
             src/__tests__/issue-agent-mutation-ownership-routes.test.ts \
             src/legacy-run-task-ownership.test.ts \
             2>&1 | tee "$RUNNER_TEMP/qualification-server-tests.log"
-          pnpm --filter @paperclipai/adapter-opencode-local exec vitest run \
-            src/server/runtime-config.test.ts src/server/execute.remote.test.ts \
-            2>&1 | tee "$RUNNER_TEMP/qualification-opencode-tests.log"
           test -z "$(git status --porcelain)"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always() && github.event_name == 'workflow_dispatch' && inputs.qualification_only == true

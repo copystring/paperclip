@@ -113,7 +113,7 @@
       "integrationPatch": {
         "number": 25,
         "path": "backport-25.patch",
-        "sha256": "697d2b5717be47570bd3b59ac7f75d49be9154cdb79203c79ce2083af1dbc554"
+        "sha256": "5bec1a13e85e9c767e5c50b8ff047dc0bde806d3220604f774d4eefa48036e41"
       }
     },
     {

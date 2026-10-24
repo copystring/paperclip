@@ -99,7 +99,7 @@ index 76e924905..db11e0c90 100644
          "Record the decision with PATCH /api/issues/<issueId> using the current issue ID.",
          "Include Authorization: Bearer $PAPERCLIP_API_KEY and X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on the request.",
 diff --git a/packages/adapters/opencode-local/src/server/execute.remote.test.ts b/packages/adapters/opencode-local/src/server/execute.remote.test.ts
-index 53699142b..df97624f6 100644
+index 53699142b..e826c009b 100644
 --- a/packages/adapters/opencode-local/src/server/execute.remote.test.ts
 +++ b/packages/adapters/opencode-local/src/server/execute.remote.test.ts
 @@ -266,7 +266,7 @@ describe("opencode remote execution", () => {
@@ -107,12 +107,12 @@ index 53699142b..df97624f6 100644
      );
      expect(remoteAssignedMcp).toBeDefined();
 -    expect(remoteAssignedMcp?.[0]).toMatch(/^paperclip_[A-F0-9]{12}$/);
-+    expect(remoteAssignedMcp?.[0]).toBe("Remote_MCP_fixture");
++    expect(remoteAssignedMcp?.[0]).toBe("paperclip_31D0392A2092");
      expect(remoteAssignedMcp?.[1]).toMatchObject({
        url: "https://paperclip.example/api/mcp/remote-run",
        headers: { Authorization: "Bearer remote-run-secret" },
 diff --git a/packages/adapters/opencode-local/src/server/execute.test.ts b/packages/adapters/opencode-local/src/server/execute.test.ts
-index ef0149c1e..90d91fc0c 100644
+index ef0149c1e..e73ef4d4f 100644
 --- a/packages/adapters/opencode-local/src/server/execute.test.ts
 +++ b/packages/adapters/opencode-local/src/server/execute.test.ts
 @@ -724,7 +724,7 @@ describe("OpenCode runtime MCP handoff", () => {
@@ -120,15 +120,15 @@ index ef0149c1e..90d91fc0c 100644
      );
      expect(assignedMcp).toBeDefined();
 -    expect(assignedMcp?.[0]).toMatch(/^paperclip_[A-F0-9]{12}$/);
-+    expect(assignedMcp?.[0]).toBe("PowerShell_on_Felix_PC");
++    expect(assignedMcp?.[0]).toBe("paperclip_799E79ED3849");
      expect(assignedMcp?.[1]).toMatchObject({
        type: "remote",
        url: "https://paperclip.example/api/mcp/run-1",
 diff --git a/packages/adapters/opencode-local/src/server/runtime-config.test.ts b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
-index 6a402cd7f..4b757c873 100644
+index 6a402cd7f..975f48bae 100644
 --- a/packages/adapters/opencode-local/src/server/runtime-config.test.ts
 +++ b/packages/adapters/opencode-local/src/server/runtime-config.test.ts
-@@ -1069,4 +1069,223 @@ describe("prepareOpenCodeRuntimeConfig", () => {
+@@ -1069,4 +1069,227 @@ describe("prepareOpenCodeRuntimeConfig", () => {
      expect(prepared.notes).toEqual([]);
      await prepared.cleanup();
    });
@@ -219,7 +219,11 @@ index 6a402cd7f..4b757c873 100644
 +    expect(JSON.stringify(runtimeConfig.mcp)).not.toContain("b".repeat(64));
 +    expect(runtimeConfig.permission).toEqual(skip ? "allow" : { bash: "ask", "mcp__existing__write": "deny" });
 +    expect(runtimeConfig.provider).toMatchObject({ custom: { models: { "example/model": {} } } });
-+    expect(runtimeConfig.provider).toHaveProperty("openrouter.options.headers", OPENROUTER_ATTRIBUTION_HEADERS);
++    if (skip) {
++      expect(runtimeConfig.provider).toHaveProperty("openrouter.options.headers", OPENROUTER_ATTRIBUTION_HEADERS);
++    } else {
++      expect(runtimeConfig.provider).toEqual({ custom: { models: { "example/model": {} } } });
++    }
 +    expect(runtimeConfig.small_model).toBe("example/model");
 +    if (process.platform !== "win32") {
 +      expect((await fs.stat(runtimeConfigPath)).mode & 0o777).toBe(0o600);
