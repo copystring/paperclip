@@ -51,6 +51,27 @@ export function reconciledReviewExecutionStage(binding: ReconciledReviewContinua
   };
 }
 
+function resolvePendingReviewState(executionState: unknown, executionPolicy: unknown) {
+  const state = parseIssueExecutionState(executionState);
+  const policy = normalizeIssueExecutionPolicy(executionPolicy);
+  const stage = policy?.stages.find((candidate) => candidate.id === state?.currentStageId);
+  const participant = state?.currentParticipant;
+  const participantConfigured = participant && stage?.participants.some((candidate) =>
+    participant.type === "agent"
+      ? candidate.type === "agent" && candidate.agentId === participant.agentId
+      : candidate.type === "user" && candidate.userId === participant.userId,
+  );
+  if (
+    !state || state.status !== "pending" ||
+    !["review", "approval"].includes(state.currentStageType ?? "") ||
+    !state.currentStageId || !participant || !policy || !stage ||
+    stage.type !== state.currentStageType ||
+    policy.stages.indexOf(stage) !== state.currentStageIndex ||
+    !participantConfigured
+  ) return null;
+  return { state, policy, stage, participant };
+}
+
 /** Capture only a real, currently pending native review owned by an agent. */
 export function captureReconciledReviewContinuation(input: {
   status: string;
@@ -58,22 +79,59 @@ export function captureReconciledReviewContinuation(input: {
   assigneeAgentId: string | null;
   executionState: unknown;
   executionPolicy: unknown;
+  allowBlockedSource?: boolean;
 }): ReconciledReviewContinuationBinding | null {
-  const state = input.status === "in_review" ? parseIssueExecutionState(input.executionState) : null;
-  const policy = input.status === "in_review" ? normalizeIssueExecutionPolicy(input.executionPolicy) : null;
-  const policyStage = policy?.stages.find((stage) => stage.id === state?.currentStageId);
-  const participantAgentId = state?.currentParticipant?.type === "agent"
-    ? state.currentParticipant.agentId
+  const sourceStatusAllowed = input.status === "in_review" ||
+    (input.allowBlockedSource === true && input.status === "blocked");
+  const pending = sourceStatusAllowed
+    ? resolvePendingReviewState(input.executionState, input.executionPolicy)
+    : null;
+  const participantAgentId = pending?.participant.type === "agent"
+    ? pending.participant.agentId
     : null;
   if (
-    !state || state.status !== "pending" ||
-    !["review", "approval"].includes(state.currentStageType ?? "") ||
-    !state.currentStageId || !participantAgentId || !policy || !policyStage ||
-    policyStage.type !== state.currentStageType ||
-    policy.stages.indexOf(policyStage) !== state.currentStageIndex ||
-    !policyStage.participants.some((participant) => participant.type === "agent" && participant.agentId === participantAgentId)
+    !pending || !participantAgentId
   ) return null;
-  return { statusVersion: input.statusVersion, state, policy, participantAgentId, assigneeAgentId: input.assigneeAgentId };
+  return {
+    statusVersion: input.statusVersion,
+    state: pending.state,
+    policy: pending.policy,
+    participantAgentId,
+    assigneeAgentId: input.assigneeAgentId,
+  };
+}
+
+/** Detect a coherent pending review even when the task is held as blocked. */
+export function hasPendingReconciledReview(input: {
+  status: string;
+  executionState: unknown;
+  executionPolicy: unknown;
+}): boolean {
+  if (input.status !== "blocked" && input.status !== "in_review") return false;
+  return resolvePendingReviewState(input.executionState, input.executionPolicy) !== null;
+}
+
+/** Bind delivery to the post-transition version only if the same review survived. */
+export function rebindReconciledReviewContinuation(
+  previous: ReconciledReviewContinuationBinding,
+  issue: {
+    status: string;
+    statusVersion: number;
+    assigneeAgentId: string | null;
+    executionState: unknown;
+    executionPolicy: unknown;
+  },
+): ReconciledReviewContinuationBinding | null {
+  const current = captureReconciledReviewContinuation(issue);
+  if (!current || issue.status !== "in_review" ||
+      current.participantAgentId !== previous.participantAgentId ||
+      current.assigneeAgentId !== previous.participantAgentId ||
+      !isDeepStrictEqual(
+        { ...current.state, monitor: current.state.monitor ?? null },
+        { ...previous.state, monitor: previous.state.monitor ?? null },
+      ) ||
+      !isDeepStrictEqual(current.policy, previous.policy)) return null;
+  return current;
 }
 
 /** An operator records observed outcomes; this is not permission to blindly retry. */
@@ -84,6 +142,8 @@ export async function validateExecutionReconciliation(input: {
   agentId: string | null;
   sourceRunId: unknown;
   decision: ExecutionReconciliation | undefined;
+  /** Exact pending review captured while its issue is held as blocked. */
+  reviewContinuation?: ReconciledReviewContinuationBinding;
   /** Board-only source repair: never authorize a continuation of this run. */
   workspaceRepairOnly?: boolean;
 }) {
@@ -114,6 +174,13 @@ export async function validateExecutionReconciliation(input: {
     review?.status === "pending" &&
     review.currentParticipant?.type === "agent" &&
     review.currentParticipant.agentId === run?.agentId;
+  const blockedReviewBindingMatches = input.reviewContinuation !== undefined &&
+    task?.status === "blocked" &&
+    task.statusVersion === input.reviewContinuation.statusVersion &&
+    task.assigneeAgentId === input.reviewContinuation.assigneeAgentId &&
+    isDeepStrictEqual(parseIssueExecutionState(task.executionState), input.reviewContinuation.state) &&
+    isDeepStrictEqual(normalizeIssueExecutionPolicy(task.executionPolicy), input.reviewContinuation.policy) &&
+    run?.agentId === input.reviewContinuation.participantAgentId;
   const retainedWorkspace = hasRequiredWorkspaceRecovery(run?.resultJson);
   const repairOnly = input.workspaceRepairOnly === true && retainedWorkspace;
   const terminalRepairSource = ["failed", "interrupted", "timed_out", "cancelled"].includes(run?.status ?? "") ||
@@ -122,7 +189,8 @@ export async function validateExecutionReconciliation(input: {
     (input.workspaceRepairOnly && !retainedWorkspace) ||
     !run ||
     !task ||
-    (!repairOnly && (task.assigneeAgentId !== agentId || (run.agentId !== agentId && !isCurrentReviewer))) ||
+    (!repairOnly && (task.assigneeAgentId !== agentId ||
+      (run.agentId !== agentId && !isCurrentReviewer && !blockedReviewBindingMatches))) ||
     (run.nativeIssueId ?? run.contextSnapshot?.issueId) !== issueId ||
     !terminalRepairSource
   ) {
@@ -201,6 +269,18 @@ export async function validateExecutionReconciliation(input: {
     throw conflict(
       "The previous execution environment has not finished releasing its authority.",
     );
+  if (input.reviewContinuation) {
+    const activeSuccessors = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId),
+      inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+      or(
+        eq(heartbeatRuns.nativeIssueId, issueId),
+        and(isNull(heartbeatRuns.nativeIssueId), sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}::text`),
+      ),
+    )).limit(1);
+    if (activeSuccessors.length)
+      throw conflict("Another execution is already queued or running for this review. Inspect it before continuing.");
+  }
   if (!repairOnly) await buildExecutionContinuation({
     db,
     companyId,

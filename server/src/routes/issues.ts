@@ -36,6 +36,8 @@ import {
   validateExecutionReconciliation,
   markExecutionReconciliation,
   captureReconciledReviewContinuation,
+  hasPendingReconciledReview,
+  rebindReconciledReviewContinuation,
 } from "../services/execution-recovery-resolution.js";
 import {
   storedSteeringAcknowledgement,
@@ -9663,6 +9665,21 @@ export function issueRoutes(
         if (!lockedIssue) throw notFound("Issue not found");
         let reviewContinuationBinding: ReturnType<typeof captureReconciledReviewContinuation> = null;
 
+        if (
+          outcome === "restored" && sourceIssueStatus === "todo" &&
+          lockedIssue.status === "blocked" &&
+          hasPendingReconciledReview({
+            status: lockedIssue.status,
+            executionState: lockedIssue.executionState,
+            executionPolicy: lockedIssue.executionPolicy,
+          })
+        ) {
+          throw conflict(
+            "This task has a pending review stage. Restore it to In Review for the current reviewer; do not return it to the executor.",
+            { code: "pending_review_requires_reviewer_continuation" },
+          );
+        }
+
         // Retained files are a source-scoped obligation, independent of the
         // current task owner/generation and any newer active recovery incident.
         // Repair records evidence only: it must not reopen or replay old work.
@@ -9743,9 +9760,10 @@ export function issueRoutes(
                   assigneeAgentId: lockedIssue.assigneeAgentId,
                   executionState: lockedIssue.executionState,
                   executionPolicy: lockedIssue.executionPolicy,
+                  allowBlockedSource: lockedIssue.status === "blocked",
                 });
-                if (lockedIssue.status !== "in_review" || !reviewContinuationBinding) {
-                  throw conflict("A settled no-replay hold can continue only the unchanged current pending review.");
+                if (!reviewContinuationBinding || !["in_review", "blocked"].includes(lockedIssue.status)) {
+                  throw conflict("A settled no-replay hold can continue only an unchanged pending agent review or approval.");
                 }
               }
               await validateExecutionReconciliation({
@@ -9755,6 +9773,9 @@ export function issueRoutes(
                 agentId: lockedIssue.assigneeAgentId,
                 sourceRunId: settled.evidence.runId ?? settled.evidence.sourceRunId,
                 decision: executionReconciliation,
+                ...(lockedIssue.status === "blocked" && reviewContinuationBinding
+                  ? { reviewContinuation: reviewContinuationBinding }
+                  : {}),
               });
               const [reopened] = await tx
                 .update(issueRecoveryActions)
@@ -9921,19 +9942,22 @@ export function issueRoutes(
             decision: executionReconciliation,
           });
         } else if (
-          sourceIssueStatus === "in_review" && lockedIssue.status === "in_review" &&
+          sourceIssueStatus === "in_review" &&
           outcome === "restored" && requiresExecutionReconciliation(activeRecoveryAction.cause)
         ) {
           assertBoard(req);
-          reviewContinuationBinding ??= captureReconciledReviewContinuation({
-            status: lockedIssue.status,
-            statusVersion: lockedIssue.statusVersion,
-            assigneeAgentId: lockedIssue.assigneeAgentId,
-            executionState: lockedIssue.executionState,
-            executionPolicy: lockedIssue.executionPolicy,
-          });
           if (!reviewContinuationBinding) {
-            throw conflict("Only the unchanged current pending review can be continued after reconciliation.");
+            reviewContinuationBinding = captureReconciledReviewContinuation({
+              status: lockedIssue.status,
+              statusVersion: lockedIssue.statusVersion,
+              assigneeAgentId: lockedIssue.assigneeAgentId,
+              executionState: lockedIssue.executionState,
+              executionPolicy: lockedIssue.executionPolicy,
+              allowBlockedSource: lockedIssue.status === "blocked",
+            });
+          }
+          if (!reviewContinuationBinding || !["in_review", "blocked"].includes(lockedIssue.status)) {
+            throw conflict("Only an unchanged pending agent review or approval can be continued after reconciliation.");
           }
           await validateExecutionReconciliation({
             db: tx as unknown as Db,
@@ -9942,6 +9966,9 @@ export function issueRoutes(
             agentId: lockedIssue.assigneeAgentId,
             sourceRunId: activeRecoveryAction.evidence.runId ?? activeRecoveryAction.evidence.sourceRunId,
             decision: executionReconciliation,
+            ...(lockedIssue.status === "blocked"
+              ? { reviewContinuation: reviewContinuationBinding }
+              : {}),
           });
         } else if (executionReconciliation) {
           throw conflict(
@@ -9994,20 +10021,6 @@ export function issueRoutes(
           }
         }
 
-        if (executionReconciliation) {
-          // The authorized chat retry is the sole durable delivery owner.
-          // Never also enqueue a generic successor that lacks chat provenance.
-          await markExecutionReconciliation(
-            tx as unknown as Db,
-            activeRecoveryAction,
-            executionReconciliation,
-            actor.actorId,
-            chatRetry
-              ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
-              : undefined,
-            reviewContinuationBinding ? { reviewContinuation: reviewContinuationBinding } : undefined,
-          );
-        }
         let issue = lockedIssue;
         const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
         if (outcome === "blocked" && sourceStatusChanged) {
@@ -10151,6 +10164,29 @@ export function issueRoutes(
                 );
           if (!updatedIssue) throw notFound("Issue not found");
           issue = updatedIssue;
+        }
+
+        if (executionReconciliation) {
+          if (reviewContinuationBinding && lockedIssue.status === "blocked" && sourceIssueStatus === "in_review") {
+            const rebound = rebindReconciledReviewContinuation(reviewContinuationBinding, issue);
+            if (!rebound) {
+              throw conflict("The pending review changed while restoring it. Refresh before continuing the reviewer.");
+            }
+            reviewContinuationBinding = rebound;
+          }
+          // Bind delivery to the committed issue version and current review
+          // owner. The transaction rolls back both the issue transition and
+          // recovery evidence if either check fails.
+          await markExecutionReconciliation(
+            tx as unknown as Db,
+            activeRecoveryAction,
+            executionReconciliation,
+            actor.actorId,
+            chatRetry
+              ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
+              : undefined,
+            reviewContinuationBinding ? { reviewContinuation: reviewContinuationBinding } : undefined,
+          );
         }
 
         const recordedOutcome =
