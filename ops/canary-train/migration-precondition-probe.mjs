@@ -763,7 +763,7 @@ async function stopChild(child) {
   });
 }
 
-async function bootRuntime(runtimeName, payloadRoot, dbUrl, tempRoot) {
+export async function bootRuntime(runtimeName, payloadRoot, dbUrl, tempRoot) {
   const serverEntry = path.join(payloadRoot, "node_modules", "@paperclipai", "server", "dist", "index.js");
   const entryInfo = await lstat(serverEntry).catch(() => null);
   if (!entryInfo?.isFile() || entryInfo.isSymbolicLink()) fail(`${runtimeName} server entrypoint is missing or unsafe`);
@@ -781,12 +781,23 @@ async function bootRuntime(runtimeName, payloadRoot, dbUrl, tempRoot) {
   if (typeof expectedCommit !== "string" || !/^[a-f0-9]{40}$/.test(expectedCommit)) fail(`${runtimeName} runtime has no exact build identity`);
   const child = spawn(process.execPath, [serverEntry], { cwd: runtimeHome, env, stdio: ["ignore", "pipe", "pipe"] });
   const getOutput = capture(child);
+  let startupError;
   try {
     const health = await waitForHealth(child, getOutput, dbUrl, expectedCommit);
     return { passed: true, runtime: runtimeName, healthStatus: health.status, runtimeCommit: health.commit, endpoint: "/api/health" };
+  } catch (error) {
+    startupError = error;
+    throw error;
   } finally {
     const exitCode = await stopChild(child);
-    if (exitCode !== 0) fail(`${runtimeName} API child did not stop cleanly (${exitCode ?? "forced"})`);
+    if (exitCode !== 0) {
+      const cleanupError = new Error(`${runtimeName} API child did not stop cleanly (${exitCode ?? "forced"})`);
+      if (startupError) {
+        throw new AggregateError([startupError, cleanupError],
+          `${startupError instanceof Error ? startupError.message : String(startupError)}; ${cleanupError.message}`);
+      }
+      throw cleanupError;
+    }
   }
 }
 
