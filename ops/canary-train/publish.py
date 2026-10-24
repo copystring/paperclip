@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,29 @@ def api(path):
 def identity(provenance, controller):
     pins = sorted((p['number'], p['head']) for p in provenance['patches'])
     return hashlib.sha256(json.dumps([provenance['version'], provenance['sourceCommit'], pins, controller], separators=(',', ':')).encode()).hexdigest()
+
+
+def verify_deployer_manifest(manifest, repository):
+    deploy_path = Path(__file__).with_name('deploy.py')
+    spec = importlib.util.spec_from_file_location('canary_train_deploy_contract', deploy_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError('Cannot load the canary deployer manifest contract')
+    deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(deploy)
+    return deploy.verify_manifest(manifest, repository, '.github/workflows/canary-patched.yml')
+
+
+def publication_manifest(manifest, repository, controller, run_id, run_attempt, workflow_ref):
+    published = {
+        **manifest,
+        'buildIdentity': identity(manifest, controller),
+        'controllerCommit': controller,
+        'runId': run_id,
+        'runAttempt': run_attempt,
+        'workflowRef': workflow_ref,
+    }
+    verify_deployer_manifest(published, repository)
+    return published
 
 
 def green_run(run, manifest, repository):
@@ -126,14 +150,15 @@ def publish(source, output, repository, controller):
         raise RuntimeError('Tracked source changed after build')
     run_id = int(os.environ['GITHUB_RUN_ID'])
     run_attempt = int(os.environ['GITHUB_RUN_ATTEMPT'])
-    validate_migration_compatibility(manifest, controller, run_id, run_attempt)
-    manifest.update(
-        buildIdentity=identity(manifest, controller),
-        controllerCommit=controller,
-        runId=run_id,
-        runAttempt=run_attempt,
-        workflowRef=os.environ['GITHUB_WORKFLOW_REF'],
+    manifest = publication_manifest(
+        manifest,
+        repository,
+        controller,
+        run_id,
+        run_attempt,
+        os.environ['GITHUB_WORKFLOW_REF'],
     )
+    validate_migration_compatibility(manifest, controller, run_id, run_attempt)
     manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
     command(['gh', 'auth', 'setup-git'])
     url = f'https://github.com/{repository}.git'

@@ -729,8 +729,10 @@ class ArtifactTests(unittest.TestCase):
         subprocess.run(["git", "commit", "-m", "upstream source"], cwd=workspace, check=True, capture_output=True)
         source_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=workspace, check=True, capture_output=True, text=True).stdout.strip()
         source_tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=workspace, check=True, capture_output=True, text=True).stdout.strip()
+        patches = [{"number": 17393, "repository": "paperclipai/paperclip", "head": "2ee4f9e7a9c8cca1642f58deac9174d420757ee7", "state": "apply"}]
         (workspace / ".canary-train.json").write_text(json.dumps({
-            "schemaVersion": 1, "version": "2026.1018.0-canary.1", "sourceCommit": source_commit, "patches": []
+            "schemaVersion": 1, "version": "2026.1018.0-canary.1", "sourceCommit": source_commit,
+            "patches": [{key: patch[key] for key in ("number", "repository", "head", "state")} for patch in patches],
         }))
         subprocess.run(["git", "add", ".canary-train.json"], cwd=workspace, check=True)
         subprocess.run(["git", "commit", "-m", "canary-train: assemble test"], cwd=workspace, check=True, capture_output=True)
@@ -757,8 +759,8 @@ class ArtifactTests(unittest.TestCase):
         (output / "provenance.json").write_text(json.dumps({
             "schemaVersion": 1, "version": "2026.1018.0-canary.1",
             "sourceCommit": source_commit, "sourceTree": source_tree, "branch": build.PATCH_BRANCH,
-            "patchCommit": commit, "patchTree": "c" * 40, "patches": [],
-            "npmPackages": {}, "patches": [],
+            "patchCommit": commit, "patchTree": "c" * 40, "packageNames": list(build.DEFAULT_PACKAGES),
+            "patches": patches, "npmPackages": {},
         }))
         release_manifest = json.loads((workspace / "scripts/release-package-manifest.json").read_text())
         runtime_trees = {
@@ -869,6 +871,7 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(migration_by_path["node_modules/@paperclipai/db/dist/migrations/0001_test.sql"], hashlib.sha256(b"select 1;").hexdigest())
             self.assertEqual(migration_by_path["node_modules/@paperclipai/db/dist/migrations/meta/_journal.json"], hashlib.sha256(b'{"version":"1"}').hexdigest())
             self.assertEqual(first["patchedCommit"], first["patchCommit"])
+            self.assertEqual(first["packageNames"], ["paperclipai", "@paperclipai/server"])
             second = build.package(workspace, output)
             self.assertEqual(second["archiveSha256"], first_archive_hash)
 
