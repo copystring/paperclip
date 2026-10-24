@@ -39,6 +39,17 @@ def make_npm_tarball(name: str, version: str, stamp: dict | None = None) -> tupl
 
 
 class IntegrityAndProvenanceTests(unittest.TestCase):
+    def test_canary_calver_accepts_unpadded_months_patches_and_leap_day(self):
+        accepted = (
+            "2026.327.0-canary.0",       # March 27
+            "2026.407.3-canary.12",      # April 7, nonzero patch
+            "2026.1024.1-canary.17",     # October 24
+            "2024.229.0-canary.1",       # leap day
+        )
+        for version in accepted:
+            with self.subTest(version=version):
+                self.assertEqual(build.validate_canary_version(version), version)
+
     def test_resolves_canary_package_documents_from_registry_tag_urls(self):
         version = "2026.1018.0-canary.9"
         source = "a" * 40
@@ -61,6 +72,70 @@ class IntegrityAndProvenanceTests(unittest.TestCase):
             "https://registry.npmjs.org/@paperclipai%2Fserver/canary",
             "https://registry.npmjs.org/@paperclipai%2Fdb/2026.1018.0-canary.9",
         ])
+
+    def test_explicit_canary_version_uses_exact_registry_versions_while_tags_move(self):
+        version = "2026.1024.0-canary.17"
+        source = "b" * 40
+        bodies = {}
+        metadata = {}
+        for name in (*build.DEFAULT_PACKAGES, "@paperclipai/db"):
+            payload, sri = make_npm_tarball(name, version, {"commit": source} if name == "@paperclipai/server" else None)
+            url = "https://registry.npmjs.org/tarballs/" + name.replace("/", "-") + ".tgz"
+            bodies[url] = payload
+            metadata[build.npm_url(name, version)] = {
+                "name": name, "version": version, "dist": {"tarball": url, "integrity": sri},
+            }
+        with patch.object(build, "http_json", side_effect=lambda url: metadata[url]) as request, \
+             patch.object(build, "http_bytes", side_effect=lambda url: bodies[url]):
+            resolved, docs, commit = build.resolve_canary(version)
+        self.assertEqual(resolved, version)
+        self.assertEqual(commit, source)
+        self.assertEqual([call.args[0] for call in request.call_args_list], [
+            build.npm_url("paperclipai", version),
+            build.npm_url("@paperclipai/server", version),
+            build.npm_url("@paperclipai/db", version),
+        ])
+        self.assertTrue(all(doc["version"] == version for doc in docs.values()))
+
+    def test_explicit_canary_version_rejects_stable_url_injection_and_invalid_dates_before_network(self):
+        invalid_versions = (
+            "2026.1024.0",
+            "2026.1024.0-stable.1",
+            "2026.1324.0-canary.1",
+            "2026.400.0-canary.1",
+            "2026.431.0-canary.1",
+            "2023.229.0-canary.1",
+            "2026.1024.01-canary.1",
+            "2026.1024.1-canary.01",
+            "https://registry.npmjs.org/paperclipai/canary",
+            "2026.1024.0-canary.17/../../latest",
+            "2026.0230.0-canary.17",
+            "2026.1024.0-canary.17;print(1)",
+        )
+        for version in invalid_versions:
+            with self.subTest(version=version), patch.object(build, "http_json") as request:
+                with self.assertRaises(build.TrainError):
+                    build.resolve_canary(version)
+                request.assert_not_called()
+
+    def test_explicit_canary_version_fails_closed_when_registry_metadata_moves_or_mismatches(self):
+        version = "2026.1024.0-canary.17"
+        requested_url = build.npm_url("paperclipai", version)
+        wrong_metadata = {"name": "paperclipai", "version": "2026.1024.0-canary.18", "dist": {"tarball": "https://example.invalid/pkg.tgz"}}
+        with patch.object(build, "http_json", return_value=wrong_metadata) as request, \
+             patch.object(build, "http_bytes") as download:
+            with self.assertRaisesRegex(build.TrainError, "does not match requested Canary"):
+                build.resolve_canary(version)
+        request.assert_called_once_with(requested_url)
+        download.assert_not_called()
+
+        wrong_package = {"name": "other-package", "version": version, "dist": {"tarball": "https://example.invalid/pkg.tgz"}}
+        with patch.object(build, "http_json", return_value=wrong_package) as request, \
+             patch.object(build, "http_bytes") as download:
+            with self.assertRaisesRegex(build.TrainError, "metadata identity mismatch"):
+                build.resolve_canary(version)
+        request.assert_called_once_with(requested_url)
+        download.assert_not_called()
 
     def test_npm_integrity_accepts_correct_sri_and_rejects_tampering(self):
         payload = b"canary package"
@@ -706,7 +781,7 @@ class ArtifactTests(unittest.TestCase):
     def test_migration_receipt_binds_source_runtime_and_workflow_identity(self):
         inventory = {
             f"node_modules/@paperclipai/db/dist/migrations/{index:04d}_migration.sql": hashlib.sha256(str(index).encode()).hexdigest()
-            for index in range(375)
+            for index in range(376)
         }
         inventory["node_modules/@paperclipai/db/dist/migrations/meta/_journal.json"] = hashlib.sha256(b"journal").hexdigest()
         # Exercise the real JavaScript receipt producer, rather than deriving
@@ -729,9 +804,9 @@ class ArtifactTests(unittest.TestCase):
         body = {
             "schema": 1,
             "candidateSourceCommit": provenance["sourceCommit"],
-            "preparedSource": {"sourceCommit": provenance["sourceCommit"], "patchCommit": provenance["patchCommit"], "patchTree": provenance["patchTree"], "migrationInventoryCount": 376, "migrationInventorySha256": candidate_hash},
+            "preparedSource": {"sourceCommit": provenance["sourceCommit"], "patchCommit": provenance["patchCommit"], "patchTree": provenance["patchTree"], "migrationInventoryCount": 377, "migrationInventorySha256": candidate_hash},
             "oldPackage": {"version": build.MIGRATION_OLD_VERSION, "integrity": build.MIGRATION_OLD_SRI, "migrationInventoryCount": 354, "migrationInventorySha256": build.MIGRATION_BASELINE_HASH},
-            "candidate": {"version": candidate_version, "integrity": candidate_integrity, "migrationInventoryCount": 376, "migrationInventorySha256": candidate_hash},
+            "candidate": {"version": candidate_version, "integrity": candidate_integrity, "migrationInventoryCount": 377, "migrationInventorySha256": candidate_hash},
             "assertions": assertions,
         }
         receipt = {**body, "receiptSha256": hashlib.sha256(json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()}

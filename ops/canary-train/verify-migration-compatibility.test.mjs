@@ -5,14 +5,15 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { assertInventoryBinding, assertMigrationExtension, assertMigrationExtensionShape, assertPreparedSource, assertSourceInventoryMatchesCandidate, canonicalInventoryHash, makeReceipt, MIGRATION_INVENTORY_PREFIX, resolvePackageDependency, tarEntry, verifySRI } from './verify-migration-compatibility.mjs';
 
 const oldSRI = 'sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg==';
 const candidateSRI = 'sha512-Ub4gzp005JhteAMeDsOxUXDjbSA7OUg+dqiQ1CGaqqxB+xZpJS+x5ke5N/GkqL3f/a+DOQMDp/ZJzNC6//Uo3Q==';
 const candidateVersion = '2026.1024.0-canary.14';
-const hashes = { oldJournalHash: 'a'.repeat(64), oldMigrationInventoryHash: 'd'.repeat(64), candidateJournalHash: 'b'.repeat(64), candidateMigrationHash: 'c'.repeat(64), sourceMigrationHash: 'c'.repeat(64), sourceMigrationCount: 376, sourceCommit: 'a'.repeat(40), patchCommit: 'f'.repeat(40), patchTree: 'e'.repeat(40) };
-const assertionIds = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'restore-point-checkout-migrations', 'committed-native-recovery-state-migration', 'migration-inventory-extension'];
+const hashes = { oldJournalHash: 'a'.repeat(64), oldMigrationInventoryHash: 'd'.repeat(64), candidateJournalHash: 'b'.repeat(64), candidateMigrationHash: 'c'.repeat(64), sourceMigrationHash: 'c'.repeat(64), sourceMigrationCount: 377, sourceCommit: 'a'.repeat(40), patchCommit: 'f'.repeat(40), patchTree: 'e'.repeat(40) };
+const assertionIds = ['migration-engine-upgrade', 'task-retry-row-preserved', 'candidate-schema-current', 'migration-specific-invariants', 'secret-scope-data-preserved', 'restore-point-checkout-migrations', 'committed-native-recovery-state-migration', 'settled-native-run-process-identity-migration', 'migration-inventory-extension'];
 
 test('SRI verifier accepts the exact tarball and rejects altered bytes', () => {
   const bytes = Buffer.from('fixture');
@@ -170,7 +171,7 @@ test('migration inventory hash is canonical and package path prefixes are part o
   assert.throws(() => assertMigrationExtension({ 'old.sql': 'a'.repeat(64) }, {}, { entries: [] }, { entries: [] }), /reviewed 0354 baseline/);
 });
 
-test('exact reviewed candidate shape allows only the pinned 22-SQL extension', () => {
+test('exact reviewed candidate shape allows only the pinned 23-SQL extension', () => {
   const oldInventory = {};
   const oldEntries = [];
   for (let i = 0; i < 353; i += 1) {
@@ -181,7 +182,7 @@ test('exact reviewed candidate shape allows only the pinned 22-SQL extension', (
   oldInventory[`${MIGRATION_INVENTORY_PREFIX}meta/_journal.json`] = 'f'.repeat(64);
   const candidateInventory = { ...oldInventory };
   const candidateEntries = [...oldEntries];
-  for (let i = 0; i < 22; i += 1) {
+  for (let i = 0; i < 23; i += 1) {
     const tag = String(353 + i).padStart(4, '0');
     candidateInventory[`${MIGRATION_INVENTORY_PREFIX}${tag}_reviewed.sql`] = (i + 1).toString(16).padStart(64, '0');
     candidateEntries.push({ idx: 353 + i, tag, when: 353 + i, breakpoints: true });
@@ -189,11 +190,11 @@ test('exact reviewed candidate shape allows only the pinned 22-SQL extension', (
   const candidateJournal = { entries: candidateEntries };
   candidateInventory[`${MIGRATION_INVENTORY_PREFIX}meta/_journal.json`] = 'e'.repeat(64);
   const candidateSha256 = canonicalInventoryHash(candidateInventory);
-  const result = assertMigrationExtensionShape(oldInventory, candidateInventory, { entries: oldEntries }, candidateJournal, { addedSqlCount: 22, candidateCount: 376, candidateSha256 });
-  assert.equal(result.addedSql, 22);
-  assert.throws(() => assertMigrationExtensionShape(oldInventory, candidateInventory, { entries: oldEntries }, candidateJournal, { addedSqlCount: 21, candidateCount: 376, candidateSha256 }), /add exactly 21 SQL migrations/);
+  const result = assertMigrationExtensionShape(oldInventory, candidateInventory, { entries: oldEntries }, candidateJournal, { addedSqlCount: 23, candidateCount: 377, candidateSha256 });
+  assert.equal(result.addedSql, 23);
+  assert.throws(() => assertMigrationExtensionShape(oldInventory, candidateInventory, { entries: oldEntries }, candidateJournal, { addedSqlCount: 22, candidateCount: 377, candidateSha256 }), /add exactly 22 SQL migrations/);
   const changed = { ...candidateInventory, [`${MIGRATION_INVENTORY_PREFIX}0354_reviewed.sql`]: 'f'.repeat(64) };
-  assert.throws(() => assertMigrationExtensionShape(oldInventory, changed, { entries: oldEntries }, candidateJournal, { addedSqlCount: 22, candidateCount: 376, candidateSha256 }), /exact reviewed package hash/);
+  assert.throws(() => assertMigrationExtensionShape(oldInventory, changed, { entries: oldEntries }, candidateJournal, { addedSqlCount: 23, candidateCount: 377, candidateSha256 }), /exact reviewed package hash/);
 });
 
 test('old package dependency resolution finds bundled embedded-postgres and hoisted postgres', async (t) => {
@@ -215,13 +216,29 @@ test('old package dependency resolution finds bundled embedded-postgres and hois
   assert.equal(resolvePackageDependency(entry, 'postgres'), path.join(hoisted, 'index.cjs'));
 });
 
-test('CLI cannot report success without a receipt or exit successfully on pending work', () => {
+test('CLI preserves failures when a beforeExit hook tries to replace the exit code', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'paperclip-migration-exit-hook-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const hookPath = path.join(root, 'before-exit.mjs');
+  await writeFile(hookPath, "process.on('beforeExit', () => { process.nextTick(() => process.exit(0)); });\n");
+  const moduleUrl = new URL('./verify-migration-compatibility.mjs', import.meta.url).href;
+  const missingReceipt = path.join(root, 'missing-receipt.json');
+
+  const noReceipt = spawnSync(process.execPath, ['--input-type=module', '-e', `import { runCli } from ${JSON.stringify(moduleUrl)}; process.exitCode = await runCli(async () => {}, ${JSON.stringify(missingReceipt)});`], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(noReceipt.status, 1, noReceipt.stderr);
+  assert.match(noReceipt.stderr, /without producing its required receipt/);
+
+  const oldEntrypoint = spawnSync(process.execPath, ['--import', pathToFileURL(hookPath).href, '--input-type=module', '-e', 'process.exitCode = 1;'], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(oldEntrypoint.status, 0, 'the regression fixture must reproduce beforeExit replacing process.exitCode');
+
+  const missing = spawnSync(process.execPath, ['--import', pathToFileURL(hookPath).href, fileURLToPath(new URL('./verify-migration-compatibility.mjs', import.meta.url))], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(missing.status, 1, missing.stderr);
+  assert.match(missing.stderr, /Usage: node verify-migration-compatibility\.mjs/);
+});
+
+test('CLI cannot exit successfully on pending work', () => {
   const moduleUrl = new URL('./verify-migration-compatibility.mjs', import.meta.url).href;
   const missingReceipt = path.join(os.tmpdir(), `missing-migration-receipt-${process.pid}-${Date.now()}.json`);
-  const missing = spawnSync(process.execPath, ['--input-type=module', '-e', `import { runCli } from ${JSON.stringify(moduleUrl)}; process.exitCode = await runCli(async () => {}, ${JSON.stringify(missingReceipt)});`], { encoding: 'utf8', timeout: 10_000 });
-  assert.equal(missing.status, 1, missing.stderr);
-  assert.match(missing.stderr, /without producing its required receipt/);
-
   const pending = spawnSync(process.execPath, ['--input-type=module', '-e', `import { runCli } from ${JSON.stringify(moduleUrl)}; await runCli(() => new Promise(() => {}), ${JSON.stringify(missingReceipt)});`], { encoding: 'utf8', timeout: 10_000 });
   assert.notEqual(pending.status, 0, 'an unsettled top-level migration promise must not become exit code 0');
 });

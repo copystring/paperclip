@@ -73,7 +73,7 @@
       "integrationPatch": {
         "number": 8,
         "path": "backport-installed-recovery.patch",
-        "sha256": "e04dc205e6bc5be79ba74abdf91aae7cc8e6bf378f3a25d8eec5ec4a2c96e414"
+        "sha256": "9e582f115a930278a2c48e0940855189293d00ab457f269b7a1f7e781f1fa898"
       }
     },
     {
@@ -83,7 +83,7 @@
       "integrationPatch": {
         "number": 11,
         "path": "backport-11.patch",
-        "sha256": "b7fd57bd6cad6de1651b4a3cc59be96c3446cf4b83d26fefdab9c3a226dd560b"
+        "sha256": "387e5345ecc4d7ee431c316d92bafd6d009076b6233a4c8162942b576df8d9c5"
       }
     },
     {
@@ -109,7 +109,17 @@
     {
       "number": 25,
       "repository": "copystring/paperclip",
-      "head": "ce28fe3ff5fcf5c65baa49e037583e8bec77fbc4"
+      "head": "5b32c7a63db0f2e6ae5a2ebae18cb7fb8fdf576f",
+      "integrationPatch": {
+        "number": 25,
+        "path": "backport-25.patch",
+        "sha256": "5bec1a13e85e9c767e5c50b8ff047dc0bde806d3220604f774d4eefa48036e41"
+      }
+    },
+    {
+      "number": 17393,
+      "repository": "paperclipai/paperclip",
+      "head": "2ee4f9e7a9c8cca1642f58deac9174d420757ee7"
     }
   ]
 }

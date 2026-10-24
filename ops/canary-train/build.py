@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from datetime import date
 import gzip
 import hashlib
 import json
@@ -24,6 +25,7 @@ from typing import Any, Iterable
 HEX40 = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 PACKAGE_NAME = re.compile(r"^(?:@[a-z0-9_.-]+/)?[a-z0-9_.-]+$")
+CALVER_CANARY_VERSION = re.compile(r"^(\d{4})\.([1-9]|1[0-2])(\d{2})\.(0|[1-9]\d*)-canary\.(0|[1-9]\d*)$")
 DEFAULT_PACKAGES = ("paperclipai", "@paperclipai/server")
 REGISTRY = "https://registry.npmjs.org"
 GITHUB_API = "https://api.github.com"
@@ -303,16 +305,33 @@ def npm_url(name: str, endpoint: str) -> str:
     return f"{REGISTRY}/{urllib.parse.quote(name, safe='@')}/{endpoint}"
 
 
-def resolve_canary() -> tuple[str, dict[str, dict[str, Any]], str]:
+def validate_canary_version(version: str) -> str:
+    """Accept only a dated Paperclip prerelease, never an arbitrary registry selector."""
+    match = CALVER_CANARY_VERSION.fullmatch(version) if isinstance(version, str) else None
+    if not match:
+        raise TrainError("canary version must use YYYY.MDD.P-canary.N or YYYY.MMDD.P-canary.N format")
+    year, month_text, day_text, _patch, _sequence = match.groups()
+    try:
+        date(int(year), int(month_text), int(day_text))
+    except ValueError as exc:
+        raise TrainError("canary version contains an invalid calendar date") from exc
+    return version
+
+
+def resolve_canary(canary_version: str | None = None) -> tuple[str, dict[str, dict[str, Any]], str]:
+    pinned_version = validate_canary_version(canary_version) if canary_version is not None else None
     docs: dict[str, dict[str, Any]] = {}
     versions = {}
     for name in DEFAULT_PACKAGES:
-        doc = http_json(npm_url(name, "canary"))
+        endpoint = pinned_version if pinned_version is not None else "canary"
+        doc = http_json(npm_url(name, endpoint))
         version = doc.get("version")
         if not isinstance(version, str) or not version:
             raise TrainError(f"npm canary tag is missing for {name}")
         if doc.get("name") != name or doc.get("version") != version or not isinstance(doc.get("dist", {}).get("tarball"), str):
-            raise TrainError(f"npm metadata identity mismatch for {name}@{version}")
+            raise TrainError(f"npm metadata identity mismatch for {name}@{endpoint}")
+        if pinned_version is not None and version != pinned_version:
+            raise TrainError(f"npm metadata for {name} does not match requested Canary {pinned_version}")
         docs[name], versions[name] = doc, version
     if versions[DEFAULT_PACKAGES[0]] != versions[DEFAULT_PACKAGES[1]]:
         raise TrainError("npm paperclipai and @paperclipai/server canary versions are not synchronized")
@@ -352,8 +371,9 @@ def is_ancestor(cwd: Path, ancestor: str, commit: str) -> bool:
     return git(cwd, "merge-base", "--is-ancestor", ancestor, commit, check=False).returncode == 0
 
 
-def prepare(workspace: Path, output: Path, manifest: dict[str, Any], manifest_path: Path | None = None) -> dict[str, Any]:
-    version, npm_docs, source_commit = resolve_canary()
+def prepare(workspace: Path, output: Path, manifest: dict[str, Any], manifest_path: Path | None = None,
+            canary_version: str | None = None) -> dict[str, Any]:
+    version, npm_docs, source_commit = resolve_canary(canary_version)
     if workspace.exists() and any(workspace.iterdir()):
         raise TrainError("workspace must be new or empty; refusing to overwrite existing files")
     workspace.parent.mkdir(parents=True, exist_ok=True)
@@ -1103,13 +1123,14 @@ MIGRATION_COMPAT_ASSERTIONS = (
     "secret-scope-data-preserved",
     "restore-point-checkout-migrations",
     "committed-native-recovery-state-migration",
+    "settled-native-run-process-identity-migration",
     "migration-inventory-extension",
 )
 MIGRATION_INVENTORY_PREFIX = "node_modules/@paperclipai/db/dist/migrations/"
 MIGRATION_OLD_VERSION = "2026.1017.0-canary.6"
 MIGRATION_OLD_SRI = "sha512-ben+ng50+SxXKmXD8MCUit6yZf20i0CQBWG6ZZq44AGvnX8GF5OvLH/F9ogzXFAgEW/Kc2LXCf3qvPolcoagCg=="
 MIGRATION_BASELINE_HASH = "9cec6945b6dd1c38b80940e5246d500da8b5d506a4be68db20ab89136fc11ed9"
-MIGRATION_CANDIDATE_HASH = "d4091a9a05fc45f25f3513d665dd2b1c68fc992aa8822a4db6c28c7b0971b91f"
+MIGRATION_CANDIDATE_HASH = "cf72a4cb66052ff1c4d93f5ec4d29a291d08a28d2355e02e089d92e3052c9e3a"
 
 
 def assemble_migration_compatibility_receipt(receipt: dict[str, Any], provenance: dict[str, Any], runtime_inventory: dict[str, str], *, run_id: int, run_attempt: int, controller_commit: str) -> dict[str, Any]:
@@ -1135,9 +1156,9 @@ def assemble_migration_compatibility_receipt(receipt: dict[str, Any], provenance
         or candidate.get("version") != provenance.get("version")
         or candidate.get("integrity") != candidate_package.get("integrity")
         or not re.fullmatch(r"sha512-[A-Za-z0-9+/]+={0,2}", str(candidate_package.get("integrity", "")))
-        or candidate.get("migrationInventoryCount") != 376
+        or candidate.get("migrationInventoryCount") != 377
         or candidate.get("migrationInventorySha256") != MIGRATION_CANDIDATE_HASH
-        or prepared.get("migrationInventoryCount") != 376
+        or prepared.get("migrationInventoryCount") != 377
         or prepared.get("migrationInventorySha256") != MIGRATION_CANDIDATE_HASH
         or old_package.get("version") != MIGRATION_OLD_VERSION
         or old_package.get("integrity") != MIGRATION_OLD_SRI
@@ -1153,7 +1174,7 @@ def assemble_migration_compatibility_receipt(receipt: dict[str, Any], provenance
     # Inventory receipts hash compact sorted JSON bytes without a trailing LF.
     # canonical_json() is the on-disk receipt codec and deliberately adds one.
     actual_hash = sha256(json.dumps(runtime_inventory, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-    if len(runtime_inventory) != 376 or actual_hash != MIGRATION_CANDIDATE_HASH or actual_hash != candidate.get("migrationInventorySha256"):
+    if len(runtime_inventory) != 377 or actual_hash != MIGRATION_CANDIDATE_HASH or actual_hash != candidate.get("migrationInventorySha256"):
         raise TrainError("compiled runtime migration inventory differs from the tested candidate")
     if not re.fullmatch(r"[a-f0-9]{40}", controller_commit) or run_id <= 0 or run_attempt <= 0:
         raise TrainError("migration compatibility evidence requires a valid workflow identity")
@@ -1340,6 +1361,7 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--output", type=Path, required=True)
         if name == "prepare":
             command.add_argument("--manifest", type=Path, required=True)
+            command.add_argument("--canary-version")
         elif name == "test":
             command.add_argument("--lane", required=True)
         elif name == "build":
@@ -1353,7 +1375,7 @@ def main(argv: list[str] | None = None) -> int:
         workspace, output = args.workspace.resolve(), args.output.resolve()
         if args.command == "prepare":
             manifest = validate_manifest(json.loads(args.manifest.read_text(encoding="utf-8")))
-            result = prepare(workspace, output, manifest, args.manifest)
+            result = prepare(workspace, output, manifest, args.manifest, args.canary_version)
         elif args.command == "plan":
             result = create_test_plan(workspace, output)
         elif args.command == "test":
