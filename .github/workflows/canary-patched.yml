@@ -13,7 +13,7 @@ on:
         required: false
         type: string
       qualification_only:
-        description: Run controller checks and the isolated migration fixture only
+        description: Run isolated migration, settlement, and remote runtime checks without publishing
         required: false
         default: false
         type: boolean
@@ -89,6 +89,39 @@ jobs:
           retention-days: 1
           overwrite: true
           if-no-files-found: error
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_only == true
+        with:
+          version: 9.15.4
+      - name: Verify focused settlement and remote runtime contracts
+        if: github.event_name == 'workflow_dispatch' && inputs.qualification_only == true
+        working-directory: ${{ runner.temp }}/migration-source
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          git rev-parse 'HEAD^{tree}'
+          pnpm install --frozen-lockfile
+          pnpm run preflight:workspace-links
+          pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+          pnpm --filter @paperclipai/server exec vitest run \
+            src/__tests__/heartbeat-process-recovery.test.ts \
+            src/__tests__/heartbeat-stale-queue-invalidation.test.ts \
+            src/__tests__/native-settled-process-release.test.ts \
+            src/__tests__/issue-agent-mutation-ownership-routes.test.ts \
+            src/legacy-run-task-ownership.test.ts \
+            2>&1 | tee "$RUNNER_TEMP/qualification-server-tests.log"
+          pnpm --filter @paperclipai/adapter-opencode-local exec vitest run \
+            src/server/runtime-config.test.ts src/server/execute.remote.test.ts \
+            2>&1 | tee "$RUNNER_TEMP/qualification-opencode-tests.log"
+          test -z "$(git status --porcelain)"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.qualification_only == true
+        with:
+          name: canary-qualification-focused-test-logs
+          path: ${{ runner.temp }}/qualification-*-tests.log
+          retention-days: 1
+          if-no-files-found: warn
 
   assemble:
     needs: controller-tests
