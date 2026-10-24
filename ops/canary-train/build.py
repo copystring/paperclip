@@ -488,6 +488,7 @@ def prepare(workspace: Path, output: Path, manifest: dict[str, Any], manifest_pa
         "schemaVersion": 1,
         "version": version,
         "upstreamRepository": manifest["upstreamRepository"],
+        "packageNames": list(manifest["packageNames"]),
         "sourceCommit": source_commit,
         "sourceTree": source_tree,
         "branch": PATCH_BRANCH,
@@ -522,6 +523,8 @@ def load_provenance(workspace: Path, output: Path) -> tuple[dict[str, Any], list
     provenance = json.loads(path.read_text(encoding="utf-8"))
     if provenance.get("schemaVersion") != 1 or not HEX40.fullmatch(str(provenance.get("sourceCommit", ""))) or not HEX40.fullmatch(str(provenance.get("patchCommit", ""))):
         raise TrainError("provenance.json is invalid")
+    if provenance.get("packageNames") != list(DEFAULT_PACKAGES):
+        raise TrainError("provenance.json does not declare the verified Paperclip runtime pair")
     if git(workspace, "rev-parse", "HEAD").stdout.decode().strip().lower() != provenance["patchCommit"]:
         raise TrainError("workspace HEAD differs from the immutable prepared patch commit")
     if git(workspace, "branch", "--show-current").stdout.decode().strip() != PATCH_BRANCH:
@@ -1296,6 +1299,7 @@ def package(workspace: Path, output: Path, migration_receipt_path: Path | None =
         "patchedCommit": provenance["patchCommit"],
         "patchTree": provenance["patchTree"],
         "branch": provenance["branch"],
+        "packageNames": provenance["packageNames"],
         "patches": provenance["patches"],
         "npmPackages": provenance["npmPackages"],
         "packageMap": package_map,
