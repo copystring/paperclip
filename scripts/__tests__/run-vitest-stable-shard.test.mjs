@@ -317,6 +317,13 @@ test("the real serialized shard partition is complete, non-overlapping and durat
 const chatSuitePath = "server/src/__tests__/chat-channels.integration.test.ts";
 const nativeRunnerSuitePath =
   "server/src/services/native-runtime/native-codex-runner.integration.test.ts";
+const nativeRunnerSuitePaths = [
+  "server/src/services/native-runtime/plugin-runner-probe.test.ts",
+  nativeRunnerSuitePath,
+  "server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts",
+  "server/src/__tests__/dot-runner.test.ts",
+  "server/src/services/native-runtime/native-runner-restart-recovery.integration.test.ts",
+];
 const dotRunnerSuitePath = "server/src/__tests__/dot-runner.test.ts";
 const restartRecoverySuitePath =
   "server/src/services/native-runtime/native-runner-restart-recovery.integration.test.ts";
@@ -360,7 +367,7 @@ test("12 PR without-chat shards plus the dedicated chat and native-runner lanes 
   assert.ok(!files.includes(nativeRunnerSuitePath));
   assert.ok(!files.includes(dotRunnerSuitePath));
   assert.ok(!files.includes(restartRecoverySuitePath));
-  assert.deepEqual([...files, chatSuitePath, nativeRunnerSuitePath, dotRunnerSuitePath, restartRecoverySuitePath, "server/src/services/native-runtime/plugin-runner-probe.test.ts"].sort(), full.selectedGeneralServerSuites.sort());
+  assert.deepEqual([...files, chatSuitePath, ...nativeRunnerSuitePaths].sort(), full.selectedGeneralServerSuites.sort());
   assert.equal(new Set(files).size, files.length);
   const defaultRun = dryRunJson([], prEnv);
   assert.ok(defaultRun.generalServerSuiteCount === full.generalServerSuiteCount);
@@ -402,14 +409,85 @@ for (const caller of ["Release", "Cloud readiness", "another caller"]) {
   });
 }
 
-test("the native-runner lane runs exactly the cargo-dependent suites", () => {
+test("the native-runner lane runs exactly the native integration suites", () => {
   const lane = dryRunJson(["--mode", "general", "--group", "general-server-native-runner"]);
-  assert.deepEqual(lane.selectedGeneralServerSuites, [
-    "server/src/services/native-runtime/plugin-runner-probe.test.ts",
-    "server/src/services/native-runtime/native-codex-runner.integration.test.ts",
-    dotRunnerSuitePath,
-    restartRecoverySuitePath,
-  ]);
+  assert.deepEqual(lane.selectedGeneralServerSuites, nativeRunnerSuitePaths);
+});
+
+test("sharded server invocations split native suites after normal files without changing assignment", () => {
+  for (const caller of ["PR", "Release", "Canary train", "unknown caller"]) {
+    const env = { GITHUB_WORKFLOW: caller };
+    const full = dryRunJson(["--mode", "general", "--group", "general-server", "--shard-index", "0", "--shard-count", "1"], env);
+    const shards = Array.from({ length: 4 }, (_, index) => dryRunJson([
+      "--mode", "general", "--group", "general-server",
+      "--shard-index", String(index), "--shard-count", "4",
+    ], env));
+    const assigned = shards.flatMap((shard) => shard.selectedGeneralServerSuites);
+    assert.deepEqual(assigned.sort(), full.selectedGeneralServerSuites.sort(), `${caller}: shard weighting must keep complete coverage`);
+    assert.equal(new Set(assigned).size, assigned.length, `${caller}: shards must not overlap`);
+
+    for (const shard of shards) {
+      const invocations = shard.generalServerShardInvocations;
+      assert.ok(Array.isArray(invocations), `${caller}: expected actual shard invocation plan`);
+      const invocationFiles = invocations.flatMap((invocation) => invocation.files);
+      assert.deepEqual([...invocationFiles].sort(), [...shard.selectedGeneralServerSuites].sort(), `${caller}: invocation split must preserve coverage`);
+      assert.equal(new Set(invocationFiles).size, invocationFiles.length, `${caller}: invocation files must not overlap`);
+      const normal = invocations.find((invocation) => invocation.kind === "normal");
+      const native = invocations.find((invocation) => invocation.kind === "native-runner");
+      if (normal) {
+        assert.ok(!normal.files.some((file) => nativeRunnerSuitePaths.includes(file)), `${caller}: native suites must not run in the parallel invocation`);
+        assert.ok(normal.args.includes("--maxWorkers=2"), `${caller}: ordinary suites retain the parallel worker limit`);
+      }
+      if (native) {
+        assert.ok(invocations.indexOf(native) > invocations.indexOf(normal), `${caller}: native invocation must follow normal files`);
+        assert.ok(native.files.every((file) => nativeRunnerSuitePaths.includes(file)), `${caller}: native invocation has unknown suites`);
+        assert.ok(native.args.includes("--no-file-parallelism"));
+        assert.ok(native.args.includes("--maxWorkers=1"));
+      }
+    }
+    assert.ok(shards.some((shard) => shard.generalServerShardInvocations.some((invocation) => invocation.files.includes("server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts"))),
+      `${caller}: PRP integration must be assigned to exactly one native invocation`);
+  }
+});
+
+test("a sharded run awaits normal Vitest completion before its native-runner invocation", { skip: process.platform === "win32" }, () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "server-native-order-proof-"));
+  const invocationsPath = path.join(directory, "invocations.jsonl");
+  const normalDonePath = path.join(directory, "normal-finished");
+  const fakePnpm = path.join(directory, "pnpm");
+  const env = workflowEnv({ GITHUB_WORKFLOW: "Canary train" });
+  const shard = Array.from({ length: 4 }, (_, index) => dryRunJson([
+    "--mode", "general", "--group", "general-server",
+    "--shard-index", String(index), "--shard-count", "4",
+  ], env)).find((candidate) => candidate.generalServerShardInvocations.some((invocation) => invocation.files.includes("server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts")));
+  assert.ok(shard, "expected the PRP native integration to be assigned to one weighted shard");
+  try {
+    writeFileSync(fakePnpm, `#!${process.execPath}
+      const fs = require('node:fs');
+      const args = process.argv.slice(2);
+      const nativeFiles = ${JSON.stringify(nativeRunnerSuitePaths)};
+      const phase = args.some(arg => nativeFiles.includes(arg)) ? 'native-runner' : 'normal';
+      if (phase === 'native-runner' && !fs.existsSync(${JSON.stringify(normalDonePath)})) process.exit(81);
+      fs.appendFileSync(${JSON.stringify(invocationsPath)}, JSON.stringify({ phase, args }) + '\\n');
+      if (phase === 'normal') setTimeout(() => fs.writeFileSync(${JSON.stringify(normalDonePath)}, 'completed'), 200);
+    `);
+    chmodSync(fakePnpm, 0o755);
+    const result = spawnSync(process.execPath, [script, "--mode", "general", "--group", "general-server",
+      "--shard-index", String(shard.shardIndex), "--shard-count", "4"], {
+      cwd: repoRoot, encoding: "utf8", timeout: 30_000,
+      env: { ...env, PATH: `${directory}${path.delimiter}${env.PATH}`, PAPERCLIP_TEST_DATABASE_URL: "", PAPERCLIP_CI_PROFILE: "false" },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const calls = readFileSync(invocationsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(calls.map((call) => call.phase), ["normal", "native-runner"]);
+    assert.ok(calls[0].args.includes("--maxWorkers=2"));
+    assert.ok(calls[1].args.includes("--maxWorkers=1"));
+    assert.ok(calls[0].args.some((arg) => arg.startsWith("server/")));
+    assert.ok(calls[1].args.some((arg) => arg === "server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts"));
+    assert.ok(!calls[0].args.some((arg) => nativeRunnerSuitePaths.includes(arg)));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("shard flags are rejected for the native-runner group", () => {
