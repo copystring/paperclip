@@ -60,6 +60,7 @@ import {
   companies,
   heartbeatRunWatchdogDecisions,
   heartbeatRuns,
+  issueExecutionDecisions,
   issueAttachments,
   issueComments,
   issueApprovals,
@@ -925,6 +926,26 @@ function isRepeatedProductiveContinuationRecovery(
   );
 }
 
+/**
+ * SQL boundary for deciding whether a heartbeat run belongs to the pending
+ * execution-review attempt referenced by an issue's lastDecisionId. Keeping
+ * the comparison in SQL preserves PostgreSQL timestamp precision; a missing
+ * or cross-scope decision produces NULL and therefore fails the predicate.
+ */
+export function executionReviewAttemptBoundaryCondition(
+  companyId: string,
+  issueId: string,
+  decisionId: string,
+) {
+  return sql`${heartbeatRuns.createdAt} > (
+    select created_at
+    from issue_execution_decisions
+    where company_id = ${companyId}
+      and issue_id = ${issueId}
+      and id = ${decisionId}
+  )`;
+}
+
 export function recoveryService(
   db: Db,
   deps: {
@@ -1001,6 +1022,7 @@ export function recoveryService(
     companyId: string,
     issueId: string,
     agentId: string,
+    reviewAttempt?: { decisionId: string },
   ): Promise<LatestIssueRun> {
     return db
       .select({
@@ -1021,11 +1043,44 @@ export function recoveryService(
           eq(heartbeatRuns.companyId, companyId),
           eq(heartbeatRuns.agentId, agentId),
           sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
+          ...(reviewAttempt
+            ? [
+                executionReviewAttemptBoundaryCondition(companyId, issueId, reviewAttempt.decisionId),
+              ]
+            : []),
         ),
       )
       .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
       .limit(1)
       .then((rows) => rows[0] ?? null);
+  }
+
+  async function getLatestExecutionReviewParticipantRun(
+    companyId: string,
+    issueId: string,
+    agentId: string,
+    decisionId: string | null,
+  ): Promise<LatestIssueRun | undefined> {
+    if (!decisionId) {
+      return getLatestIssueRunForAgent(companyId, issueId, agentId);
+    }
+    const [decision] = await db
+      .select({ createdAt: issueExecutionDecisions.createdAt })
+      .from(issueExecutionDecisions)
+      .where(
+        and(
+          eq(issueExecutionDecisions.companyId, companyId),
+          eq(issueExecutionDecisions.issueId, issueId),
+          eq(issueExecutionDecisions.id, decisionId),
+        ),
+      )
+      .limit(1);
+    // A missing referenced decision makes the attempt boundary unverifiable.
+    // Do not let an older reviewer run affect recovery for this pending state.
+    if (!decision) return undefined;
+    return getLatestIssueRunForAgent(companyId, issueId, agentId, {
+      decisionId,
+    });
   }
 
   async function summarizeRecentContinuationRetries(
@@ -4763,12 +4818,20 @@ export function recoveryService(
 
       const participantLatestRunForRecovery =
         issue.status === "in_review" && participantAgentId
-          ? await getLatestIssueRunForAgent(
+          ? await getLatestExecutionReviewParticipantRun(
               issue.companyId,
               issue.id,
               participantAgentId,
+              pendingExecutionState?.lastDecisionId ?? null,
             )
           : null;
+      if (participantLatestRunForRecovery === undefined) {
+        // The pending state references a decision row that cannot be found in
+        // this company/issue scope. Its attempt boundary is unknown, so do not
+        // classify old runs or enqueue another recovery against stale state.
+        result.skipped += 1;
+        continue;
+      }
       const executionRecoverySource =
         issue.status === "in_review"
           ? participantLatestRunForRecovery
@@ -5122,7 +5185,7 @@ export function recoveryService(
         const participantLatestRun = participantLatestRunForRecovery;
 
         if (
-          !participantLatestRun ||
+          participantLatestRun &&
           !isTerminalIssueRun(participantLatestRun)
         ) {
           if (!agentInvokable) {
@@ -5146,6 +5209,7 @@ export function recoveryService(
         }
 
         const participantAdapterFailureClassification =
+          participantLatestRun &&
           isUnsuccessfulTerminalIssueRun(participantLatestRun)
             ? classifyAdapterFailureForRecovery(
                 participantLatestRun,
@@ -5153,6 +5217,7 @@ export function recoveryService(
               )
             : null;
         if (
+          participantLatestRun &&
           participantAdapterFailureClassification?.kind === "provider_quota"
         ) {
           const monitored = await scheduleProviderQuotaRecoveryMonitor({
@@ -5173,6 +5238,7 @@ export function recoveryService(
           continue;
         }
         if (
+          participantLatestRun &&
           participantAdapterFailureClassification?.kind ===
           "configuration_incomplete"
         ) {
@@ -5261,7 +5327,7 @@ export function recoveryService(
           reason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
           retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
           source: "issue.execution_review_recovery",
-          retryOfRunId: participantLatestRun.id,
+          retryOfRunId: participantLatestRun?.id,
           extraContext: {
             executionStage: buildExecutionStageWakeContext({
               state: pendingExecutionState,
@@ -5272,6 +5338,12 @@ export function recoveryService(
               recoveryInstruction:
                 "The previous reviewer run ended without a saved decision for this pending stage. Finish the review and record the decision through the issue update route below. Do not treat comments or prose as a saved decision.",
             }),
+            currentStageId: pendingExecutionState.currentStageId ?? null,
+            currentStageType: pendingExecutionState.currentStageType ?? null,
+            currentReviewDecisionId:
+              pendingExecutionState.lastDecisionId ?? null,
+            reviewRecoveryInstruction:
+              "The previous reviewer run ended while this execution-review stage was still pending. Submit the review decision now, or mark the issue blocked with the exact unblock action.",
           },
           issueStateGuard: {
             statuses: ["in_review"],
