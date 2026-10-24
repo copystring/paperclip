@@ -73,10 +73,10 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     await expect(fs.access(prepared.env.XDG_CONFIG_HOME)).rejects.toThrow();
   });
 
-  it("does not create a remote config when permissions are enabled and no runtime settings need transport", async () => {
+  it.each([undefined, "paperclip/combo/medium"])("keeps remote opt-out without MCP a no-op (model=%s)", async (model) => {
     const prepared = await prepareOpenCodeRuntimeConfig({
       env: {},
-      config: { dangerouslySkipPermissions: false },
+      config: { dangerouslySkipPermissions: false, ...(model ? { model } : {}) },
       targetIsRemote: true,
     });
 
