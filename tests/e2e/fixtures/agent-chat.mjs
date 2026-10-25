@@ -115,12 +115,16 @@ if (command.action === "hold") {
       throw new Error("Project retry created a duplicate");
     if (command.action === "handoff") {
       const plan = command.plan ?? "# Plan\n\nWrite the welcome note.";
+      const assigneeActorId = run.agentId;
+      if (!assigneeActorId)
+        throw new Error("The current conversation task has no assigned agent for its execution handoff");
       if (!ctx.interactionId) await writePlan(plan);
       const tasks = [];
       for (let index = 0; index < (command.split ? 2 : 1); index++) {
         const input = {
           title: `Execution ${index + 1}`,
           projectId: project.id,
+          assigneeActorId,
           initialPlan: `${plan}\nPart ${index + 1}`,
           idempotencyKey: `${current.id}-${index}`,
         };
