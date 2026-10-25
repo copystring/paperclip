@@ -1251,7 +1251,7 @@
       "planning",
       "skill_test"
     ],
-    "description": "List redacted actor profiles in the run company.",
+    "description": "List redacted agent profiles for the current company, including stable IDs and status. For delegation, resolve an explicitly requested teammate to one exact returned agent ID; do not infer a recipient from the task title or agent role/title. If the requested agent is absent or ambiguous, ask instead of choosing another agent.",
     "effect": "read",
     "inputSchema": {
       "additionalProperties": false,
@@ -3250,13 +3250,13 @@
       "standard",
       "skill_test"
     ],
-    "description": "Create an assigned task. In a conversation, create a project task with no parent; otherwise create a child of the active task. Include initialPlan to persist its plan before execution. Set status to backlog when the user wants to save or plan work without starting it; backlog tasks never wake an agent. Omitted status means todo, subject to blockers.",
+    "description": "Create a project task from a conversation, or a child from an ordinary task. Persist initialPlan before execution. Set status to backlog when the user wants to save or plan work without starting it; backlog tasks never wake an agent. Omitted status means todo, subject to blockers. For delegation to another agent, use list_agents to resolve the explicitly requested teammate to one exact returned agent ID and pass it as assigneeActorId; omitting the field assigns this agent. Do not infer a recipient from the task title or agent role/title. If the requested recipient is absent or ambiguous, ask before creating. If a follow-up or review task needs this task's result, include this task's exact ID in blockedByTaskIds so it cannot start early; create independent tasks without that dependency. Verify the receipt's task ID and assignee before claiming the handoff succeeded; missing task or assignee data is unconfirmed.",
     "effect": "write",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "assigneeActorId": {
-          "description": "Optional actor assignee. Mutually exclusive with assigneeUserId.",
+          "description": "Agent ID returned by list_agents. Omit or pass null only to assign the current agent; delegation requires the explicitly selected recipient ID.",
           "maxLength": 200,
           "type": [
             "string",
@@ -3272,7 +3272,7 @@
           ]
         },
         "blockedByTaskIds": {
-          "description": "Initial blocker task identifiers.",
+          "description": "Exact task IDs that must finish before this task starts. Include the predecessor ID when this task needs its result; do not infer blockers from titles or roles.",
           "items": {
             "minLength": 1,
             "type": "string"
@@ -3378,6 +3378,65 @@
         "stateRevision": {
           "minimum": 0,
           "type": "integer"
+        },
+        "task": {
+          "additionalProperties": false,
+          "description": "When present, verify task.id and task.assigneeActorId or task.assigneeUserId. Missing task or assignment data does not confirm delegation.",
+          "properties": {
+            "assigneeActorId": {
+              "description": "Persisted assigned agent ID; compare with the explicitly requested recipient.",
+              "minLength": 1,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "assigneeUserId": {
+              "description": "Persisted assigned company person ID.",
+              "minLength": 1,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "description": "Created task ID.",
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "identifier": {
+              "description": "Created task identifier.",
+              "minLength": 1,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parentId": {
+              "description": "Parent task ID.",
+              "minLength": 1,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "projectId": {
+              "description": "Project ID.",
+              "minLength": 1,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "description": "Persisted task status.",
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "type": "object"
         }
       },
       "required": [

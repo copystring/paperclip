@@ -105,21 +105,33 @@ describe("semantic action catalog", () => {
       expect(validate({ ...input, assigneeUserId: 42 })).toBe(false);
       expect(validate({ ...input, undeclaredField: true })).toBe(false);
     }
+    expect(createTaskAction.documentation.description).toContain("list_agents");
+    expect(createTaskAction.documentation.description).toContain("missing task or assignee data is unconfirmed");
+    expect(createTaskAction.documentation.description).toContain("Do not infer a recipient");
+    expect(createTaskAction.documentation.description).toContain("include this task's exact ID in blockedByTaskIds");
+    expect(paperclipSemanticAction("create_task")!.description).toContain("pass it as assigneeActorId");
+    expect(paperclipSemanticAction("create_task")!.inputSchema.properties?.blockedByTaskIds?.description).toContain("must finish before this task starts");
   });
 
   it("accepts project handoff receipts and preserves ordinary child task receipts", () => {
     const ajv = new Ajv2020({ allErrors: true, allowUnionTypes: true, strict: true });
-    const validate = ajv.compile(createTaskAction.live.descriptor.outputSchema);
+    const schemas = [createTaskAction.live.descriptor.outputSchema, paperclipSemanticAction("create_task")!.outputSchema];
     const receipt = {
       commandId: "create-task-1", disposition: "applied", stateRevision: 1,
       entityRefs: ["task-1"], scheduledWakeIds: ["wake-1"],
       task: { id: "task-1", identifier: "CHAT-1", parentId: null, projectId: "project-1", status: "todo", assigneeActorId: "agent-1" },
     };
-    expect(validate(receipt), JSON.stringify(validate.errors)).toBe(true);
-    const { projectId: _projectId, ...childTask } = receipt.task;
-    expect(validate({ ...receipt, task: { ...childTask, parentId: "parent-1" } })).toBe(true);
-    expect(validate({ ...receipt, task: { ...receipt.task, projectId: 42 } })).toBe(false);
-    expect(validate({ ...receipt, task: { ...receipt.task, parentId: "" } })).toBe(false);
+    for (const schema of schemas) {
+      const validate = ajv.compile(schema);
+      expect(validate(receipt), JSON.stringify(validate.errors)).toBe(true);
+      const { projectId: _projectId, ...childTask } = receipt.task;
+      expect(validate({ ...receipt, task: { ...childTask, parentId: "parent-1" } })).toBe(true);
+      expect(validate({ ...receipt, task: { ...receipt.task, projectId: 42 } })).toBe(false);
+      expect(validate({ ...receipt, task: { ...receipt.task, parentId: "" } })).toBe(false);
+      // Generic/scenario receipts can be refused, unknown, or omit entity details.
+      expect(validate({ commandId: "create-task-2", disposition: "duplicate", stateRevision: 2, entityRefs: [], scheduledWakeIds: [] })).toBe(true);
+      expect(validate({ ...receipt, task: {} })).toBe(true);
+    }
   });
 
   it("defines one immutable v1 declaration for each Codex-spine action", () => {
