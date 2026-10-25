@@ -68,7 +68,7 @@ export interface HeartbeatExecutionConfigurationInput {
     aiBinding: AiConnectionBinding | undefined;
   };
   policy: Pick<HeartbeatWorkspacePreparationInput["policy"],
-    "trustPreset" | "useIsolatedTaskDirectory"> & { explicitTaskDirectory: boolean };
+    "trustPreset" | "useIsolatedTaskDirectory"> & { explicitTaskDirectory: boolean; taskDirectoryStrategyCanUsePrimary?: boolean };
   environment: Pick<EnvironmentSelection,
     "selectedEnvironmentId" | "selectedEnvironmentForConfig" | "resolvedInstanceSettings" | "persistedNativeExecutionInput">;
   services: {
@@ -108,15 +108,16 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
   // preparation step can fail. Subsequent provider/identity values extend it.
   onFailureSecretsResolved(() => []);
   const aiBinding = preconfiguredHome ? undefined : input.config.aiBinding;
-  const { trustPreset, useIsolatedTaskDirectory, explicitTaskDirectory } = input.policy;
+  const { trustPreset, taskDirectoryStrategyCanUsePrimary } = input.policy;
   const { secretsSvc, companySkills, appendRunEvent, finalizeAiConnectionBusyDeferral } = input.services;
   let managedAiRuntime: ManagedAiRuntime | undefined;
-  const mergedConfig = {
-    ...sourceWorkspaceConfig,
-    // The base below is already task-owned. Keep directory transport while
-    // preserving isolated mode and the mandatory sandbox preflight.
-    ...((useIsolatedTaskDirectory || explicitTaskDirectory) ? { workspaceStrategy: { type: "project_primary" } } : {}),
-  };
+  // A repo-less task directory can replace only the implicit isolated Git
+  // default. The selector has already rejected explicit Git/branch/setup
+  // requirements; preserve all remaining strategy options in the snapshot.
+  const mergedConfig = taskDirectoryStrategyCanUsePrimary
+    ? { ...sourceWorkspaceConfig,
+        workspaceStrategy: { ...parseObject(sourceWorkspaceConfig.workspaceStrategy), type: "project_primary" } }
+    : sourceWorkspaceConfig;
   const configSnapshot = buildExecutionWorkspaceConfigSnapshot(
     mergedConfig,
     selectedEnvironmentId,

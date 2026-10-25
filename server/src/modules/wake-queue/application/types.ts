@@ -29,6 +29,8 @@ export type RunSnapshot = {
    * or an agent pause. Release must not immediately re-queue such a run.
    */
   operatorStopped?: boolean;
+  /** Adapter-proved exhaustion of a separately bounded automatic authority. */
+  automaticRecoverySuppressed?: boolean;
 };
 
 export type IssueSnapshot = {

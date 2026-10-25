@@ -5,7 +5,7 @@ import { isCompletedOnboardingHandoffWake } from "../../../services/chat-complet
 import { instanceSettingsService } from "../../../services/instance-settings.js";
 import { currentConversationCommentCondition } from "../../../services/agent-conversations.js";
 import { getExecutionBlocker, hasPendingRunCleanup } from "../../../services/execution-blocker.js";
-import { and, asc, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { extractIssueReferenceIdentifiers, isUuidLike } from "@paperclipai/shared";
 import {
@@ -32,6 +32,7 @@ import { HttpError } from "../../../errors.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
 import { issueTreeControlService, isVerifiedIssueTreeControlInteractionWake } from "../../../services/issue-tree-control.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "../../../services/recovery/pause-hold-guard.js";
+import { isAutomaticManagerTriageRun } from "../../../services/recovery/manager-triage-budget.js";
 import { classifyContinuationFailure, executionReviewAttemptBoundaryCondition } from "../../../services/recovery/service.js";
 import { issueService } from "../../../services/issues.js";
 import { issueRecoveryActionService } from "../../../services/issue-recovery-actions.js";
@@ -222,7 +223,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
         paused: !invokability.invokable && invokability.reason === "paused" };
     },
 
-    async findNextDeferredWake({ companyId, issueId, excludedWakeIds }) {
+    async findNextDeferredWake({ companyId, issueId, excludedWakeIds, onlyWakeId }) {
       while (true) {
         const row = await tx
           .select()
@@ -231,6 +232,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
             and(
               eq(agentWakeupRequests.companyId, companyId),
               eq(agentWakeupRequests.status, DEFERRED_WAKE_STATUS),
+              onlyWakeId ? eq(agentWakeupRequests.id, onlyWakeId) : undefined,
               excludedWakeIds?.length ? notInArray(agentWakeupRequests.id, excludedWakeIds) : undefined,
               sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issueId}`,
               interruptQueueId ? eq(agentWakeupRequests.id, interruptQueueId) : undefined,
@@ -1129,6 +1131,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
         if (!currentRun) throw new Error(`wake-queue: run ${input.runId} disappeared while releasing issue execution`);
         run = currentRun;
         const runSnapshot = toRunSnapshot(run);
+        runSnapshot.automaticRecoverySuppressed = await isAutomaticManagerTriageRun(tx, run);
         if (input.resumeStrandedQueue && (!run.finishedAt || !["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status))) {
           return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
         }
@@ -1196,6 +1199,30 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
             )).limit(1)
           : [];
         const cancellation = readRunCancellation(run.resultJson);
+        const reassignmentStopId = readNonEmptyString(run.resultJson?.issueMutationStopId);
+        const isConfirmedLegacyReassignmentStop =
+          run.runtimeMode === "legacy" && run.status === "cancelled" &&
+          run.errorCode === "issue_reassigned" &&
+          run.resultJson?.reassignmentStopConfirmed === true &&
+          Boolean(reassignmentStopId) &&
+          cancellation?.source === "control_plane" && cancellation.expected === true &&
+          parseObject(run.resultJson?.executionCancellation).state === "acknowledged";
+        const [assignmentHandoffWake] = isConfirmedLegacyReassignmentStop && issueRow &&
+          issueRow.assigneeAgentId && issueRow.assigneeAgentId !== run.agentId &&
+          !issueRow.assigneeUserId && ["todo", "in_progress"].includes(issueRow.status) &&
+          run.contextSnapshot?.issueId === issueRow.id && run.finishedAt
+          ? await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.companyId, run.companyId),
+              eq(agentWakeupRequests.agentId, issueRow.assigneeAgentId),
+              eq(agentWakeupRequests.source, "assignment"),
+              eq(agentWakeupRequests.reason, "issue_assigned"),
+              eq(agentWakeupRequests.status, DEFERRED_WAKE_STATUS),
+              sql`${agentWakeupRequests.payload}->>'issueId' = ${issueRow.id}`,
+              sql`${agentWakeupRequests.payload}->>'interruptedRunId' = ${run.id}`,
+              gt(agentWakeupRequests.requestedAt, run.finishedAt),
+            )).orderBy(asc(agentWakeupRequests.requestedAt)).limit(1)
+          : [];
+        const confirmedAssignmentHandoffWakeId = assignmentHandoffWake?.id ?? null;
         const queuedOperatorStop = run.runtimeMode === "legacy" && run.status === "cancelled" &&
           run.runtimeModeResolvedAt === null && run.startedAt === null && run.processStartedAt === null &&
           run.processPid === null && run.processGroupId === null &&
@@ -1217,6 +1244,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
             (run.status === "cancelled" &&
             (queuedOperatorStop || parseObject(run.resultJson?.executionCancellation).state === "acknowledged" || isAcknowledgedNativeStop(run)) &&
             !interruptedQueue),
+          confirmedAssignmentHandoffWakeId,
         };
         const preDrain = decidePreDrain(preDrainFacts);
 
@@ -1301,7 +1329,10 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
           return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
         }
 
-        const locked: LockedIssueExecution = { primaryIssue: toIssueSnapshot(issueRow), run: runSnapshot, recoveryOnly };
+        const locked: LockedIssueExecution = {
+          primaryIssue: toIssueSnapshot(issueRow), run: runSnapshot, recoveryOnly,
+          ...(confirmedAssignmentHandoffWakeId ? { assignmentHandoffWakeId: confirmedAssignmentHandoffWakeId } : {}),
+        };
         const result = await fn(locked, { host: buildHost(tx, deps), transaction: buildTransaction(tx, deps, db, run) });
         // Explicit retry admission requires the exact source's task claim.
         // Preserve it only when the existing queue-first recovery policy

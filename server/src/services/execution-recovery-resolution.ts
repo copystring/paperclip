@@ -2,6 +2,7 @@ import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notificatio
 import { notifyExecutionRunWork } from "./execution-control-notifications.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { canonicalExecutionUuid } from "./execution-identity.js";
 import { claimedAdapterType, conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
 import { persistActivity } from "./activity-log.js";
@@ -23,11 +24,115 @@ import {
   EXECUTION_RECONCILIATION_CAUSES,
   type ExecutionReconciliation,
 } from "@paperclipai/shared";
-import { parseIssueExecutionState } from "./issue-execution-policy.js";
+import { normalizeIssueExecutionPolicy, parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
 import { hasRequiredWorkspaceRecovery } from "./workspace-restore-recovery-state.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { readSystemRecovery } from "./system-recovery-state.js";
+
+export type ReconciledReviewContinuationBinding = {
+  statusVersion: number;
+  state: NonNullable<ReturnType<typeof parseIssueExecutionState>>;
+  policy: NonNullable<ReturnType<typeof normalizeIssueExecutionPolicy>>;
+  participantAgentId: string;
+  assigneeAgentId: string | null;
+};
+
+export function reconciledReviewExecutionStage(binding: ReconciledReviewContinuationBinding) {
+  return {
+    wakeRole: binding.state.currentStageType === "approval" ? "approver" : "reviewer",
+    stageId: binding.state.currentStageId,
+    stageType: binding.state.currentStageType,
+    currentParticipant: binding.state.currentParticipant,
+    returnAssignee: binding.state.returnAssignee,
+    reviewRequest: binding.state.reviewRequest,
+    lastDecisionOutcome: binding.state.lastDecisionOutcome,
+    allowedActions: ["approve", "request_changes"],
+  };
+}
+
+function resolvePendingReviewState(executionState: unknown, executionPolicy: unknown) {
+  const state = parseIssueExecutionState(executionState);
+  const policy = normalizeIssueExecutionPolicy(executionPolicy);
+  const stage = policy?.stages.find((candidate) => candidate.id === state?.currentStageId);
+  const participant = state?.currentParticipant;
+  const participantConfigured = participant && stage?.participants.some((candidate) =>
+    participant.type === "agent"
+      ? candidate.type === "agent" && candidate.agentId === participant.agentId
+      : candidate.type === "user" && candidate.userId === participant.userId,
+  );
+  if (
+    !state || state.status !== "pending" ||
+    !["review", "approval"].includes(state.currentStageType ?? "") ||
+    !state.currentStageId || !participant || !policy || !stage ||
+    stage.type !== state.currentStageType ||
+    policy.stages.indexOf(stage) !== state.currentStageIndex ||
+    !participantConfigured
+  ) return null;
+  return { state, policy, stage, participant };
+}
+
+/** Capture only a real, currently pending native review owned by an agent. */
+export function captureReconciledReviewContinuation(input: {
+  status: string;
+  statusVersion: number;
+  assigneeAgentId: string | null;
+  executionState: unknown;
+  executionPolicy: unknown;
+  allowBlockedSource?: boolean;
+}): ReconciledReviewContinuationBinding | null {
+  const sourceStatusAllowed = input.status === "in_review" ||
+    (input.allowBlockedSource === true && input.status === "blocked");
+  const pending = sourceStatusAllowed
+    ? resolvePendingReviewState(input.executionState, input.executionPolicy)
+    : null;
+  const participantAgentId = pending?.participant.type === "agent"
+    ? pending.participant.agentId
+    : null;
+  if (
+    !pending || !participantAgentId
+  ) return null;
+  return {
+    statusVersion: input.statusVersion,
+    state: pending.state,
+    policy: pending.policy,
+    participantAgentId,
+    assigneeAgentId: input.assigneeAgentId,
+  };
+}
+
+/** Detect a coherent pending review even when the task is held as blocked. */
+export function hasPendingReconciledReview(input: {
+  status: string;
+  executionState: unknown;
+  executionPolicy: unknown;
+}): boolean {
+  if (input.status !== "blocked" && input.status !== "in_review") return false;
+  return resolvePendingReviewState(input.executionState, input.executionPolicy) !== null;
+}
+
+/** Bind delivery to the post-transition version only if the same review survived. */
+export function rebindReconciledReviewContinuation(
+  previous: ReconciledReviewContinuationBinding,
+  issue: {
+    status: string;
+    statusVersion: number;
+    assigneeAgentId: string | null;
+    executionState: unknown;
+    executionPolicy: unknown;
+  },
+): ReconciledReviewContinuationBinding | null {
+  const current = captureReconciledReviewContinuation(issue);
+  if (!current || issue.status !== "in_review" ||
+      current.participantAgentId !== previous.participantAgentId ||
+      current.assigneeAgentId !== previous.participantAgentId ||
+      !isDeepStrictEqual(
+        { ...current.state, monitor: current.state.monitor ?? null },
+        { ...previous.state, monitor: previous.state.monitor ?? null },
+      ) ||
+      !isDeepStrictEqual(current.policy, previous.policy)) return null;
+  return current;
+}
 
 /** An operator records observed outcomes; this is not permission to blindly retry. */
 export async function validateExecutionReconciliation(input: {
@@ -37,6 +142,8 @@ export async function validateExecutionReconciliation(input: {
   agentId: string | null;
   sourceRunId: unknown;
   decision: ExecutionReconciliation | undefined;
+  /** Exact pending review captured while its issue is held as blocked. */
+  reviewContinuation?: ReconciledReviewContinuationBinding;
   /** Board-only source repair: never authorize a continuation of this run. */
   workspaceRepairOnly?: boolean;
 }) {
@@ -67,6 +174,13 @@ export async function validateExecutionReconciliation(input: {
     review?.status === "pending" &&
     review.currentParticipant?.type === "agent" &&
     review.currentParticipant.agentId === run?.agentId;
+  const blockedReviewBindingMatches = input.reviewContinuation !== undefined &&
+    task?.status === "blocked" &&
+    task.statusVersion === input.reviewContinuation.statusVersion &&
+    task.assigneeAgentId === input.reviewContinuation.assigneeAgentId &&
+    isDeepStrictEqual(parseIssueExecutionState(task.executionState), input.reviewContinuation.state) &&
+    isDeepStrictEqual(normalizeIssueExecutionPolicy(task.executionPolicy), input.reviewContinuation.policy) &&
+    run?.agentId === input.reviewContinuation.participantAgentId;
   const retainedWorkspace = hasRequiredWorkspaceRecovery(run?.resultJson);
   const repairOnly = input.workspaceRepairOnly === true && retainedWorkspace;
   const terminalRepairSource = ["failed", "interrupted", "timed_out", "cancelled"].includes(run?.status ?? "") ||
@@ -75,7 +189,8 @@ export async function validateExecutionReconciliation(input: {
     (input.workspaceRepairOnly && !retainedWorkspace) ||
     !run ||
     !task ||
-    (!repairOnly && (task.assigneeAgentId !== agentId || (run.agentId !== agentId && !isCurrentReviewer))) ||
+    (!repairOnly && (task.assigneeAgentId !== agentId ||
+      (run.agentId !== agentId && !isCurrentReviewer && !blockedReviewBindingMatches))) ||
     (run.nativeIssueId ?? run.contextSnapshot?.issueId) !== issueId ||
     !terminalRepairSource
   ) {
@@ -154,6 +269,18 @@ export async function validateExecutionReconciliation(input: {
     throw conflict(
       "The previous execution environment has not finished releasing its authority.",
     );
+  if (input.reviewContinuation) {
+    const activeSuccessors = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId),
+      inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+      or(
+        eq(heartbeatRuns.nativeIssueId, issueId),
+        and(isNull(heartbeatRuns.nativeIssueId), sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}::text`),
+      ),
+    )).limit(1);
+    if (activeSuccessors.length)
+      throw conflict("Another execution is already queued or running for this review. Inspect it before continuing.");
+  }
   if (!repairOnly) await buildExecutionContinuation({
     db,
     companyId,
@@ -176,8 +303,11 @@ export async function markExecutionReconciliation(
   decision: ExecutionReconciliation,
   actorId: string,
   deliveryOwner?: { kind: "chat_failed_run_retry"; actionId: string },
-  options?: { workspaceRepairOnly?: boolean },
+  options?: { workspaceRepairOnly?: boolean; reviewContinuation?: ReconciledReviewContinuationBinding },
 ) {
+  if (options?.reviewContinuation && (deliveryOwner || options.workspaceRepairOnly)) {
+    throw conflict("A pending review continuation cannot be combined with another delivery owner.");
+  }
   if (options?.workspaceRepairOnly && (deliveryOwner || !hasRequiredWorkspaceRecovery(action.evidence))) {
     throw conflict("Workspace repair must target the retained source without a continuation owner.");
   }
@@ -230,6 +360,7 @@ export async function markExecutionReconciliation(
             recordedAt: new Date().toISOString(),
           },
           continuationDelivery: options?.workspaceRepairOnly ? "not_requested" : deliveryOwner ? "delegated" : "pending",
+          ...(options?.reviewContinuation ? { reviewContinuation: options.reviewContinuation } : {}),
           ...(deliveryOwner ? { continuationDeliveryOwner: deliveryOwner } : {}),
         },
       })
@@ -260,7 +391,9 @@ export async function deliverReconciledExecutions(
     try {
       const decision = action.evidence.executionReconciliation as
         ExecutionReconciliation | undefined;
-      if (!decision || !action.returnOwnerAgentId) continue;
+      const reviewBinding = action.evidence.reviewContinuation as
+        ReconciledReviewContinuationBinding | undefined;
+      if (!decision || (!reviewBinding && !action.returnOwnerAgentId)) continue;
       const pendingDecision = and(
         eq(issueRecoveryActions.companyId, action.companyId),
         eq(issueRecoveryActions.id, action.id),
@@ -277,10 +410,32 @@ export async function deliverReconciledExecutions(
             eq(issues.id, action.sourceIssueId),
           ),
         );
+      const currentReview = task?.status === "in_review"
+        ? parseIssueExecutionState(task.executionState)
+        : null;
+      const boundReview = reviewBinding ? parseIssueExecutionState(reviewBinding.state) : null;
+      const reviewStillMatches = reviewBinding && task && currentReview &&
+        boundReview &&
+        task.statusVersion === reviewBinding.statusVersion &&
+        task.assigneeAgentId === reviewBinding.assigneeAgentId &&
+        isDeepStrictEqual(currentReview, boundReview) &&
+        isDeepStrictEqual(normalizeIssueExecutionPolicy(task.executionPolicy), reviewBinding.policy) &&
+        currentReview.status === "pending" &&
+        currentReview.currentParticipant?.type === "agent" &&
+        currentReview.currentParticipant.agentId === reviewBinding.participantAgentId;
+      const activeTaskRuns = reviewBinding && task
+        ? await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.companyId, action.companyId),
+            inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+            or(
+              eq(heartbeatRuns.nativeIssueId, task.id),
+              and(isNull(heartbeatRuns.nativeIssueId), sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${task.id}::text`),
+            ),
+          )).limit(1)
+        : [];
       if (
-        !task ||
-        task.assigneeAgentId !== action.returnOwnerAgentId ||
-        ["done", "cancelled"].includes(task.status)
+        !task || (reviewBinding ? !reviewStillMatches || activeTaskRuns.length > 0 :
+          task.assigneeAgentId !== action.returnOwnerAgentId || ["done", "cancelled"].includes(task.status))
       ) {
         await db
           .update(issueRecoveryActions)
@@ -290,39 +445,61 @@ export async function deliverReconciledExecutions(
           .where(pendingDecision);
         continue;
       }
-      const run = await wake(action.returnOwnerAgentId, {
+      const reviewStage = reviewBinding ? reconciledReviewExecutionStage(reviewBinding) : undefined;
+      const wakeAgentId = reviewBinding?.participantAgentId ?? action.returnOwnerAgentId!;
+      const wakeReason = reviewBinding
+        ? (reviewBinding.state.currentStageType === "approval" ? "execution_approval_requested" : "execution_review_requested")
+        : "issue_recovery_action_restored";
+      const run = await wake(wakeAgentId, {
         source: "automation",
         triggerDetail: "system",
-        reason: "issue_recovery_action_restored",
+        reason: wakeReason,
         idempotencyKey: `execution-reconciliation:${action.id}`,
-        payload: { issueId: task.id, recoveryActionId: action.id },
+        payload: {
+          issueId: task.id,
+          recoveryActionId: action.id,
+          ...(reviewStage ? { executionStage: reviewStage } : {}),
+        },
         requestedByActorType: "system",
         requestedByActorId: "execution-recovery",
+        ...(reviewBinding ? { issueStateGuard: {
+          statuses: ["in_review"],
+          assigneeAgentId: reviewBinding.assigneeAgentId,
+          statusVersion: reviewBinding.statusVersion,
+          reviewAttempt: {
+            decisionId: reviewBinding.state.lastDecisionId,
+            participantAgentId: reviewBinding.participantAgentId,
+            currentStageId: reviewBinding.state.currentStageId,
+            executionPolicy: reviewBinding.policy,
+          },
+        } } : {}),
         contextSnapshot: {
           issueId: task.id,
           taskId: task.id,
           recoveryActionId: action.id,
-          previousRunId: decision.runId,
-          retryOfRunId: decision.runId,
           forceFreshSession: true,
-          wakeReason: "issue_recovery_action_restored",
-          source: "execution.reconciled",
+          ...(reviewStage ? { executionStage: reviewStage, source: "execution.review.reconciled" } : {
+            previousRunId: decision.runId,
+            retryOfRunId: decision.runId,
+            wakeReason: wakeReason,
+            source: "execution.reconciled",
+          }),
         },
       });
       if (run)
         await db.transaction(async (tx) => {
-          await tx
-            .update(heartbeatRuns)
-            .set({ retryOfRunId: decision.runId })
-            .where(
-              and(
-                eq(heartbeatRuns.companyId, action.companyId),
-                eq(heartbeatRuns.id, run.id),
-                eq(heartbeatRuns.agentId, action.returnOwnerAgentId!),
-                sql`${heartbeatRuns.contextSnapshot}->>'recoveryActionId' = ${action.id}`,
-                sql`${heartbeatRuns.contextSnapshot}->>'previousRunId' = ${decision.runId}`,
-              ),
-            );
+          if (!reviewBinding) await tx
+              .update(heartbeatRuns)
+              .set({ retryOfRunId: decision.runId })
+              .where(
+                and(
+                  eq(heartbeatRuns.companyId, action.companyId),
+                  eq(heartbeatRuns.id, run.id),
+                  eq(heartbeatRuns.agentId, action.returnOwnerAgentId!),
+                  sql`${heartbeatRuns.contextSnapshot}->>'recoveryActionId' = ${action.id}`,
+                  sql`${heartbeatRuns.contextSnapshot}->>'previousRunId' = ${decision.runId}`,
+                ),
+              );
           await tx
             .update(issueRecoveryActions)
             .set({

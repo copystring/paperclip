@@ -1,8 +1,8 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, access, rename } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, access, rename, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { captureDirectorySnapshot, directorySnapshotSha256, serializeDirectorySnapshot } from "@paperclipai/adapter-utils/workspace-restore-merge";
@@ -29,6 +29,7 @@ import { cleanupExecutionWorkspaceArtifacts } from "../workspace-runtime.js";
 import { buildProjectMentionHref } from "@paperclipai/shared";
 import { trace } from "@opentelemetry/api";
 import { effectiveProjectWorkspacePolicy } from "../project-workspace-provider.js";
+import { resolvePaperclipInstanceRoot } from "../../home-paths.js";
 import { resolveExecutionWorkspaceMode, buildExecutionWorkspaceAdapterConfig } from "../execution-workspace-policy.js";
 import { createLocalDiskStorageProvider } from "../../storage/local-disk-provider.js";
 import { createStorageService } from "../../storage/service.js";
@@ -226,6 +227,23 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
   const readRun = (id: string) => db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id)).then(rows => rows[0]!);
   const leases = (id: string) => db.select().from(environmentLeases).where(eq(environmentLeases.heartbeatRunId, id));
 
+  async function expectIndependentAttemptGitStorage(originalCwd: string, replacementCwd: string,
+    input: HeartbeatWorkspacePreparationInput) {
+    const commonDir = async (cwd: string) => realpath((await execFile("git", ["-C", cwd,
+      "rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim());
+    const originalCommon = await commonDir(originalCwd);
+    const replacementCommon = await commonDir(replacementCwd);
+    const attemptRoot = await realpath(join(resolvePaperclipInstanceRoot(), "isolated-workspace-attempts",
+      input.agent.companyId, input.task.issueId!, input.run.id, "workspace"));
+    // A checkout may be a worktree; its common storage must still belong to
+    // this new attempt, independently of the retained original repository.
+    expect(replacementCommon).not.toBe(originalCommon);
+    const storageRelative = relative(attemptRoot, replacementCommon);
+    expect(isAbsolute(storageRelative)).toBe(false);
+    expect(storageRelative.split(sep)[0]).not.toBe("..");
+    await expect(access(join(replacementCommon, "objects", "info", "alternates"))).rejects.toThrow();
+  }
+
   it("keeps plugin-owned storage untouched when a fresh attempt provider is unavailable", async () => {
     const { input, source, issue } = await fixture(true);
     await db.update(projects).set({ executionWorkspacePolicy: {
@@ -259,8 +277,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     expect(replacement.executionWorkspace.cwd).not.toBe(source);
     expect(await readFile(join(replacement.executionWorkspace.cwd, "README.md"), "utf8")).toBe("source content\n");
     expect(await readFile(join(original.executionWorkspace.cwd, "unpublished.txt"), "utf8")).toBe("keep the old work\n");
-    const common = await execFile("git", ["-C", replacement.executionWorkspace.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    expect(common.stdout.trim()).toBe(join(replacement.executionWorkspace.cwd, ".git"));
+    await expectIndependentAttemptGitStorage(original.executionWorkspace.cwd, replacement.executionWorkspace.cwd, input);
     await expect(access(join(replacement.executionWorkspace.cwd, "unpublished.txt"))).rejects.toThrow();
     expect((await readIssue(issue.id)).executionWorkspaceId).toBe(replacement.persistedExecutionWorkspace!.id);
   }, 30_000);
@@ -298,8 +315,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
       expect(await readFile(join(replacement.executionWorkspace.cwd, "README.md"), "utf8")).toBe("source content\n");
       await expect(access(join(replacement.executionWorkspace.cwd, "unpublished.txt"))).rejects.toThrow();
       expect(await readFile(join(original.executionWorkspace.cwd, "unpublished.txt"), "utf8")).toBe("keep the old work\n");
-      const common = await execFile("git", ["-C", replacement.executionWorkspace.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
-      expect(common.stdout.trim()).toBe(join(replacement.executionWorkspace.cwd, ".git"));
+      await expectIndependentAttemptGitStorage(original.executionWorkspace.cwd, replacement.executionWorkspace.cwd, input);
       expect((await readIssue(issue.id)).executionWorkspaceId).toBe(replacement.persistedExecutionWorkspace!.id);
     }, 30_000,
   );
@@ -307,6 +323,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
   it("starts a fresh clean task directory without treating it as a Git source", async () => {
     const { input, source, issue } = await fixture();
     input.policy.useIsolatedTaskDirectory = true;
+    input.policy.taskDirectoryStrategyCanUsePrimary = true;
     input.policy.effectiveExecutionWorkspaceMode = "isolated_workspace";
     input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
     input.task.freshWorkspace = { mode: "fresh_isolated_workspace", retryIntentId: input.run.id,
@@ -318,6 +335,126 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     await expect(access(join(prepared.executionWorkspace.cwd, "README.md"))).rejects.toThrow();
     expect(await readFile(join(source, "README.md"), "utf8")).toBe("source content\n");
     expect((await readIssue(issue.id)).executionWorkspaceId).toBe(prepared.persistedExecutionWorkspace!.id);
+  });
+
+  async function prepareRepoLessTaskDirectory(input: HeartbeatWorkspacePreparationInput, issue: NonNullable<HeartbeatWorkspacePreparationInput["task"]["issueRef"]>) {
+    await db.update(issues).set({ projectId: null, projectWorkspaceId: null }).where(eq(issues.id, issue.id));
+    input.task.issueRef = { ...await readIssue(issue.id), projectId: null, projectWorkspaceId: null };
+    input.task.context = { issueId: issue.id };
+    input.policy.useIsolatedTaskDirectory = true;
+    input.policy.taskDirectoryStrategyCanUsePrimary = true;
+    input.policy.effectiveExecutionWorkspaceMode = "isolated_workspace";
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    input.task.freshWorkspace = {
+      mode: "fresh_isolated_workspace",
+      retryIntentId: input.run.id,
+      sourceRunId: input.run.id,
+      retainedSourceIds: [],
+    };
+    input.config.mergedConfig = { workspaceStrategy: { type: "git_worktree" } };
+    return prepareHeartbeatWorkspace(db, input);
+  }
+
+  it("reuses a persisted repo-less task directory on continuation", async () => {
+    const { input, issue } = await fixture();
+    const first = await prepareRepoLessTaskDirectory(input, issue);
+    await writeFile(join(first.executionWorkspace.cwd, "retained.txt"), "keep the task work");
+    input.task.freshWorkspace = null;
+    await reuse(input, first.persistedExecutionWorkspace!);
+    input.policy.useIsolatedTaskDirectory = false;
+    input.policy.taskDirectoryStrategyCanUsePrimary = true;
+
+    const next = await prepareHeartbeatWorkspace(db, input);
+
+    expect(next.persistedExecutionWorkspace).toMatchObject({
+      id: first.persistedExecutionWorkspace!.id,
+      companyId: issue.companyId,
+      sourceIssueId: issue.id,
+      mode: "isolated_workspace",
+      strategyType: "project_primary",
+      providerType: "local_fs",
+      repoUrl: null,
+      branchName: null,
+    });
+    expect(next.executionWorkspace.cwd).toBe(first.executionWorkspace.cwd);
+    expect(await readFile(join(next.executionWorkspace.cwd, "retained.txt"), "utf8")).toBe("keep the task work");
+  });
+
+  it("reuses an authorized parent task directory for a child issue", async () => {
+    const { input, issue } = await fixture();
+    const parent = await prepareRepoLessTaskDirectory(input, issue);
+    input.task.freshWorkspace = null;
+    const [child] = await db.insert(issues).values({
+      companyId: issue.companyId,
+      parentId: issue.id,
+      title: "Child continuation",
+      assigneeAgentId: input.agent.id,
+      executionWorkspaceId: parent.persistedExecutionWorkspace!.id,
+      executionWorkspacePreference: "reuse_existing",
+      executionWorkspaceSettings: { mode: "isolated_workspace" },
+    }).returning();
+    const [childRun] = await db.insert(heartbeatRuns).values({
+      companyId: issue.companyId,
+      agentId: input.agent.id,
+      issueId: child.id,
+      scopeKind: "issue",
+      status: "running",
+      runtimeMode: "legacy",
+    }).returning();
+    const workspace = parent.persistedExecutionWorkspace!;
+    input.run = childRun;
+    input.task.issueId = child.id;
+    input.task.issueRef = child;
+    input.task.context = { issueId: child.id };
+    input.policy.issueExecutionWorkspaceSettings = { mode: "isolated_workspace" };
+    input.policy.useIsolatedTaskDirectory = false;
+    input.policy.taskDirectoryStrategyCanUsePrimary = true;
+    input.policy.effectiveExecutionWorkspaceMode = "isolated_workspace";
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    input.config.mergedConfig = { workspaceStrategy: { type: "git_worktree" } };
+    input.reuse.requestedShouldReuseExisting = true;
+    input.reuse.existingExecutionWorkspace = workspace;
+    input.reuse.reusableExistingExecutionWorkspace = workspace;
+    input.reuse.workspaceReuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
+      issueExecutionWorkspaceId: workspace.id,
+      issueExecutionWorkspacePreference: "reuse_existing",
+      existingExecutionWorkspaceStatus: workspace.status,
+    });
+
+    const childWorkspace = await prepareHeartbeatWorkspace(db, input);
+
+    expect(childWorkspace.executionWorkspace.cwd).toBe(parent.executionWorkspace.cwd);
+    expect(childWorkspace.persistedExecutionWorkspace!.id).toBe(workspace.id);
+  });
+
+  it("rejects a reusable directory whose company ownership differs", async () => {
+    const { input, issue } = await fixture();
+    const first = await prepareRepoLessTaskDirectory(input, issue);
+    input.task.freshWorkspace = null;
+    const workspace = { ...first.persistedExecutionWorkspace!, companyId: "another-company" };
+    await reuse(input, first.persistedExecutionWorkspace!);
+    input.reuse.existingExecutionWorkspace = workspace;
+    input.reuse.reusableExistingExecutionWorkspace = workspace;
+
+    await expect(prepareHeartbeatWorkspace(db, input)).rejects.toMatchObject({
+      resultJson: { workspaceValidation: { reason: "isolated_task_directory_binding_mismatch" } },
+    });
+  });
+
+  it("keeps explicit Git intent blocked when no repository base exists", async () => {
+    const { input, issue } = await fixture();
+    await db.update(issues).set({ projectId: null, projectWorkspaceId: null }).where(eq(issues.id, issue.id));
+    input.task.issueRef = { ...await readIssue(issue.id), projectId: null, projectWorkspaceId: null };
+    input.task.context = { issueId: issue.id };
+    input.policy.effectiveExecutionWorkspaceMode = "isolated_workspace";
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    input.policy.useIsolatedTaskDirectory = false;
+    input.config.mergedConfig = { workspaceStrategy: { type: "git_worktree", existingBranch: "required-branch" } };
+
+    await expect(prepareHeartbeatWorkspace(db, input)).rejects.toMatchObject({
+      resultJson: { workspaceValidation: { reason: "git_worktree_base_not_git_checkout" } },
+    });
+    expect((await readIssue(issue.id)).executionWorkspaceId).toBeNull();
   });
 
   async function reuse(input: HeartbeatWorkspacePreparationInput, workspace: NonNullable<Awaited<ReturnType<typeof prepareHeartbeatWorkspace>>["persistedExecutionWorkspace"]>) {

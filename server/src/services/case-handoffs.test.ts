@@ -5,7 +5,7 @@ import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
-import { activityLog, agentApiKeys, agentWakeupRequests, agents, authSessions, authUsers, boardApiKeys, companyMemberships, principalPermissionGrants, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, companies, createDb, documentRevisions, documents, dotAgentBindings, heartbeatRuns, issueComments, issueDocuments, issues, issueWorkProducts } from "@paperclipai/db";
+import { activityLog, agentApiKeys, agentWakeupRequests, agents, authSessions, authUsers, boardApiKeys, companyMemberships, principalPermissionGrants, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, companies, createDb, documentRevisions, documents, dotAgentBindings, heartbeatRunEvents, heartbeatRuns, issueComments, issueDocuments, issues, issueWorkProducts } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { caseHandoffRoutes } from "../routes/case-handoffs.js";
 import { errorHandler } from "../middleware/error-handler.js";
@@ -41,7 +41,7 @@ describe("durable same-task case handoffs", () => {
     await db.delete(activityLog);
     await db.delete(caseHandoffs); await db.delete(caseIssueLinks); await db.delete(cases);
     await db.delete(documentRevisions); await db.delete(documents);
-    await db.delete(issues); await db.delete(heartbeatRuns); await db.delete(agentWakeupRequests);
+    await db.delete(issues); await db.delete(heartbeatRunEvents); await db.delete(heartbeatRuns); await db.delete(agentWakeupRequests);
     await db.delete(agentApiKeys); await db.delete(boardApiKeys); await db.delete(authSessions);
     await db.delete(principalPermissionGrants); await db.delete(companyMemberships); await db.delete(authUsers);
     await db.delete(agents); await db.delete(companies);

@@ -716,7 +716,7 @@ describe("personal Muse control plane",()=>{
       const execution={binding:{companyId:f.company.id,agentId:f.agent.id,runId:f.runId},provider:{binding:f.ref}};
       const authority=new PaperclipRunnerToolAuthority(db,{companyId:f.company.id,agentId:f.agent.id,issueId:f.issue.id,runId:f.runId,
         museRuntime:true,externalAuthorizingUserId:f.operatorId,assertBridgeAuthority:(database=db)=>f.broker.assertRunAuthority(execution,database)});
-      const call={tool:"create_task",callId:randomUUID(),arguments:{title:"Native child",idempotencyKey:randomUUID()}};
+      const call={tool:"create_task",callId:randomUUID(),arguments:{title:"Native child",assigneeActorId:f.agent.id,idempotencyKey:randomUUID()}};
       const command={version:1 as const,command:"task.create" as const,requestId:randomUUID(),title:"Idle child",parentId:f.issue.id};
       const beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
       let ready=()=>{},holderPid=0,nativePid=0,idlePid=0;
@@ -879,7 +879,7 @@ describe("personal Muse control plane",()=>{
         museRuntime:true,externalAuthorizingUserId:f.operatorId,assertBridgeAuthority:async(database=db)=>{
           await f.broker.assertRunAuthority(execution,database);checks.push(database===db?"discovery":"transaction");
         }});
-      const idempotencyKey=randomUUID(),call={tool:"create_task",callId:randomUUID(),arguments:{title:"Must not create after qualification expiry",idempotencyKey}};
+      const idempotencyKey=randomUUID(),call={tool:"create_task",callId:randomUUID(),arguments:{title:"Must not create after qualification expiry",assigneeActorId:f.agent.id,idempotencyKey}};
       const beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
       let ready=()=>{},holderPid=0;const locked=new Promise<void>(resolve=>{ready=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
       holder=db.transaction(async tx=>{

@@ -1,4 +1,5 @@
 import { deriveTaskKeyWithHeartbeatFallback } from "./run-state.js";
+import { isAutomaticManagerTriageRun } from "../recovery/manager-triage-budget.js";
 import { infrastructureRetryDelayMs } from "../system-recovery-state.js";
 import {
   WORKSPACE_VALIDATION_FAILURE_CODE,
@@ -412,6 +413,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         || ["openai_dot", "muse"].includes(String(parseObject(parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput).provider).kind))) {
       return { outcome: "not_scheduled" as const, reason: "Dot external execution must be reconciled before a new assignment; Paperclip cannot confirm its external stop.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
     }
+    // Dependency resolution owns continuation of this wait; it is not a failed provider attempt.
+    if (run.errorCode === "issue_dependencies_blocked") {
+      return { outcome: "not_scheduled" as const, reason: "Dependency resolution owns continuation of this resource wait.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
+    }
     if (run.errorCode === "provider_tool_definition_invalid") {
       return { outcome: "not_scheduled" as const,
         reason: "Repair the invalid tool definitions before starting a new attempt.",
@@ -511,6 +516,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       };
     }
 
+    // Existing handoffs and an exhausted retry allowance settle without DB
+    // admission. Only a candidate successor needs the separate triage guard.
+    if (await isAutomaticManagerTriageRun(db, run)) return { outcome: "not_scheduled" as const,
+      reason: "The separately reserved manager invocation is exhausted.", issueId };
     if (await legacyExecutionNeedsReconciliationWithEvidence(db, run)) {
       return {
         outcome: "not_scheduled" as const,

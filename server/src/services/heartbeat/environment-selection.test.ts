@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agents, companies, createDb, environments, heartbeatRuns, issues, projects, projectWorkspaces, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, type Db } from "@paperclipai/db";
+import { agents, companies, createDb, environments, executionWorkspaces, heartbeatRuns, issues, projects, projectWorkspaces, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, type Db } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { resolvePaperclipInstanceRoot } from "../../home-paths.js";
+import { materializeIsolatedTaskDirectory } from "../isolated-task-directory.js";
 import { environmentService } from "../environments.js";
 import { executionWorkspaceService } from "../execution-workspaces.js";
 import { instanceSettingsService } from "../instance-settings.js";
@@ -225,6 +226,62 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
     const result = await selectHeartbeatEnvironment(db, input);
     expect(result.selectedEnvironmentForConfig?.id).toBe(sandbox.id);
     expect(result.useIsolatedTaskDirectory).toBe(true);
+  });
+
+  it.each([
+    { type: "git_worktree" },
+    { existingBranch: "release" },
+    { provisionCommand: "./setup.sh" },
+  ])("does not turn a fresh repo-less issue with workspace requirement %j into a task-directory fallback", async workspaceStrategy => {
+    const { input } = await fixture();
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    input.task.freshWorkspace = {
+      mode: "fresh_isolated_workspace",
+      retryIntentId: input.run.id,
+      sourceRunId: input.run.id,
+      retainedSourceIds: [],
+    };
+    input.config.config.workspaceStrategy = workspaceStrategy;
+
+    const result = await selectHeartbeatEnvironment(db, input);
+
+    expect(result.useIsolatedTaskDirectory).toBe(false);
+    expect(result.explicitTaskDirectory).toBe(false);
+  });
+
+  it("recognizes a bound repo-less task directory on local continuation even when isolated mode supplied the Git default", async () => {
+    const { input, issue, project } = await fixture();
+    const cwd = await materializeIsolatedTaskDirectory({ companyId: issue.companyId, issueId: issue.id });
+    const [workspace] = await db.insert(executionWorkspaces).values({
+      companyId: issue.companyId,
+      sourceIssueId: issue.id,
+      projectId: project.id,
+      name: "Retained task directory",
+      mode: "isolated_workspace",
+      strategyType: "project_primary",
+      providerType: "local_fs",
+      cwd,
+      status: "active",
+      metadata: { source: "task_session" },
+    }).returning();
+    await db.update(issues).set({ projectWorkspaceId: null,
+      executionWorkspaceId: workspace.id, executionWorkspacePreference: "reuse_existing",
+      executionWorkspaceSettings: { mode: "isolated_workspace" },
+    }).where(eq(issues.id, issue.id));
+    const [boundIssue] = await db.select().from(issues).where(eq(issues.id, issue.id));
+    input.task.issueRef = boundIssue;
+    input.task.issueContext = boundIssue;
+    input.task.executionProjectId = project.id;
+    input.task.workspaceProjectContext = { hasWorkspace: false };
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    input.policy.issueExecutionWorkspaceSettings = { mode: "isolated_workspace" };
+    input.config.sourceWorkspaceConfig = { workspaceStrategy: { type: "git_worktree" } };
+
+    const result = await selectHeartbeatEnvironment(db, input);
+
+    expect(result.reusableExistingExecutionWorkspace?.id).toBe(workspace.id);
+    expect(result.useIsolatedTaskDirectory).toBe(false);
+    expect(result.taskDirectoryStrategyCanUsePrimary).toBe(true);
   });
 
   it("returns the task-owned local chat root before workspace realization", async () => {

@@ -6,6 +6,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 import { createTaskAction } from "../protocol-actions/create-task.js";
 import { createProjectAction } from "../protocol-actions/create-project.js";
+import { listAgentsAction } from "../protocol-actions/list-agents.js";
 import { handoffCaseAction } from "../protocol-actions/handoff-case.js";
 
 import {
@@ -101,25 +102,54 @@ describe("semantic action catalog", () => {
       const validate = ajv.compile(schema);
       const input = { title: "Hello", idempotencyKey: "hello", assigneeUserId: "company-owner" };
       expect(validate(input), JSON.stringify(validate.errors)).toBe(true);
-      expect(validate({ ...input, assigneeUserId: null })).toBe(true);
+      expect(validate({ title: "Self", idempotencyKey: "self", assigneeActorId: "agent-1" })).toBe(true);
+      expect(validate({ title: "Person", idempotencyKey: "person", assigneeUserId: "person-1", assigneeActorId: null })).toBe(true);
+      expect(validate({ ...input, assigneeUserId: null })).toBe(false);
+      expect(validate({ idempotencyKey: "missing", title: "Missing assignee" })).toBe(false);
+      expect(validate({ ...input, assigneeUserId: "" })).toBe(false);
+      expect(validate({ ...input, assigneeUserId: "   " })).toBe(false);
+      expect(validate({ ...input, assigneeActorId: "agent-1" })).toBe(false);
       expect(validate({ ...input, assigneeUserId: 42 })).toBe(false);
+      expect(validate({ ...input, assigneeUserId: "person-1", assigneeActorId: "agent-1" })).toBe(false);
       expect(validate({ ...input, undeclaredField: true })).toBe(false);
     }
+    expect(createTaskAction.documentation.description).toContain("list_agents");
+    expect(createTaskAction.documentation.description).toContain("missing task or assignee data is unconfirmed");
+    expect(createTaskAction.documentation.description).toContain("exact role/title match");
+    expect(createTaskAction.documentation.description).toContain("hardcoded mapping");
+    expect(createTaskAction.documentation.description).toContain("If this parent needs a child's result before finishing, use set_dependencies");
+    expect(createTaskAction.documentation.description).not.toContain("If a child result is needed before finishing this task, include this task's exact ID");
+    expect(paperclipSemanticAction("create_task")!.description).toContain("exactly one explicit nonempty assigneeActorId or assigneeUserId");
+    expect(paperclipSemanticAction("create_task")!.inputSchema.properties?.blockedByTaskIds?.description).toContain("must finish before this task starts");
+    expect(listAgentsAction.documentation.description).toContain("exact match to one listed profile's role/title");
+    const validateScenario = ajv.compile(createTaskAction.scenario.descriptor.inputSchema);
+    expect(validateScenario({ title: "Self assignment", assigneeActorId: "actor-1" })).toBe(true);
+    expect(validateScenario({ title: "Missing assignment" })).toBe(false);
+    expect(validateScenario({ title: "Self assignment", assigneeActorId: "" })).toBe(false);
+    expect(validateScenario({ title: "Self assignment", assigneeActorId: "   " })).toBe(false);
+    expect(createTaskAction.scenario.descriptor.inputSchema.properties.assigneeActorId.description).toContain("including this agent");
+    expect(createTaskAction.scenario.descriptor.inputSchema.properties.assigneeActorId.description).not.toContain("pass null");
   });
 
   it("accepts project handoff receipts and preserves ordinary child task receipts", () => {
     const ajv = new Ajv2020({ allErrors: true, allowUnionTypes: true, strict: true });
-    const validate = ajv.compile(createTaskAction.live.descriptor.outputSchema);
+    const schemas = [createTaskAction.live.descriptor.outputSchema, paperclipSemanticAction("create_task")!.outputSchema];
     const receipt = {
       commandId: "create-task-1", disposition: "applied", stateRevision: 1,
       entityRefs: ["task-1"], scheduledWakeIds: ["wake-1"],
       task: { id: "task-1", identifier: "CHAT-1", parentId: null, projectId: "project-1", status: "todo", assigneeActorId: "agent-1" },
     };
-    expect(validate(receipt), JSON.stringify(validate.errors)).toBe(true);
-    const { projectId: _projectId, ...childTask } = receipt.task;
-    expect(validate({ ...receipt, task: { ...childTask, parentId: "parent-1" } })).toBe(true);
-    expect(validate({ ...receipt, task: { ...receipt.task, projectId: 42 } })).toBe(false);
-    expect(validate({ ...receipt, task: { ...receipt.task, parentId: "" } })).toBe(false);
+    for (const schema of schemas) {
+      const validate = ajv.compile(schema);
+      expect(validate(receipt), JSON.stringify(validate.errors)).toBe(true);
+      const { projectId: _projectId, ...childTask } = receipt.task;
+      expect(validate({ ...receipt, task: { ...childTask, parentId: "parent-1" } })).toBe(true);
+      expect(validate({ ...receipt, task: { ...receipt.task, projectId: 42 } })).toBe(false);
+      expect(validate({ ...receipt, task: { ...receipt.task, parentId: "" } })).toBe(false);
+      // Generic/scenario receipts can be refused, unknown, or omit entity details.
+      expect(validate({ commandId: "create-task-2", disposition: "duplicate", stateRevision: 2, entityRefs: [], scheduledWakeIds: [] })).toBe(true);
+      expect(validate({ ...receipt, task: {} })).toBe(true);
+    }
   });
 
   it("defines one immutable v1 declaration for each Codex-spine action", () => {

@@ -9,6 +9,8 @@ import { setTaskMonitorInputSchema } from "../protocol-actions/set-task-monitor.
 import { listProjectsDescription, listProjectsInputSchema } from "../protocol-actions/list-projects.js";
 import { setTaskTitleAction } from "../protocol-actions/set-task-title.js";
 import { reassignTaskAction } from "../protocol-actions/reassign-task.js";
+import { createTaskAction } from "../protocol-actions/create-task.js";
+import { listAgentsAction } from "../protocol-actions/list-agents.js";
 import type {
   PaperclipJsonSchema,
   PaperclipSemanticActionDescriptor,
@@ -85,6 +87,30 @@ const operationReceipt = object(
     "entityRefs",
     "scheduledWakeIds",
   ],
+);
+const createTaskReceipt = object(
+  {
+    commandId: text("Stable command identifier.", 200),
+    disposition: { enum: ["applied", "duplicate"] },
+    stateRevision: { type: "integer", minimum: 0 },
+    entityRefs: stringArray("Entities affected by the operation."),
+    scheduledWakeIds: stringArray("Wake identifiers scheduled by the operation."),
+    task: {
+      type: "object",
+      description: "When present, verify task.id and task.assigneeActorId or task.assigneeUserId. Missing task or assignment data does not confirm delegation.",
+      properties: {
+        id: text("Created task ID."),
+        identifier: { type: ["string", "null"], minLength: 1, description: "Created task identifier." },
+        parentId: { type: ["string", "null"], minLength: 1, description: "Parent task ID." },
+        projectId: { type: ["string", "null"], minLength: 1, description: "Project ID." },
+        status: text("Persisted task status."),
+        assigneeActorId: { type: ["string", "null"], minLength: 1, description: "Persisted assigned agent ID; compare with the explicitly requested recipient." },
+        assigneeUserId: { type: ["string", "null"], minLength: 1, description: "Persisted assigned company person ID." },
+      },
+      additionalProperties: false,
+    },
+  },
+  ["commandId", "disposition", "stateRevision", "entityRefs", "scheduledWakeIds"],
 );
 
 interface DescriptorInput {
@@ -338,7 +364,7 @@ const descriptors: readonly PaperclipSemanticActionDescriptor[] = [
   descriptor({
     operationId: "list_agents",
     title: "List company agents",
-    description: "List redacted actor profiles in the run company.",
+    description: listAgentsAction.live.descriptor.description,
     placement: "optional",
     requiredClaims: ["discovery:agents:read"],
   }),
@@ -525,27 +551,47 @@ const descriptors: readonly PaperclipSemanticActionDescriptor[] = [
   descriptor({
     operationId: "create_task",
     title: "Create task",
-    description: "Create an assigned task. In a conversation, create a project task with no parent; otherwise create a child of the active task. Include initialPlan to persist its plan before execution. Set status to backlog when the user wants to save or plan work without starting it; backlog tasks never wake an agent. Omitted status means todo, subject to blockers.",
+    description: createTaskAction.documentation.description,
     placement: "optional",
     effect: "write",
     requiredClaims: ["delegation:tasks:create"],
     allowedModes: STANDARD_MODE,
-    inputSchema: object(
-      {
-        ...idempotency,
-        title: text("Task title.", 500),
-        projectId: nullableText("Project identifier for the new task."),
-        initialPlan: nullableText("Remaining execution steps to persist as the task plan. Exclude completed planning, approval, and handoff steps; cite the source plan revision and approval. A copied plan is not a new approval gate."),
-        description: nullableText("Child task description."),
-        assigneeActorId: nullableText("Optional actor assignee. Mutually exclusive with assigneeUserId.", 200),
-        assigneeUserId: nullableText("Company person ID from list_people. Mutually exclusive with assigneeActorId.", 200),
-        status: { enum: ["backlog", "todo"], description: "Initial status. Use backlog to save work without execution. Defaults to todo (blocked when dependencies are unresolved)." },
-        priority: { enum: ["critical", "high", "medium", "low"] },
-        blockedByTaskIds: stringArray("Initial blocker task identifiers."),
-      },
-      ["idempotencyKey", "title"],
-    ),
-    outputSchema: operationReceipt,
+    inputSchema: {
+      ...object(
+        {
+          ...idempotency,
+          title: text("Task title.", 500),
+          projectId: nullableText("Project identifier for the new task."),
+          initialPlan: nullableText("Remaining execution steps to persist as the task plan. Exclude completed planning, approval, and handoff steps; cite the source plan revision and approval. A copied plan is not a new approval gate."),
+          description: nullableText("Child task description."),
+          assigneeActorId: nullableText("Required explicit agent ID from list_agents, including when assigning this agent.", 200),
+          assigneeUserId: nullableText("Required explicit company person ID from list_people when assigning a person.", 200),
+          status: { enum: ["backlog", "todo"], description: "Initial status. Use backlog to save work without execution. Defaults to todo (blocked when dependencies are unresolved)." },
+          priority: { enum: ["critical", "high", "medium", "low"] },
+          blockedByTaskIds: stringArray("Exact task IDs that must finish before this task starts. Include the predecessor ID when this task needs its result; do not infer blockers from titles or roles."),
+        },
+        ["idempotencyKey", "title"],
+      ),
+      oneOf: [
+        {
+          type: "object",
+          required: ["assigneeActorId"],
+          properties: {
+            assigneeActorId: { ...text("Explicit agent ID from list_agents, including this agent.", 200), pattern: "\\S" },
+            assigneeUserId: { type: "null" },
+          },
+        },
+        {
+          type: "object",
+          required: ["assigneeUserId"],
+          properties: {
+            assigneeActorId: { type: "null" },
+            assigneeUserId: { ...text("Explicit company person ID from list_people.", 200), pattern: "\\S" },
+          },
+        },
+      ],
+    },
+    outputSchema: createTaskReceipt,
   }),
   descriptor({
     operationId: "request_approval",

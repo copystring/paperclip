@@ -1,4 +1,5 @@
 import { taskInterruptionPresentation, taskInterruptionPresentations } from "../services/task-interruption-presentation.js";
+import { revalidateNonDispatchHolds } from "../services/non-dispatch-revalidation.js";
 import { parseObject } from "../adapters/utils.js";
 import { prepareRestrictedWorkspaceRetry } from "../services/restricted-workspace-retry.js";
 import { issueSummariesQuerySchema, type IssueSummary } from "@paperclipai/shared";
@@ -34,6 +35,9 @@ import { EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from
 import {
   validateExecutionReconciliation,
   markExecutionReconciliation,
+  captureReconciledReviewContinuation,
+  hasPendingReconciledReview,
+  rebindReconciledReviewContinuation,
 } from "../services/execution-recovery-resolution.js";
 import {
   storedSteeringAcknowledgement,
@@ -273,7 +277,7 @@ import {
 } from "../attachment-types.js";
 import { retainBacklogHumanAssignment } from "../services/human-directed-work.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
-import { shouldWakeAssigneeForIssueComment } from "../services/issue-comment-wakeup.js";
+import { isCurrentRunWorkHandback, shouldWakeAssigneeForIssueComment } from "../services/issue-comment-wakeup.js";
 import { createSecretProposalsService } from "../services/secret-proposals.js";
 import { notifySecretProposalResolution } from "../services/secret-proposal-notifications.js";
 import {
@@ -9516,6 +9520,32 @@ export function issueRoutes(
     res.status(202).json(receipt);
   });
 
+  router.post("/issues/:id/recovery-actions/revalidate-non-dispatch", async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(
+      req,
+      res,
+      svc.getById(req.params.id as string),
+      "Issue not found",
+    );
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const decision = await access.decide({
+      actor: req.actor,
+      action: "runtime:manage",
+      resource: { type: "company", companyId: issue.companyId },
+    });
+    if (!decision.allowed) throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
+    if (!Number.isSafeInteger(req.body?.expectedStatusVersion) || req.body.expectedStatusVersion < 0) {
+      throw badRequest("expectedStatusVersion is required");
+    }
+    res.json(await revalidateNonDispatchHolds(db, {
+      companyId: issue.companyId,
+      issueId: issue.id,
+      expectedStatusVersion: req.body.expectedStatusVersion,
+      actorId: getActorInfo(req).actorId,
+    }));
+  });
+
   router.post("/issues/:id/recovery-actions/resume-workspace-finalization", validate(resumeWorkspaceFinalizationSchema), async (req, res) => {
     assertBoard(req);
     const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
@@ -9633,6 +9663,22 @@ export function issueRoutes(
           .for("update")
           .then((rows) => rows[0] ?? null);
         if (!lockedIssue) throw notFound("Issue not found");
+        let reviewContinuationBinding: ReturnType<typeof captureReconciledReviewContinuation> = null;
+
+        if (
+          outcome === "restored" && sourceIssueStatus === "todo" &&
+          lockedIssue.status === "blocked" &&
+          hasPendingReconciledReview({
+            status: lockedIssue.status,
+            executionState: lockedIssue.executionState,
+            executionPolicy: lockedIssue.executionPolicy,
+          })
+        ) {
+          throw conflict(
+            "This task has a pending review stage. Restore it to In Review for the current reviewer; do not return it to the executor.",
+            { code: "pending_review_requires_reviewer_continuation" },
+          );
+        }
 
         // Retained files are a source-scoped obligation, independent of the
         // current task owner/generation and any newer active recovery incident.
@@ -9700,13 +9746,37 @@ export function issueRoutes(
               assertBoard(req);
               if (
                 activeRecoveryAction ||
-                sourceIssueStatus !== "todo" ||
+                !["todo", "in_review"].includes(sourceIssueStatus) ||
                 outcome !== "restored"
               ) {
                 throw conflict(
                   "Verified outcomes must restore this source recovery without replacing another active recovery action.",
                 );
               }
+              if (sourceIssueStatus === "in_review") {
+                reviewContinuationBinding = captureReconciledReviewContinuation({
+                  status: lockedIssue.status,
+                  statusVersion: lockedIssue.statusVersion,
+                  assigneeAgentId: lockedIssue.assigneeAgentId,
+                  executionState: lockedIssue.executionState,
+                  executionPolicy: lockedIssue.executionPolicy,
+                  allowBlockedSource: lockedIssue.status === "blocked",
+                });
+                if (!reviewContinuationBinding || !["in_review", "blocked"].includes(lockedIssue.status)) {
+                  throw conflict("A settled no-replay hold can continue only an unchanged pending agent review or approval.");
+                }
+              }
+              await validateExecutionReconciliation({
+                db: tx as unknown as Db,
+                companyId: lockedIssue.companyId,
+                issueId: lockedIssue.id,
+                agentId: lockedIssue.assigneeAgentId,
+                sourceRunId: settled.evidence.runId ?? settled.evidence.sourceRunId,
+                decision: executionReconciliation,
+                ...(lockedIssue.status === "blocked" && reviewContinuationBinding
+                  ? { reviewContinuation: reviewContinuationBinding }
+                  : {}),
+              });
               const [reopened] = await tx
                 .update(issueRecoveryActions)
                 .set({ status: "active", outcome: null, resolvedAt: null })
@@ -9871,6 +9941,35 @@ export function issueRoutes(
               activeRecoveryAction.evidence.sourceRunId,
             decision: executionReconciliation,
           });
+        } else if (
+          sourceIssueStatus === "in_review" &&
+          outcome === "restored" && requiresExecutionReconciliation(activeRecoveryAction.cause)
+        ) {
+          assertBoard(req);
+          if (!reviewContinuationBinding) {
+            reviewContinuationBinding = captureReconciledReviewContinuation({
+              status: lockedIssue.status,
+              statusVersion: lockedIssue.statusVersion,
+              assigneeAgentId: lockedIssue.assigneeAgentId,
+              executionState: lockedIssue.executionState,
+              executionPolicy: lockedIssue.executionPolicy,
+              allowBlockedSource: lockedIssue.status === "blocked",
+            });
+          }
+          if (!reviewContinuationBinding || !["in_review", "blocked"].includes(lockedIssue.status)) {
+            throw conflict("Only an unchanged pending agent review or approval can be continued after reconciliation.");
+          }
+          await validateExecutionReconciliation({
+            db: tx as unknown as Db,
+            companyId: lockedIssue.companyId,
+            issueId: lockedIssue.id,
+            agentId: lockedIssue.assigneeAgentId,
+            sourceRunId: activeRecoveryAction.evidence.runId ?? activeRecoveryAction.evidence.sourceRunId,
+            decision: executionReconciliation,
+            ...(lockedIssue.status === "blocked"
+              ? { reviewContinuation: reviewContinuationBinding }
+              : {}),
+          });
         } else if (executionReconciliation) {
           throw conflict(
             "An execution reconciliation must target the current execution recovery action and continue the task.",
@@ -9922,19 +10021,6 @@ export function issueRoutes(
           }
         }
 
-        if (executionReconciliation) {
-          // The authorized chat retry is the sole durable delivery owner.
-          // Never also enqueue a generic successor that lacks chat provenance.
-          await markExecutionReconciliation(
-            tx as unknown as Db,
-            activeRecoveryAction,
-            executionReconciliation,
-            actor.actorId,
-            chatRetry
-              ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
-              : undefined,
-          );
-        }
         let issue = lockedIssue;
         const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
         if (outcome === "blocked" && sourceStatusChanged) {
@@ -10078,6 +10164,29 @@ export function issueRoutes(
                 );
           if (!updatedIssue) throw notFound("Issue not found");
           issue = updatedIssue;
+        }
+
+        if (executionReconciliation) {
+          if (reviewContinuationBinding && lockedIssue.status === "blocked" && sourceIssueStatus === "in_review") {
+            const rebound = rebindReconciledReviewContinuation(reviewContinuationBinding, issue);
+            if (!rebound) {
+              throw conflict("The pending review changed while restoring it. Refresh before continuing the reviewer.");
+            }
+            reviewContinuationBinding = rebound;
+          }
+          // Bind delivery to the committed issue version and current review
+          // owner. The transaction rolls back both the issue transition and
+          // recovery evidence if either check fails.
+          await markExecutionReconciliation(
+            tx as unknown as Db,
+            activeRecoveryAction,
+            executionReconciliation,
+            actor.actorId,
+            chatRetry
+              ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
+              : undefined,
+            reviewContinuationBinding ? { reviewContinuation: reviewContinuationBinding } : undefined,
+          );
         }
 
         const recordedOutcome =
@@ -15654,6 +15763,11 @@ export function issueRoutes(
               reopened,
               currentStatus: issue.status,
             });
+          const workHandback = isCurrentRunWorkHandback({
+            selfComment, resumeRequested: resumeRequested === true,
+            commentCreatedByRunId: comment.createdByRunId,
+            issueAtCommentStart: existing, reopened, currentStatus: issue.status,
+          });
 
           if (
             assigneeId &&
@@ -15667,6 +15781,9 @@ export function issueRoutes(
               reason: reopened
                 ? "issue_reopened_via_comment"
                 : "issue_commented",
+              ...(workHandback ? { allowRunCoalescing: false, issueStateGuard: {
+                statuses: ["todo"], assigneeAgentId: issue.assigneeAgentId, statusVersion: issue.statusVersion,
+              } } : {}),
               payload: {
                 issueId: id,
                 commentId: comment.id,
@@ -15692,6 +15809,7 @@ export function issueRoutes(
                 commentId: comment.id,
                 wakeCommentId: comment.id,
                 source: reopened ? "issue.comment.reopen" : "issue.comment",
+                ...(workHandback ? { forceFreshSession: true } : {}),
                 wakeReason: reopened
                   ? "issue_reopened_via_comment"
                   : "issue_commented",
