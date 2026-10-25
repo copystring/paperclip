@@ -84,7 +84,7 @@ const support = await getEmbeddedPostgresTestSupport();
   it("creates an ordinary project task and its plan atomically, retaining the conversation plan", async () => {
     const f = await server.fixture({ conversation: true });
     await documentService(server.db).upsertIssueDocument({ issueId: f.issueId, key: "plan", format: "markdown", body: "Full discussion plan" });
-    const input = { title: "Implement the clarified outcome", projectId: f.projectId, initialPlan: "# Execution plan\n\nBuild and verify the outcome.", idempotencyKey: "handoff" };
+    const input = { title: "Implement the clarified outcome", projectId: f.projectId, assigneeActorId: f.agentId, initialPlan: "# Execution plan\n\nBuild and verify the outcome.", idempotencyKey: "handoff" };
     const first = await call(f, "create_task", input) as any;
     const again = await call(f, "create_task", input) as any;
     expect(again.task.id).toBe(first.task.id);
@@ -116,7 +116,7 @@ const support = await getEmbeddedPostgresTestSupport();
 
   it("hands off through the same API used by Claude/Codex MCP with the plan present on return", async () => {
     const f = await server.fixture({ conversation: true });
-    const result = await callProjectTool({ name: "create_task", arguments: { title: "MCP handoff", projectId: f.projectId, initialPlan: "# Plan\nImplement in the execution task.", idempotencyKey: "mcp" },
+    const result = await callProjectTool({ name: "create_task", arguments: { title: "MCP handoff", projectId: f.projectId, assigneeActorId: f.agentId, initialPlan: "# Plan\nImplement in the execution task.", idempotencyKey: "mcp" },
       apiUrl: server.apiUrl, token: createLocalAgentJwt(f.agentId, f.companyId, "paperclip_runner", f.runId, f.responsibleUserId)!,
       companyId: f.companyId, issueId: f.issueId, agentId: f.agentId, conversation: true });
     expect(result).toMatchObject({ parentId: null, projectId: f.projectId, assigneeAgentId: f.agentId });
@@ -128,12 +128,12 @@ const support = await getEmbeddedPostgresTestSupport();
     const policy = { trustPreset: "low_trust_review", authorizationPolicy: { trustBoundary: { mode: "low_trust_review", companyId: f.companyId, projectIds: [f.projectId] } } };
     await server.db.update(agents).set({ permissions: policy }).where(eq(agents.id, f.agentId));
     const token = createLocalAgentJwt(f.agentId, f.companyId, "paperclip_runner", f.runId, f.responsibleUserId)!;
-    const task = await callProjectTool({ name: "create_task", arguments: { title: "Contained MCP handoff", projectId: f.projectId, initialPlan: "Do the requested work", idempotencyKey: "contained-mcp" },
+    const task = await callProjectTool({ name: "create_task", arguments: { title: "Contained MCP handoff", projectId: f.projectId, assigneeActorId: f.agentId, initialPlan: "Do the requested work", idempotencyKey: "contained-mcp" },
       apiUrl: server.apiUrl, token, companyId: f.companyId, issueId: f.issueId, agentId: f.agentId, conversation: true });
     expect(task).toMatchObject({ parentId: null, projectId: f.projectId, assigneeAgentId: f.agentId, sourceTrust: { disposition: "quarantined" } });
     expect(task.executionPolicy.authorizationPolicy).toMatchObject({ trustPreset: "low_trust_review", ...policy.authorizationPolicy });
     expect((await documentService(server.db).getIssueDocumentByKey(task.id, "plan"))?.sourceTrust).toMatchObject({ disposition: "quarantined" });
-    const native = await call(f, "create_task", { title: "Contained native handoff", projectId: f.projectId, idempotencyKey: "contained-native" }) as any;
+    const native = await call(f, "create_task", { title: "Contained native handoff", projectId: f.projectId, assigneeActorId: f.agentId, idempotencyKey: "contained-native" }) as any;
     expect(native.task).toMatchObject({ parentId: null, projectId: f.projectId, assigneeActorId: f.agentId });
     const [nativeTask] = await server.db.select().from(issues).where(eq(issues.id, native.task.id));
     expect(nativeTask.executionPolicy).toMatchObject({ authorizationPolicy: { trustPreset: "low_trust_review", ...policy.authorizationPolicy } });
@@ -198,7 +198,7 @@ const support = await getEmbeddedPostgresTestSupport();
     const after = await server.db.select({ id: issues.id }).from(issues).where(eq(issues.companyId, f.companyId));
     expect(after).toEqual(before);
     for (const fields of [{ projectId: outside.id }, { projectId: f.projectId, assigneeActorId: otherAgent.id }]) {
-      await expect(call(f, "create_task", { title: "Native scope denial", idempotencyKey: randomUUID(), ...fields })).rejects.toThrow(/outside.*boundary/);
+      await expect(call(f, "create_task", { title: "Native scope denial", idempotencyKey: randomUUID(), assigneeActorId: f.agentId, ...fields })).rejects.toThrow(/outside.*boundary/);
     }
 
     await server.db.update(agents).set({ permissions: { ...policy, authorizationPolicy: {
@@ -223,7 +223,7 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(response.status, JSON.stringify(child)).toBe(201);
       expect(child.executionPolicy.authorizationPolicy.trustBoundary).toMatchObject(boundary);
     }
-    await expect(call(f, "create_task", { title: "Native root subtask", idempotencyKey: "root-child", status: "backlog" })).resolves.toMatchObject({ task: { parentId: f.issueId, assigneeActorId: f.agentId } });
+    await expect(call(f, "create_task", { title: "Native root subtask", idempotencyKey: "root-child", assigneeActorId: f.agentId, status: "backlog" })).resolves.toMatchObject({ task: { parentId: f.issueId, assigneeActorId: f.agentId } });
 
     const [outside] = await server.db.insert(projects).values({ companyId: f.companyId, name: "Unrelated project" }).returning();
     const before = await server.db.select({ id: issues.id }).from(issues).where(eq(issues.companyId, f.companyId));
@@ -238,12 +238,12 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(response.status, JSON.stringify(denied)).toBe(hiddenProject ? 404 : 403);
       expect(denied.error).toMatch(hiddenProject ? /^Project not found$/ : /outside.*boundary/i);
     }
-    await expect(call(f, "create_task", { title: "Native root cannot escape", projectId: outside.id,
+    await expect(call(f, "create_task", { title: "Native root cannot escape", projectId: outside.id, assigneeActorId: f.agentId,
       idempotencyKey: "root-outside", status: "backlog" })).rejects.toThrow(/outside.*boundary/);
     expect(await server.db.select({ id: issues.id }).from(issues).where(eq(issues.companyId, f.companyId))).toEqual(before);
 
     await server.db.update(agents).set({ permissions: { trustPreset: "low_trust_review", authorizationPolicy: { trustBoundary: { mode: "low_trust_review", issueIds: [f.issueId] } } } }).where(eq(agents.id, f.agentId));
-    await expect(call(f, "create_task", { title: "Exact scope is not a subtree", idempotencyKey: "exact-child" })).rejects.toThrow(/outside.*boundary/);
+    await expect(call(f, "create_task", { title: "Exact scope is not a subtree", idempotencyKey: "exact-child", assigneeActorId: f.agentId })).rejects.toThrow(/outside.*boundary/);
   });
 
   it("authorizes workspace sources without assigning projects to children of a projectless root", async () => {
@@ -280,7 +280,7 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(await server.db.select({ id: issues.id }).from(issues).where(eq(issues.companyId, f.companyId))).toEqual(before);
 
       await server.db.update(issues).set({ executionWorkspaceId: executionWorkspace.id }).where(eq(issues.id, f.issueId));
-      await expect(call(f, "create_task", { title: "Inherited source cannot escape", idempotencyKey: "inherited-source-denied", status: "backlog" })).rejects.toThrow(/outside.*boundary/i);
+      await expect(call(f, "create_task", { title: "Inherited source cannot escape", idempotencyKey: "inherited-source-denied", assigneeActorId: f.agentId, status: "backlog" })).rejects.toThrow(/outside.*boundary/i);
       await server.db.update(agents).set({ permissions: { trustPreset: "low_trust_review", authorizationPolicy: {
         trustBoundary: { ...boundary, projectIds: [f.projectId] },
       } } }).where(eq(agents.id, f.agentId));
@@ -306,7 +306,7 @@ const support = await getEmbeddedPostgresTestSupport();
     const f = await server.fixture({ conversation: true, disableWakeOnDemand: true });
     await server.db.update(agents).set({ permissions: { trustPreset: "low_trust_review", authorizationPolicy: { trustBoundary: { mode: "low_trust_review", projectIds: [f.projectId] } } } }).where(eq(agents.id, f.agentId));
     await server.db.update(companyMemberships).set({ membershipRole: "viewer" }).where(eq(companyMemberships.principalId, f.responsibleUserId!));
-    await expect(call(f, "create_task", { title: "Viewer cannot assign", projectId: f.projectId, idempotencyKey: "viewer-denied" })).rejects.toThrow();
+    await expect(call(f, "create_task", { title: "Viewer cannot assign", projectId: f.projectId, assigneeActorId: f.agentId, idempotencyKey: "viewer-denied" })).rejects.toThrow();
     expect(await server.db.select().from(issues).where(eq(issues.companyId, f.companyId))).toHaveLength(2);
   });
 
@@ -340,7 +340,7 @@ const support = await getEmbeddedPostgresTestSupport();
 
   it("retains ordinary child delegation and projectless task creation", async () => {
     const f = await server.fixture();
-    const result = await call(f, "create_task", { title: "Delegate ordinary work", idempotencyKey: "child" }) as any;
+    const result = await call(f, "create_task", { title: "Delegate ordinary work", assigneeActorId: f.agentId, idempotencyKey: "child" }) as any;
     expect(result.task.parentId).toBe(f.issueId);
     expect(await issueService(server.db).create(f.companyId, { title: "No project needed" })).toMatchObject({ projectId: null });
   });
@@ -381,7 +381,7 @@ const support = await getEmbeddedPostgresTestSupport();
     for (const mode of ["planning", "ask"] as const) {
       const f = await server.fixture({ conversation: true, mode });
       await expect(call(f, "create_project", { name: "No", idempotencyKey: "no" })).rejects.toThrow(/mode_denied/);
-      await expect(call(f, "create_task", { title: "No", idempotencyKey: "no" })).rejects.toThrow(/mode_denied/);
+      await expect(call(f, "create_task", { title: "No", assigneeActorId: f.agentId, idempotencyKey: "no" })).rejects.toThrow(/mode_denied/);
       if (mode === "planning") await call(f, "write_document", { key: "plan", title: "Plan", body: "Clarify and plan here", idempotencyKey: "plan" });
     }
   });

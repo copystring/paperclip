@@ -1506,8 +1506,10 @@ describe("PaperclipRunnerToolAuthority", () => {
     expect(wakes.filter(wake => wake.options.reason === "issue_assigned")).toHaveLength(3);
 
     const childIds = (await db.select({ id: issues.id }).from(issues).where(eq(issues.parentId, testIssueId))).map(row => row.id);
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, secondRunId));
     await db.delete(issues).where(inArray(issues.id, [...childIds, testIssueId]));
-    await db.delete(heartbeatRuns).where(inArray(heartbeatRuns.id, [firstRunId, secondRunId]));
+    // Keep the terminal run rows: activity_log is durable audit evidence and
+    // retains a foreign key to the heartbeat run that performed each mutation.
     await db.delete(companyMemberships).where(and(eq(companyMemberships.companyId, companyId), eq(companyMemberships.principalId, personId)));
     await db.delete(authUsers).where(eq(authUsers.id, personId));
     await db.delete(agents).where(eq(agents.id, otherAgentId));
