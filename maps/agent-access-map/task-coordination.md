@@ -98,6 +98,15 @@ remaining operations before qualifying the whole capability.
 Gaps: Review policy determines final completion; formal board approval is a different
 boundary.
 
+Execution-stage normal and recovery wakes share the server-owned participant and
+allowed-action context. Legacy reviewers record approval or changes through the
+existing issue PATCH with a comment and run attribution; a final response alone
+does not persist a review decision. Recovery retains its bounded retry policy and
+checks the captured issue state before admission. Focused coverage lives in
+`issue-execution-policy.test.ts`, `heartbeat-process-recovery.test.ts`, and
+`packages/adapter-utils/src/server-utils.test.ts`; these are not a full live
+qualification of signoff.
+
 ## `tree-control`
 
 Capability ID: `task-coordination/tree-control`.

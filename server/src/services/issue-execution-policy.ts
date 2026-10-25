@@ -61,6 +61,67 @@ type TransitionResult = {
   workflowControlledAssignment?: boolean;
 };
 
+export type ExecutionStageWakeRole = "reviewer" | "approver" | "executor";
+
+/** Build the server-owned execution-stage context shared by normal and recovery wakes. */
+export function buildExecutionStageWakeContext(input: {
+  state: IssueExecutionState;
+  wakeRole: ExecutionStageWakeRole;
+  recoveryInstruction?: string;
+}) {
+  return {
+    wakeRole: input.wakeRole,
+    stageId: input.state.currentStageId,
+    stageType: input.state.currentStageType,
+    currentParticipant: input.state.currentParticipant,
+    returnAssignee: input.state.returnAssignee,
+    reviewRequest: input.state.reviewRequest ?? null,
+    lastDecisionOutcome: input.state.lastDecisionOutcome,
+    allowedActions: input.wakeRole === "executor"
+      ? ["address_changes", "resubmit"]
+      : ["approve", "request_changes"],
+    ...(input.recoveryInstruction
+      ? { recoveryInstruction: input.recoveryInstruction }
+      : {}),
+  };
+}
+
+/** Build current stage context only when this run's agent owns the current stage turn. */
+export function buildCurrentExecutionStageWakeContext(input: {
+  executionState: unknown;
+  issueStatus: string;
+  agentId: string;
+  assigneeAgentId: string | null;
+  assigneeUserId: string | null;
+}) {
+  if (input.assigneeAgentId !== input.agentId || input.assigneeUserId !== null) return null;
+  const state = parseIssueExecutionState(input.executionState);
+  if (!state || !state.currentStageId || !state.currentStageType) return null;
+
+  if (
+    state.status === "pending" &&
+    input.issueStatus === "in_review" &&
+    state.currentParticipant?.type === "agent" &&
+    state.currentParticipant.agentId === input.agentId
+  ) {
+    return buildExecutionStageWakeContext({
+      state,
+      wakeRole: state.currentStageType === "approval" ? "approver" : "reviewer",
+    });
+  }
+
+  if (
+    state.status === "changes_requested" &&
+    input.issueStatus === "in_progress" &&
+    state.returnAssignee?.type === "agent" &&
+    state.returnAssignee.agentId === input.agentId
+  ) {
+    return buildExecutionStageWakeContext({ state, wakeRole: "executor" });
+  }
+
+  return null;
+}
+
 /**
  * Consecutive agent-initiated changes-requested rounds tolerated on one stage
  * before the pending review escalates to the responsible human. Policies can

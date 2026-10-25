@@ -136,6 +136,7 @@ import { issuesApi } from "@/api/issues";
 import { queryKeys } from "@/lib/queryKeys";
 import { useQueryClient } from "@tanstack/react-query";
 import { TaskChatPresentationProvider } from "@/components/task-chat/presentation-mode";
+import { IssueRecoveryActionCard } from "@/components/IssueRecoveryActionCard";
 
 const EMPTY_BROWSERS: TaskBrowser[] = [];
 
@@ -802,7 +803,8 @@ export function TaskChatThread(props: TaskChatThreadProps) {
   );
 
   const threadHeaderWithBlockers =
-    threadHeader || blockerLinks || liveWorkLinks ? (
+    threadHeader || blockerLinks || liveWorkLinks ||
+    (props.recoveryAction && !isTerminalIssueStatus(issueStatus)) ? (
       <>
         {threadHeader}
         {liveWorkLinks ? (
@@ -812,6 +814,23 @@ export function TaskChatThread(props: TaskChatThreadProps) {
             directBlocker={blockerLinks.directBlocker}
             ultimateBlocker={blockerLinks.ultimateBlocker}
             placement="top"
+          />
+        ) : null}
+        {props.recoveryAction && !isTerminalIssueStatus(issueStatus) ? (
+          <IssueRecoveryActionCard
+            action={props.recoveryAction}
+            agentMap={agentMap}
+            scheduledRetry={props.scheduledRetry}
+            onResolve={props.onResolveRecoveryAction}
+            onReissueIsolated={props.onReissueIsolatedRecoveryAction}
+            reissuePending={props.reissueIsolatedRecoveryActionPending}
+            onReconcileForward={props.onReconcileForwardRecoveryAction}
+            onBreakGlassOverride={props.onBreakGlassOverrideRecoveryAction}
+            onQuarantineRestore={props.onQuarantineRestoreRecoveryAction}
+            quarantineRestorePending={props.quarantineRestoreRecoveryActionPending}
+            canBreakGlass={props.canBreakGlassRecoveryAction}
+            reconcilePending={props.reconcileRecoveryActionPending}
+            canFalsePositive={props.canFalsePositiveRecoveryAction}
           />
         ) : null}
       </>

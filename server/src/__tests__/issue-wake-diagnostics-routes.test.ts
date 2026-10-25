@@ -280,6 +280,31 @@ describeEmbeddedPostgres("issue wake diagnostics route", () => {
     expect(JSON.stringify(res.body)).not.toContain("PRIVATE_DELIVERY_ID");
   });
 
+  it("explains a skipped reconciliation wake without exposing its raw error", async () => {
+    const company = await seedCompany(db);
+    const agent = await seedAgent(db, company.id);
+    const issue = await seedIssue(db, {
+      companyId: company.id, title: "Reviewer handoff", status: "in_review", assigneeAgentId: agent.id,
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId: company.id, agentId: agent.id, source: "assignment",
+      reason: "execution_reconciliation_required", status: "skipped", runId: null,
+      payload: { issueId: issue.id, privateValue: "PRIVATE_HANDOFF_PAYLOAD" },
+      error: "PRIVATE_CLEANUP_STACK",
+    });
+
+    const res = await request(createApp(db, boardActor(company)))
+      .get(`/api/issues/${issue.id}/diagnostics/wakes`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.events).toMatchObject([{
+      reason: "execution_reconciliation_required", status: "skipped", runId: null,
+    }]);
+    expect(res.body.diagnosis).toContain("must finish cleanup or be reconciled");
+    expect(res.body.likelyReason).toBe(res.body.diagnosis);
+    expect(JSON.stringify(res.body)).not.toContain("PRIVATE_HANDOFF_PAYLOAD");
+    expect(JSON.stringify(res.body)).not.toContain("PRIVATE_CLEANUP_STACK");
+  });
+
   it("returns null diagnosis for an unblocked issue with no wake history", async () => {
     const company = await seedCompany(db);
     const project = await seedProject(db, company.id, "Core");
