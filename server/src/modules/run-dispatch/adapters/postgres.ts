@@ -1,4 +1,5 @@
 import { makeNonDispatchReceipt } from "../../../services/non-dispatch-receipt.js";
+import { recoveryManagerTriageService } from "../../../services/recovery/manager-triage.js";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { validateReconstructedWorkspaceDispatch } from "../../../services/native-runtime/native-workspace-reconstruction.js";
@@ -224,9 +225,13 @@ export function createPostgresRunDispatchAdapter(
         : readNonEmptyString(parseObject(hint.contextSnapshot).issueId);
 
       const locked = async (typedTx: Db, publications: ActivityPublication[]) => {
-        // Recovery always takes coordinator before issue/run. Only the
-        // accounting phase acquires the company lock and evaluates budgets.
+        // Recovery always takes coordinator before privacy/source/issue/run.
+        // Only the accounting phase acquires company accounting and evaluates budgets.
         await lockRunBudgetRecoveryOwnerInTransaction(typedTx, input.companyId, input.runId, input.recoveryLeaseOwner);
+        const triageActionId = readNonEmptyString(parseObject(hint.contextSnapshot).managerTriageActionId);
+        if (mode === "ownership" && triageActionId) {
+          await recoveryManagerTriageService(typedTx).lockSource(input.companyId, triageActionId);
+        }
         if (hintedIssueId) {
           await typedTx
             .select({ id: issues.id })
@@ -1318,6 +1323,10 @@ export function createPostgresRunDispatchAdapter(
           eq(nativeRunFinalizations.companyId, run.companyId), eq(nativeRunFinalizations.runId, run.id),
           eq(nativeRunFinalizations.leaseOwner, input.recoveryLeaseOwner), sql`${nativeRunFinalizations.leaseExpiresAt} > clock_timestamp()`)) : [];
         if (!owner) return { dispatched: false as const, admissionBlockReason: "Native recovery no longer owns provider dispatch" };
+      }
+      if (readNonEmptyString(parseObject(run.contextSnapshot).managerTriageActionId)) {
+        const triageBlock = await recoveryManagerTriageService(tx).dispatchBlock(run, true);
+        if (triageBlock) return { dispatched: false as const, admissionBlockReason: triageBlock };
       }
       await tx.update(heartbeatRuns).set({ usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb)
         || ${JSON.stringify({ budgetDispatch: { ...claim, handedOffAt: new Date().toISOString() } })}::jsonb` })

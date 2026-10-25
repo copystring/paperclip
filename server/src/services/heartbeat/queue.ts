@@ -1,4 +1,5 @@
 import { authorizationService } from "../authorization.js";
+import { MANAGER_TRIAGE_ORIGIN, managerTriageWakeAllowed } from "../recovery/manager-triage-budget.js";
 import { assertTaskRetryConversationAllowed, readTaskRetryIntent, retireSupersededTaskRetry } from "../task-retry.js";
 import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
@@ -3201,6 +3202,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               id: issues.id,
               companyId: issues.companyId,
               identifier: issues.identifier,
+              originKind: issues.originKind,
               conversationAgentId: issues.conversationAgentId,
               conversationUserId: issues.conversationUserId,
               conversationState: issues.conversationState,
@@ -3248,6 +3250,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             });
             return { kind: "skipped" as const };
           }
+
+          if (issue.originKind === MANAGER_TRIAGE_ORIGIN && !(await managerTriageWakeAllowed(tx as unknown as Db, {
+            companyId: agent.companyId, issueId: issue.id, agentId,
+            actorType: opts.requestedByActorType, actorId: opts.requestedByActorId,
+            context: enrichedContextSnapshot,
+          }))) return { kind: "skipped" as const };
 
           if (taskRetryActorId) {
             await assertTaskRetryConversationAllowed(tx as unknown as Db, issue, taskRetryActorId);

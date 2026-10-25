@@ -1,4 +1,5 @@
 import { notifyExecutionRunWork } from "../execution-control-notifications.js";
+import { isAutomaticManagerTriageRun } from "../recovery/manager-triage-budget.js";
 import os from "node:os";
 import { isUnclaimedRun, matchesNonDispatchSource } from "../non-dispatch-receipt.js";
 import {
@@ -2337,6 +2338,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     agent: typeof agents.$inferSelect,
     issueId: string,
   ) {
+    if (await isAutomaticManagerTriageRun(db, run)) return null;
     const invokability = await getAgentInvokability(agent);
     if (!invokability.invokable) {
       await appendRunEvent(run, {

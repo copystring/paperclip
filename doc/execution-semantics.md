@@ -772,6 +772,36 @@ Use an issue-backed recovery action only when the recovery is genuinely independ
 
 A comment or system notice can be evidence for a recovery action, but it is not a recovery action by itself. Comment-only recovery is not a healthy liveness path because it does not define a typed owner, wake or monitor policy, retry bound, timeout, escalation path, or resolution outcome.
 
+#### Bounded manager triage after owner disposition exhaustion
+
+An automatically escalated, exhausted owner-disposition episode may reserve one
+independent technical triage task for the source owner's current `reportsTo`
+manager. The source task and its recovery action retain their ownership,
+fingerprint and spent attempt ledger. The triage task, recovery-action link,
+one-invocation manager budget, wake and scheduled run are persisted atomically;
+competing workers and restart cannot allocate another slot for that action.
+
+This lane applies only to a successful, settled legacy source with no newer
+execution or durable wait. It preserves pause/Stop, unknown outcomes, human
+ownership, review and approval gates, and company/project/manager budgets.
+Admission revalidates the source version, action, manager and gates immediately
+before dispatch. Manager tasks cannot recursively generate manager triage or
+consume an extra automatic invocation through ordinary owner repair.
+
+The manager diagnoses or coordinates real independent repair work using the
+existing task and dependency paths. A triage report is not permission to replay
+unknown effects, reset the source budget or take over the source task. The
+source recovery remains visible while the manager task is open; existing
+reconciliation can fold it when an actual new execution or dependency path is
+established. Failed or inconclusive triage does not silently replenish its
+one-invocation allowance. A terminal manager run without a completed deliverable
+or durable waiting path leaves one actionable board-owned blocker with its exact
+run, failure and decision options. Repeated sweeps do not duplicate that notice.
+All automatic queue and retry producers honor the actual task origin even when
+their context omits the triage marker. A new authenticated human instruction is
+a separate intent; only its durable, same-company/task/agent wake and retry
+provenance can use the ordinary continuation path.
+
 #### Recovery action freshness
 
 Source-scoped recovery actions are snapshots of the source issue's liveness state at the time the action was opened. They must be revalidated after newer durable source activity, including source issue status changes, assignee changes, blocker changes, execution policy or monitor changes, document or work-product updates that define a valid waiting path, and structured resume or disposition updates.

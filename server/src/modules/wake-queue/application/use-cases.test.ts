@@ -838,6 +838,20 @@ describe("releaseIssueExecution", () => {
     expect(transaction.queueImmediateRecoveryRun).toHaveBeenCalledTimes(1);
   });
 
+  it.each([true, false])("honors adapter-proved automatic authority exhaustion (%s) without blocking a separate human intent", async automaticRecoverySuppressed => {
+    const transaction = createFakeTransaction();
+    const recovery = createFakeRecovery();
+    const release = createReleaseIssueExecution({
+      issueLock: createFakeIssueLock(createFakeHost(), transaction,
+        { ...ISSUE, originKind: "recovery_manager_triage" }, { ...RUN, automaticRecoverySuppressed }),
+      recovery,
+    });
+    const result = await release({ companyId: RUN.companyId, runId: RUN.id, now: new Date() });
+    expect(result.outcome.kind).toBe(automaticRecoverySuppressed ? "released" : "queued_recovery");
+    expect(transaction.queueImmediateRecoveryRun).toHaveBeenCalledTimes(automaticRecoverySuppressed ? 0 : 1);
+    expect(recovery.escalateStrandedAssignedIssue).not.toHaveBeenCalled();
+  });
+
   it("throws WakeQueueApplicationError with code responsible_user_unresolved for a recovery run, without queuing it", async () => {
     const transaction = createFakeTransaction();
     const host = createFakeHost({ resolveResponsibleUserId: vi.fn(async () => null) });

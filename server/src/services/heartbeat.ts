@@ -2801,7 +2801,7 @@ export function heartbeatService(
           }
           return { dispatched: false };
         }
-        const enforceContinuationOwnership = Boolean(issueId && (isResolvedInteractionContinuationWakeContext(context) ||
+        const enforceContinuationOwnership = Boolean(issueId && (typeof context.managerTriageActionId === "string" || isResolvedInteractionContinuationWakeContext(context) ||
           typeof context.workspaceReconstructionActionId === "string" ||
           ["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? "")));
         if (issueId && enforceContinuationOwnership) {

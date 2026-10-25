@@ -32,6 +32,7 @@ import { HttpError } from "../../../errors.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
 import { issueTreeControlService, isVerifiedIssueTreeControlInteractionWake } from "../../../services/issue-tree-control.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "../../../services/recovery/pause-hold-guard.js";
+import { isAutomaticManagerTriageRun } from "../../../services/recovery/manager-triage-budget.js";
 import { classifyContinuationFailure, executionReviewAttemptBoundaryCondition } from "../../../services/recovery/service.js";
 import { issueService } from "../../../services/issues.js";
 import { issueRecoveryActionService } from "../../../services/issue-recovery-actions.js";
@@ -1130,6 +1131,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
         if (!currentRun) throw new Error(`wake-queue: run ${input.runId} disappeared while releasing issue execution`);
         run = currentRun;
         const runSnapshot = toRunSnapshot(run);
+        runSnapshot.automaticRecoverySuppressed = await isAutomaticManagerTriageRun(tx, run);
         if (input.resumeStrandedQueue && (!run.finishedAt || !["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status))) {
           return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
         }
