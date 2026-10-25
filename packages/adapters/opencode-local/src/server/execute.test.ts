@@ -724,7 +724,7 @@ describe("OpenCode runtime MCP handoff", () => {
       typeof server === "object" && server !== null && "url" in server && server.url === "https://paperclip.example/api/mcp/run-1",
     );
     expect(assignedMcp).toBeDefined();
-    expect(assignedMcp?.[0]).toBe("PowerShell_on_Felix_PC");
+    expect(assignedMcp?.[0]).toBe("paperclip_799E79ED3849");
     expect(assignedMcp?.[1]).toMatchObject({
       type: "remote",
       url: "https://paperclip.example/api/mcp/run-1",

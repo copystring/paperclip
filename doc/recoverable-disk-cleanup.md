@@ -93,7 +93,189 @@ The rest of the session directory, including its control-plane state, is kept.
 Each batch that finds candidates logs them with candidate and reclaimed allocated
 bytes, cleared task sessions, and skip reasons.
 
+## Native workspace sync folders
+
+Each native run that syncs a workspace with a remote sandbox writes a folder at
+`<instance>/native-workspace-sync/<run>/` with its descriptor, manifest, and the
+workspace and git seed archives. A seed can reach more than a gigabyte. Only the
+same run reads the folder again: restart recovery, finalization export, board export
+retry, and retained workspace recovery. Later runs adopt warm workspaces from lease
+metadata and the shared `generations` cache, which this worker never touches.
+
+A retention worker on the shared delivery-work scheduler removes a run's folder once
+nothing can read it. It runs at startup and at real deadlines: the earliest settled
+run's finish (or an orphan folder's newest file) plus the retention window, a
+recheck one window later for folders it had to keep, and a 15-minute retry after a
+failure, a held finalization lock or a leftover it could not delete. With no
+folders it schedules nothing; when a run then creates its folder in this server
+process, the worker wakes and schedules that folder's deadline. A folder
+named for a run id, that is a real directory and whose newest file is older than
+the window, is removed when one of these holds:
+
+- no run with that id exists;
+- the run has no valid workspace sync reference and is settled: it `succeeded`,
+  `failed`, was `cancelled`, `timed_out` or `interrupted`, finished before the
+  window, has no live process, no live controller lease and no finalization owner
+  receipt;
+- the run is settled as above, and also:
+  - its native run finalization, if any, has no lease owner or scheduled retry and is
+    `committed`, or `terminal_failure` with no recovery state or `blocked`;
+  - no active or escalated workspace export or owner-unverified recovery action
+    names the run;
+  - no lease of the run carries `nativeWorkspaceExportResume` or a cleanup in flight;
+  - its referenced lease was destroyed, or no retained workspace recovery of the run
+    is scheduled, running, awaiting evidence, queued or recovering;
+  - historical recovery adoption has no pending work for the run.
+
+Failed native runs can keep their recorded process ID after they finish. A recorded
+process blocks removal only while it can still be the run's own process: the run has a
+local lease or no lease, and the process ID or process group still exists on this
+host with the recorded start time (or a start time that cannot be read). A process ID
+from a remote sandbox, or one the operating system reused, does not block removal.
+
+Each folder is checked in one transaction that holds the run's finalization
+ownership lock, so it never races a finalization or export of the same run. A held
+lock skips the folder. Inside that transaction the folder is renamed to
+`.expired-<UUID>`, and it is deleted after commit. The next sweep finishes an
+interrupted deletion. Each batch tries at most 50 leftovers, then checks at most 200
+folders and removes at most 50. Leftovers and folders each continue from where the
+previous batch stopped, so a leftover that cannot be deleted does not block others. Deadline discovery reads
+run state 200 folders at a time and stops when the server drains or shuts down.
+
+| Environment variable | Default | Effect |
+| --- | --- | --- |
+| `PAPERCLIP_NATIVE_WORKSPACE_SYNC_RETENTION_ENABLED` | `true` | Set `false` to stop removing folders |
+| `PAPERCLIP_NATIVE_WORKSPACE_SYNC_RETENTION_DRY_RUN` | `false` | Set `true` to report candidates without removing folders |
+| `PAPERCLIP_NATIVE_WORKSPACE_SYNC_RETENTION_DAYS` | `7` | Days a run must be finished, and its folder untouched, before removal (minimum `1`) |
+
+Each batch that finds candidates logs them with candidate and reclaimed allocated
+bytes and skip reasons.
+
 ## Git workspace restore points
+
+Git cache expiration (`PAPERCLIP_GIT_CACHE_EXPIRATION_ENABLED=true`) normally removes a
+closed issue's worktree only when its remote can reproduce it exactly. With
+`PAPERCLIP_GIT_RESTORE_POINTS_ENABLED=true`, it can also remove a worktree that has
+unpushed commits, uncommitted or untracked files, or history-only commits, once its issue
+tree has been closed for `PAPERCLIP_GIT_RESTORE_POINT_TERMINAL_DELAY_DAYS` (default `3`).
+It also removes the worktree of an issue tree that is still open once nothing has
+touched it for `PAPERCLIP_GIT_RESTORE_POINT_IDLE_DAYS` (default `7`, `0` turns this off):
+no issue in the tree or bound to the workspace was updated and no run for those issues or
+the workspace was created, started or finished in that time, and no run is still live. An
+interrupted removal is finished by later sweeps while the issue stays open. The workspace reaper sets a
+deadline for that moment, so open trees cost no recurring checks before then. When a run
+later finds its issue's workspace removed this way, it reopens the workspace, restore
+point included, before using it; if the restore fails, the run fails instead of starting
+in a new workspace. A comment or an agent update on the issue reopens it the same way.
+Before removal it saves a restore point:
+
+- a git bundle of commits the remote does not have, against a remote-verified base,
+  including commits only reachable from the reflog or `ORIG_HEAD`;
+- deterministic snapshots of the index and working tree, including untracked files and
+  non-default file modes. Untracked `.env` and `.env.*` files are left out, because
+  provisioning recreates them with current secrets;
+- a separate snapshot of ignored files, such as build caches or files an agent kept out of
+  git. It leaves out `.env` files, nested `.paperclip-repositories` checkouts (they get their
+  own restore points), `.claude/settings.local.json` (saved with the workspace contents)
+  and anything inside a regenerable directory such as `node_modules` or `dist`. A
+  restore point with ignored files uses payload schema `v2`, which older servers reject
+  instead of restoring without them. Restoring never overwrites an ignored file that already
+  exists, and an ignored nested repository keeps the worktree.
+
+The restore point is encrypted with a per-restore-point key wrapped by the instance
+secrets key, uploaded to file storage, read back and hash-checked, then activated in
+the same transaction that archives the workspace with a versioned recipe
+(`paperclip.git-cache-restoration.v2`). Older servers reject that recipe instead of
+restoring without the saved work. Under the expiration locks, the worktree must still
+match the captured snapshot exactly; otherwise expiration rolls back, keeps the
+worktree, and drops the restore point.
+
+Nested managed checkouts under `.paperclip-repositories/` get their own restore points
+when their checked-out branch has unpushed commits or uncommitted, untracked or
+history-only work. Each is stored under its checkout name, recorded in the recipe's
+contents, and verified against its own snapshot under the expiration locks. A nested
+checkout still blocks expiration when another local branch or tag has commits its
+remote lacks, when any reflog holds commits that are neither on the remote nor part of
+the checked-out history the restore point bundles, when it has objects reachable from
+nothing, or when its `COMMIT_EDITMSG` holds a draft that matches no commit in its
+history. A `COMMIT_EDITMSG` that matches a commit is accepted for every nested checkout.
+A nested checkout's remote-tracking refs (`refs/remotes/origin/*`) and their reflogs can
+point at commits the remote has since dropped, for example a branch deleted after a squash
+merge. Strict expiration keeps such a checkout. In restore point mode those commits are
+saved in the checkout's restore point instead, as history-only objects (the remote-tracking
+refs themselves are not recreated), and any change to the remote-tracking refs after capture
+rolls expiration back.
+Each restore point also records a digest of its `HEAD` reflog and `ORIG_HEAD`; under the
+expiration locks that history must be unchanged too, so a commit followed by a reset
+after capture rolls expiration back. Reopening
+re-clones the checkout, imports its bundle, checks out the saved commit and applies the
+restore point. Submodules, special git state and ignored files other than `.env`
+still keep a worktree from expiring.
+Restore points are refused when the file storage is `s3` and the secrets master key
+does not come from `PAPERCLIP_SECRETS_MASTER_KEY`.
+
+## Nested project repository worktrees
+
+Extra project repositories that have no configured local folder are no longer full
+clones inside every task. Each task's `.paperclip-repositories/<name>-<key>` checkout is a
+Git worktree of one shared clone per company, project and repository URL: the managed
+project checkout for that URL under the instance's `projects/` directory (the same clone
+that main task worktrees use when the repository is a task's primary source). Objects are
+stored once in that clone, so a new task adds only its working files. Repositories with a
+configured local folder are still seeded as independent copies, and existing standalone
+nested clones keep working unchanged; they are not migrated.
+
+Each nested worktree checks out its own branch, `paperclip/<id>/<branch>`, where `<id>`
+derives from the worktree path and `<branch>` is the remote's current default branch
+(refreshed before each new worktree) or the configured branch ref, tracking
+`origin/<branch>`. Reopening derives the upstream from the saved source ref, not from the
+branch name. A tag or commit ref is checked out detached, as
+before. Branch names therefore never collide between tasks. When a checkout kept under
+`.paperclip-runtime/detached-repositories/` still holds that branch, the new worktree
+uses `paperclip/<id>/r<n>/<branch>` instead, so the retained work is never reset. `git pull` works as before;
+pushing needs an explicit destination such as `git push origin HEAD:<branch>`. Adding the
+worktree, fetching and removing registrations are serialized per shared clone. Each new
+worktree first fetches with `--prune`, so a branch deleted upstream is rejected as a fresh
+clone would reject it. Server-side Git commands on the shared clone run with hooks
+disabled, so hooks an agent plants there never run in the server.
+
+Branches and reflogs of a worktree live partly in the shared clone. Expiration and restore
+points therefore scope their checks to what belongs to the nested worktree: its `HEAD`,
+`HEAD` reflog, `ORIG_HEAD`, index and working tree (stored per worktree) and every branch
+under its own `paperclip/<id>/` prefix together with that branch's reflog. Those must be on
+the remote or saved in a restore point exactly as for a standalone checkout. Checking out
+any other branch, stashes, unsupported refs or custom local config in the shared clone
+still block expiration. Branches outside the prefix, other tasks' branches and their
+history stay in the shared clone and never block or get deleted. Commits that existed only
+in the nested worktree's `HEAD` reflog are written back into the restored worktree's `HEAD`
+reflog, so they stay protected after reopening.
+
+Expiring a task removes the nested worktree's registration from the shared clone and
+deletes its own branch only at the verified recorded commit. Reopening recreates the
+worktree from the shared clone (re-cloning the shared clone if it is gone) on the same
+branch and commit and applies its restore point. Deleting or archiving a task removes the
+registration of each of its nested worktrees and deletes their branches only when every
+commit is on a remote-tracking ref; an unpushed branch stays in the shared clone. Moving a
+nested worktree to `.paperclip-runtime/detached-repositories/` when its repository leaves
+the project repairs its registration.
+
+Reopening the issue, or the next run that recreates the worktree, imports the bundle,
+re-adds the worktree at the saved commit, applies the restore point and verifies the
+result. The bundle is always imported, so history-only commits are present again as
+objects in the repository; they are not recreated as branches or reflog entries, and the
+restore point keeps them until it expires. A draft commit message left by an aborted
+commit still keeps the worktree from expiring, because restore points do not save it. A worktree that already matches is only marked applied, and a worktree that
+diverged is never overwritten: the restore fails closed and can be retried. A missing
+or corrupt restore point also fails closed.
+
+When a restore point has expired, through retention or on a nested checkout, reopening
+starts fresh instead: the worktree is recreated on its branch (the branch tip if the
+repository still has it, otherwise a new branch from the base ref), the project's nested
+repositories are cloned fresh before the provision command runs, the saved recipe is
+dropped, and a system comment on the issue warns that unpushed and uncommitted work from
+before the cleanup is no longer available. The same warning is returned with the reopen
+result and recorded on the `execution_workspace.reopened` activity.
+
 
 Restore points are encrypted saves of the parts of a git worktree that its remote
 cannot reproduce: unpushed commits and uncommitted files. They let a closed issue's

@@ -46,6 +46,25 @@ turn; do not count a nested discovery interval twice.
 
 Preconditions: follow the [baseline](./README.md#before-driving-a-journey). Record adapter, model, account, native/legacy runtime, and environment. Capabilities vary; one harness result is not a matrix-wide qualification.
 
+### `session`
+
+For `runs-adapters/session`, complete a task in a disposable warm sandbox and
+retain its saved workspace file. Let the warm session close normally and verify
+that the retained lease has a complete, lease-bound harness backup before
+injecting sandbox loss. Removing a still-warm sandbox before that checkpoint
+exercises the separate acquisition safety gate, which must remain blocked.
+Use a board-authorized session reset, then remove only that fixture's inactive
+provider sandbox. Send a follow-up that
+reads the retained file and appends one new line. Verify a replacement sandbox,
+a new provider session, the exact file contents, successful finalization and no
+stranded task lock. Send another follow-up and verify ordinary session reuse.
+
+Repeat without resetting the session: its replacement must restore verified
+history or remain blocked. Missing backup state must not silently start an
+existing session again. The [executor controls](../../server/src/services/native-runtime/native-session-executor.test.ts)
+cover the bootstrap identity, activity and atomic directory claim; those
+controls do not establish live provider acceptance.
+
 ### `adapter-setup`
 
 Automated: [adapter validation routes](../../server/src/__tests__/agent-adapter-validation-routes.test.ts) and [model refresh](../../server/src/__tests__/adapter-model-refresh-routes.test.ts) cover server behavior.
@@ -53,6 +72,13 @@ Automated: [adapter validation routes](../../server/src/__tests__/agent-adapter-
 Claude native setup uses the existing Anthropic API-key or subscription connection
 flow. Record the selected account separately from successful execution; unavailable
 models/authentication and unsupported Legacy-only options must fail visibly.
+
+Claude CLI tests and runs also prepare a compatible private executable when a
+managed sandbox image's default CLI is too old for the selected model. Verify
+the command used for the hello test and task, reuse of a compatible private
+installation, and a blocking failure when installation cannot establish a valid
+version. Local, SSH and explicit custom commands retain operator management.
+Cloud onboarding must not offer shell commands the customer cannot run.
 
 Manual: Select the intended adapter and account, refresh model choices, and run its environment test. Save, reload, then execute a small task. Repeat with a deliberately unavailable account and verify the failure remains visible.
 

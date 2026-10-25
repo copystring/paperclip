@@ -1,3 +1,4 @@
+import { freshWorkspaceSchema } from "@paperclipai/plugin-sdk";
 /**
  * Centralized environment run orchestrator.
  *
@@ -426,6 +427,13 @@ export function environmentRunOrchestrator(
         throw new EnvironmentRunError("workspace_realization_failed", "The execution plugin cannot access this managed workspace.", { environmentId: environment.id });
       }
       const updated = await environmentsSvc.updateLeaseMetadata(lease.id, { ...lease.metadata, workspaceProvider: binding });
+      if (!updated) throw new Error("Workspace execution lease disappeared");
+      lease = updated;
+    }
+    const freshWorkspace = freshWorkspaceSchema.safeParse(persistedExecutionWorkspace?.metadata?.workspaceProviderFresh ??
+      persistedExecutionWorkspace?.metadata?.runnerTaskFreshWorkspace);
+    if (environment.driver === "plugin" && freshWorkspace.success) {
+      const updated = await environmentsSvc.updateLeaseMetadata(lease.id, { ...lease.metadata, freshWorkspace: freshWorkspace.data });
       if (!updated) throw new Error("Workspace execution lease disappeared");
       lease = updated;
     }

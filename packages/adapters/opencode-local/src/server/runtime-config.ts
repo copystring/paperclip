@@ -129,7 +129,7 @@ function buildRuntimeMcpConfig(
 ): Record<string, unknown> {
   const mcp: Record<string, unknown> = { ...existing };
   const usedNames = new Set(Object.keys(mcp));
-  for (const server of servers) {
+  for (const [index, server] of servers.entries()) {
     let endpoint: URL;
     try {
       endpoint = new URL(server.url);
@@ -140,20 +140,16 @@ function buildRuntimeMcpConfig(
         !server.connectionId.trim() || !server.token.trim() || /[\r\n]/.test(server.token)) {
       throw new Error("A Paperclip runtime MCP server has an invalid HTTP binding.");
     }
-    const safeServerName = server.name.replace(/[^a-zA-Z0-9_-]/g, "_") || "connection";
-    let suffix = 1;
+    const identity = `${server.connectionId}\0${index}`;
+    const hash = createHash("sha256").update(identity).digest("hex").toUpperCase();
+    const prefix = "paperclip_";
+    let collision = 0;
     let name: string;
     do {
-      const collisionSuffix = suffix === 1 ? "" : `_${suffix}`;
-      const nameBudget = MAX_RUNTIME_MCP_SERVER_NAME_LENGTH - collisionSuffix.length;
-      if (safeServerName.length <= nameBudget) {
-        name = `${safeServerName}${collisionSuffix}`;
-      } else {
-        const hash = createHash("sha256").update(safeServerName).digest("hex").slice(0, 8);
-        const prefixLength = nameBudget - hash.length - 1;
-        name = `${safeServerName.slice(0, prefixLength)}_${hash}${collisionSuffix}`;
-      }
-      suffix += 1;
+      const collisionSuffix = collision === 0 ? "" : `_${collision}`;
+      const hashLength = MAX_RUNTIME_MCP_SERVER_NAME_LENGTH - prefix.length - collisionSuffix.length;
+      name = `${prefix}${hash.slice(0, hashLength)}${collisionSuffix}`;
+      collision += 1;
     } while (usedNames.has(name));
     usedNames.add(name);
     mcp[name] = {
@@ -439,7 +435,12 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   const targetIsRemote = input.targetIsRemote === true;
   const runtimeMcpServers = input.runtimeMcp ?? input.runtimeMcpServers ?? [];
   const selectedModel = configuredModelRef(input.config.model);
-  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || targetIsRemote)) {
+  const hasExplicitRemoteSettings = Boolean(
+    (input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS)?.trim() ||
+    (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim(),
+  );
+  if (!skipPermissions && runtimeMcpServers.length === 0 && (!selectedModel || targetIsRemote) &&
+      (!targetIsRemote || !hasExplicitRemoteSettings)) {
     return {
       env: input.env,
       notes: [],
@@ -447,7 +448,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
       cleanup: async () => {},
     };
   }
-  const sourceConfigDir = input.targetIsRemote ? null : path.join(resolveXdgConfigHome(input.env), "opencode");
+  const sourceConfigDir = targetIsRemote ? null : path.join(resolveXdgConfigHome(input.env), "opencode");
   const runtimeConfigHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-config-"));
   const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
   const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
@@ -489,7 +490,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     // hard-coded) so the gateway URL, key env, and model list stay declarative.
     const existingProvider = isPlainObject(existingConfig.provider) ? existingConfig.provider : {};
     let nextProvider = existingProvider;
-    if (skipPermissions) {
+    if (skipPermissions || targetIsRemote) {
       const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
       const gatewayProviders = parseProviderConfig(
         input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS,
@@ -537,13 +538,13 @@ export async function prepareOpenCodeRuntimeConfig(input: {
 
     const nextConfig: Record<string, unknown> = { ...existingConfig };
     if (skipPermissions) nextConfig.permission = "allow";
-    if (skipPermissions && Object.keys(nextProvider).length > 0) {
+    if ((skipPermissions || targetIsRemote) && Object.keys(nextProvider).length > 0) {
       nextConfig.provider = nextProvider;
     }
 
     let timeoutPluginInstalled = false;
     let timeoutAuthContent: string | undefined;
-    if (!input.targetIsRemote && selectedModel) {
+    if (!targetIsRemote && selectedModel) {
       const fileProvider = isPlainObject(nextProvider[selectedModel.provider])
         ? nextProvider[selectedModel.provider] as Record<string, unknown>
         : {};
@@ -645,7 +646,7 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     // for the anthropic provider); when that provider is repointed at a gateway that
     // does not serve that exact model, the title-gen call fails and aborts the run.
     // Setting small_model to a gateway-served model keeps every call on supported models.
-    const smallModel = skipPermissions
+    const smallModel = skipPermissions || targetIsRemote
       ? (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim()
       : undefined;
     if (smallModel) {
@@ -671,8 +672,10 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     await fs.chmod(temporaryConfigPath, 0o600);
     await fs.rename(temporaryConfigPath, runtimeConfigPath);
 
-    const taskToolsPath = path.join(runtimeConfigHome, "paperclip-task-tools.mjs");
-    await fs.writeFile(taskToolsPath, PAPERCLIP_TASK_TOOLS_SOURCE, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    const taskToolsPath = targetIsRemote ? undefined : path.join(runtimeConfigHome, "paperclip-task-tools.mjs");
+    if (taskToolsPath) {
+      await fs.writeFile(taskToolsPath, PAPERCLIP_TASK_TOOLS_SOURCE, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    }
 
     const attributedEnv = preserveExplicitModelModalities({
       ...input.env,

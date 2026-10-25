@@ -16,7 +16,7 @@ import { createSystemRecovery, failSystemRecovery, SystemRecoveryFailure } from 
 import { requestTaskRetry } from "./task-retry.js";
 import { readFreshWorkspaceReadiness } from "./fresh-workspace-continuation.js";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -29,6 +29,7 @@ import type { EnvironmentLease } from "@paperclipai/shared";
 import { startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { prepareNativeWorkspaceSync } from "./native-runtime/native-workspace-sync.js";
 import { remoteTerminationReceipt } from "./remote-execution-termination.js";
+import { prepareStoppedSandboxForRecovery } from "./sandbox-stop-and-retain.js";
 import { recoverRetainedWorkspace, requestWorkspaceRecovery, scheduleRecoveredWorkspaceCleanup, reconcileRetainedWorkspaces, retainedWorkspaceCandidates } from "./workspace-recovery.js";
 import * as activity from "./activity-log.js";
 import { heartbeatService } from "./heartbeat.js";
@@ -577,6 +578,82 @@ describe("automatic retained workspace recovery", () => {
       status: "pending_cleanup", leasePolicy: "ephemeral", metadata: { workspaceRecoveryCleanup: { runId: f.runId } } });
     expect(f.runtime.retryPendingSandboxTeardown).toHaveBeenCalledOnce();
     expect(await readFile(path.join(f.host, "saved.txt"), "utf8")).toBe("finished work\n");
+  }, 30_000);
+
+  it.each(["single", "multiple", "interrupted"])("continues an existing Retry after signed absence evidence for every retained allocation: %s", async mode => {
+    const count = mode === "single" ? 1 : 2;
+    const f = await seed();
+    const leaseIds = [f.lease.id];
+    if (count === 2) {
+      const [additional] = await db.insert(environmentLeases).values({ ...f.lease, id: randomUUID(),
+        providerLeaseId: randomUUID(), status: "pending_cleanup", cleanupStatus: "failed", releasedAt: null }).returning();
+      leaseIds.push(additional.id);
+      const recovery = { schema: "paperclip.workspace-restore-recovery.v1", leaseIds };
+      await db.update(heartbeatRuns).set({ resultJson: sql`${heartbeatRuns.resultJson} || ${JSON.stringify({ workspaceRestoreRecovery: recovery })}::jsonb` })
+        .where(eq(heartbeatRuns.id, f.runId));
+      await db.update(issueRecoveryActions).set({ evidence: sql`${issueRecoveryActions.evidence} || ${JSON.stringify({ workspaceRestoreRecovery: recovery })}::jsonb` })
+        .where(eq(issueRecoveryActions.id, f.actionId));
+    }
+    const source = await run(f.runId);
+    await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: source.agentId, status: "running" });
+    const [stoppedLease] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, f.lease.id));
+    expect(await prepareStoppedSandboxForRecovery(db, stoppedLease)).not.toBeNull();
+    f.runtime.resumeRunLease.mockRejectedValue(new Error("retained allocation unavailable"));
+    f.runtime.retryPendingSandboxTeardown.mockRejectedValue(new Error("retained allocation unavailable"));
+    const request = await requestTaskRetry({ db, companyId: f.companyId, issueId: f.issueId, actorId: "local-board",
+      actorSource: "local_implicit", observedRunId: f.runId, idempotencyKey: randomUUID() });
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    vi.stubEnv("PAPERCLIP_CLOUD_STACK_ID", "fixture-stack");
+    vi.stubEnv("PAPERCLIP_CLOUD_API_ORIGIN", "https://cloud.example");
+    vi.stubEnv("PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN", "fixture-token");
+    vi.stubEnv("PAPERCLIP_PRIMARY_HOST", "fixture.paperclip.test");
+    vi.stubEnv("PAPERCLIP_AUTH_SECRET", "fixture-auth-secret");
+    vi.stubEnv("PAPERCLIP_CLOUD_RUNTIME_IDENTITY_JWKS", JSON.stringify({ keys: [{
+      ...publicKey.export({ format: "jwk" }), kid: "absence-test", alg: "EdDSA", use: "sig",
+    }] }));
+    const originalFetch = globalThis.fetch;
+    const observed: string[] = [];
+    let interrupted = mode === "interrupted";
+    const fetchProof = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (!String(url).endsWith("/v1/tenant/sandbox-absence")) return originalFetch(url, init);
+      const binding = JSON.parse(String(init?.body));
+      observed.push(binding.leaseId);
+      if (mode === "interrupted" && binding.leaseId === f.lease.id && observed.length > 2) return new Response(null, { status: 503 });
+      if (interrupted && binding.leaseId !== f.lease.id) return new Response(null, { status: 503 });
+      const seconds = Math.floor(Date.now() / 1000);
+      const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "paperclip-sandbox-absence+jwt", kid: "absence-test" })).toString("base64url");
+      const payload = Buffer.from(JSON.stringify({ v: 1, iss: "paperclip-cloud", aud: "paperclip-sandbox-absence/v1",
+        sub: "fixture-stack", ...binding, absent: true, iat: seconds, exp: seconds + 60 })).toString("base64url");
+      return Response.json({ receipt: `${header}.${payload}.${sign(null, Buffer.from(`${header}.${payload}`), privateKey).toString("base64url")}` });
+    });
+    try {
+      await recoverRetainedWorkspace(f.input);
+      if (interrupted) {
+        expect(readSystemRecovery((await action(f.actionId)).evidence)?.state).not.toBe("exhausted");
+        interrupted = false;
+        await makeRetryDue(f.actionId);
+        await recoverRetainedWorkspace(f.input);
+      }
+      const leases = await db.select().from(environmentLeases).where(inArray(environmentLeases.id, leaseIds));
+      expect(leases).toHaveLength(count);
+      expect(observed).toEqual(mode === "interrupted" ? [leaseIds[0], leaseIds[1], leaseIds[1]] : leaseIds);
+      for (const lease of leases) expect(lease).toMatchObject({ status: "released", cleanupStatus: "success",
+        metadata: { remoteExecutionTermination: { state: "destroyed" } } });
+      expect(readSystemRecovery((await action(f.actionId)).evidence)).toMatchObject({
+        state: "exhausted", failure: { code: "source_unavailable", retryClass: "use_alternative_strategy" },
+      });
+      expect(f.runtime.resumeRunLease).not.toHaveBeenCalled();
+      expect(f.runtime.retryPendingSandboxTeardown).not.toHaveBeenCalled();
+      expect(await hasVerifiedWorkspaceRepair(db, await run(f.runId))).toBe(false);
+      expect(await db.select().from(nativeRunResults).where(eq(nativeRunResults.companyId, f.companyId))).toHaveLength(0);
+      const heartbeat = heartbeatService(db);
+      await Promise.all([heartbeat.resumeTaskRetry(f.companyId, request.requestId!), heartbeat.resumeTaskRetry(f.companyId, request.requestId!)]);
+      const turns = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, f.companyId), eq(heartbeatRuns.status, "queued")));
+      expect(turns).toHaveLength(1);
+      expect(await readFreshWorkspaceReadiness(db, turns[0])).toMatchObject({ mode: "fresh_isolated_workspace", retryIntentId: request.requestId });
+      expect((await run(f.runId)).status).toBe("failed");
+      expect(await readFile(path.join(f.remote, "saved.txt"), "utf8")).toBe("finished work\n");
+    } finally { fetchProof.mockRestore(); vi.unstubAllEnvs(); }
   }, 30_000);
 
   it.each(["pause", "cancelled", "approval", "budget", "reassigned"])("keeps the %s gate after files recover", async gate => {

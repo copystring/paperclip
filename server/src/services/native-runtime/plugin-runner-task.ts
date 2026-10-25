@@ -1,3 +1,5 @@
+import { measureRunPhase } from "../execution-preparation-timing.js";
+import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { environmentTaskOperationSchema, environmentTaskResultSchema, type PluginEnvironmentTaskOperation, type PluginEnvironmentTaskResult, type PluginEnvironmentTaskCredential } from "@paperclipai/plugin-sdk";
 import type { RunnerIngressEndpoint } from "@paperclipai/adapter-utils/runner-connectivity";
@@ -43,8 +45,11 @@ export function createPluginRunnerTaskOwner(input: {
   const running = new Promise<void>((resolve, reject) => { markReady = resolve; failReady = reject; });
   void running.catch(() => undefined);
   const call = async (operation: PluginEnvironmentTaskOperation) => {
-    const result = environmentTaskResultSchema.parse(await input.task(operation));
-    if (result.kind !== (operation.kind === "describe" ? "description" : operation.kind === "prepare" ? "prepared" : operation.kind === "check_project_auth" ? "project_auth" : ["read_state", "archive_state"].includes(operation.kind) ? "state" : ["status", "connection", "credentials"].includes(operation.kind) ? operation.kind : "accepted")) {
+    const phase = ({ prepare: "execution.plugin_prepare", check_project_auth: "execution.plugin_project_auth",
+      submit: "execution.plugin_submit", connection: "execution.plugin_connection" } as const)[operation.kind as "prepare" | "check_project_auth" | "submit" | "connection"];
+    const result = environmentTaskResultSchema.parse(await (phase
+      ? measureRunPhase(phase, () => input.task(operation)) : input.task(operation)));
+    if (result.kind !== (operation.kind === "read_file" ? "file" : operation.kind === "describe" ? "description" : operation.kind === "prepare" ? "prepared" : operation.kind === "check_project_auth" ? "project_auth" : ["read_state", "archive_state"].includes(operation.kind) ? "state" : ["status", "connection", "credentials"].includes(operation.kind) ? operation.kind : "accepted")) {
       throw new Error("Plugin Runner returned an invalid operation result");
     }
     return result;
@@ -57,9 +62,9 @@ export function createPluginRunnerTaskOwner(input: {
     }));
     if (released || stopRequested) throw new Error("Plugin Runner preparation cancelled");
     if (result.kind !== "prepared") throw new Error("Plugin Runner preparation unavailable");
-    {
+    if (input.projectAuthCheckVersion !== 1) throw new Error("Plugin Runner managed project authentication validation unavailable");
+    if (!result.projectAuthCheckAtSubmit) {
       const provider = input.harness === "codex" ? "openai" : input.harness === "claude" ? "anthropic" : input.harness;
-      if (input.projectAuthCheckVersion !== 1) throw new Error("Plugin Runner managed project authentication validation unavailable");
       const validation = await call({ kind: "check_project_auth", configurationId: result.launch.configurationId,
         provider, projectIds: [...input.projectIds] });
       if (released || stopRequested) throw new Error("Plugin Runner preparation cancelled");
@@ -247,5 +252,15 @@ export function createPluginRunnerTaskOwner(input: {
     },
     controlPlaneRegistration: (authority, identity, signal) => registration(authority, identity?.runId ?? "", signal),
   };
-  return { launcher, registration, driver };
+  const readWorkspaceFile = async (path: string, maxBytes: number): Promise<Buffer> => {
+    if (!submitted || !preparedIdentity || released || stopRequested) throw new Error("Plugin Runner file access unavailable");
+    const result = await call(environmentTaskOperationSchema.parse({ kind: "read_file", identity: preparedIdentity,
+      projectIds: [...input.projectIds], path, maxBytes }));
+    if (released || stopRequested || result.kind !== "file" || result.byteSize > maxBytes) throw new Error("Plugin Runner file access unavailable");
+    const bytes = Buffer.from(result.base64, "base64");
+    if (bytes.length !== result.byteSize || bytes.toString("base64") !== result.base64 ||
+        createHash("sha256").update(bytes).digest("hex") !== result.sha256) throw new Error("Plugin Runner file integrity check failed");
+    return bytes;
+  };
+  return { launcher, registration, driver, readWorkspaceFile };
 }

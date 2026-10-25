@@ -2598,6 +2598,41 @@
       "when": 1792707356696,
       "tag": "0372_mature_the_initiative",
       "breakpoints": true
+    },
+    {
+      "idx": 373,
+      "version": "7",
+      "when": 1792710084082,
+      "tag": "0373_wandering_mongu",
+      "breakpoints": true
+    },
+    {
+      "idx": 374,
+      "version": "7",
+      "when": 1792713110842,
+      "tag": "0374_rare_wolfpack",
+      "breakpoints": true
+    },
+    {
+      "idx": 375,
+      "version": "7",
+      "when": 1792775097887,
+      "tag": "0375_short_mercury",
+      "breakpoints": true
+    },
+    {
+      "idx": 376,
+      "version": "7",
+      "when": 1792783857131,
+      "tag": "0376_clear_committed_native_recovery_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 377,
+      "version": "7",
+      "when": 1792790134086,
+      "tag": "0377_clear_settled_native_run_process_identity",
+      "breakpoints": true
     }
   ]
 }

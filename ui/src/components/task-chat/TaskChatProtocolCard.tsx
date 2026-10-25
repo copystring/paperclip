@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Bot,
@@ -45,7 +45,7 @@ import type {
   TaskChatWorkspaceFileItem,
 } from "./task-chat-model";
 import { QuestionForm, QuestionResponseSummary } from "./QuestionForm";
-import { TaskChatComposerTakeoverHeader } from "./TaskChatComposerTakeoverContext";
+import { TaskChatComposerTakeoverHeader, TaskChatRequestHistoryContext } from "./TaskChatComposerTakeoverContext";
 import { RichWorkProductCard } from "./RichWorkProductCard";
 import { useArtifactsV1Enabled } from "@/hooks/useArtifactsV1Enabled";
 import { ArtifactFileRow, ArtifactRow, fileRowSourceFromAttachment, fileRowSourceFromWorkProduct, subjectFromAttachment, subjectFromDocumentSummary, subjectFromWorkProduct, workProductStateBadge } from "@/components/artifacts/v1";
@@ -687,7 +687,7 @@ function RuntimeRequestCard({
   item,
   onDecision,
   presentation,
-  draftKey,
+  draftKey: requestedDraftKey,
   imageUploadHandler,
   mentions,
 }: {
@@ -698,6 +698,10 @@ function RuntimeRequestCard({
   imageUploadHandler?: (file: File) => Promise<string>;
   mentions?: MentionOption[];
 }) {
+  const historyIssueId = useContext(TaskChatRequestHistoryContext);
+  const draftKey = requestedDraftKey ?? (historyIssueId
+    ? `paperclip:task-input:${historyIssueId}:runtime:${item.runId}:${item.requestId}`
+    : undefined);
   const title =
     item.questionSet?.title ??
     (item.requestType === "permission"
@@ -710,6 +714,7 @@ function RuntimeRequestCard({
   const [values, setValues] = useState<Record<string, string>>(() =>
     draftKey ? loadStructuredDraft(draftKey, {}) : {},
   );
+  const [expanded, setExpanded] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -769,7 +774,7 @@ function RuntimeRequestCard({
     );
   }
 
-  return (
+  const content = (
     <CardShell
       icon={ShieldCheck}
       title={title}
@@ -911,6 +916,23 @@ function RuntimeRequestCard({
       ) : null}
     </CardShell>
   );
+
+  if (historyIssueId && presentation === "timeline" && item.status === "pending") {
+    return (
+      <details open={expanded} onToggle={event => {
+        if (event.currentTarget.open && draftKey) setValues(loadStructuredDraft(draftKey, {}));
+        setExpanded(event.currentTarget.open);
+      }} className="group w-full" data-testid="task-chat-pending-runtime-request">
+        <summary className="flex cursor-pointer list-none items-center gap-2 rounded-sm px-1 py-1.5 text-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <CircleHelp aria-hidden className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0 flex-1"><span className="block text-xs">{title}</span><span className="block truncate">{item.prompt}</span></span>
+          <ChevronRight aria-hidden className="h-3 w-3 shrink-0 group-open:rotate-90" />
+        </summary>
+        {expanded ? content : null}
+      </details>
+    );
+  }
+  return content;
 }
 
 function ResultCard({

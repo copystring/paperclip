@@ -48,6 +48,15 @@ const support = await getEmbeddedPostgresTestSupport();
   async function hire(status = "idle") { return createAgentLifecycle(db).requestHire(companyId, { name: "Agent", status, adapterType: "process" }); }
   async function current(id: string) { return (await db.select().from(agents).where(eq(agents.id, id)))[0]!; }
 
+  it("rejects an outdated configuration snapshot under the write lock", async () => {
+    const agent = await hire();
+    const snapshot = await current(agent.id);
+    const expectedConfiguration = { adapterType: snapshot.adapterType, adapterConfig: snapshot.adapterConfig, runtimeConfig: snapshot.runtimeConfig, defaultEnvironmentId: snapshot.defaultEnvironmentId };
+    await createAgentLifecycle(db).updateConfiguration(agent.id, { runtimeConfig: { heartbeat: { intervalSec: 42 } } });
+    await expect(createAgentLifecycle(db).updateConfiguration(agent.id, { runtimeConfig: { aiConnection: {} } }, { expectedConfiguration })).rejects.toThrow("configuration changed while saving");
+    expect((await current(agent.id)).runtimeConfig).toEqual({ heartbeat: { intervalSec: 42 } });
+  });
+
   it("maps existing states without starting setup or clearing pause reasons", async () => {
     const rows = await db.insert(agents).values(["idle", "running", "error", "paused", "pending_approval", "terminated"].map(status => ({
       companyId, name: status, status, pauseReason: status === "paused" ? "budget" : null,

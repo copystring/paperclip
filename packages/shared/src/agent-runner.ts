@@ -48,3 +48,11 @@ export function agentHarnessType(adapterType: string, config: Record<string, unk
 export function agentRunner(adapterType: string): AgentRunner {
   return adapterType === "paperclip_runner" ? "paperclip" : "legacy";
 }
+
+/** Stable configuration group across native and legacy execution backends. */
+export function agentRuntimeSettingsHarness(adapterType: string, config: Record<string, unknown> = {}): string {
+  const harness = agentHarnessType(adapterType, config);
+  if (harness === "acpx:copilot") return "copilot_runtime";
+  if (harness === "cursor") return "cursor_local";
+  return harness;
+}

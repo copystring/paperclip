@@ -111,34 +111,17 @@ describe("runtime connection tool delivery", () => {
     expect(DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE).not.toContain("child issues");
   });
 
-  it("guides shell capability checks in the actual execution target", () => {
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("command -v python3");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("Get-Command python3, python, py");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("availability already verified for this same shell and execution target");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("combine the check with the intended operation in one shell invocation when practical");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("do not spend a separate model round on preflight alone");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("Repeat discovery after the shell or target changes");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("Never infer executable availability from the Paperclip host");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("command -v rg");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("use `grep`");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("Select-String");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("PowerShell `ConvertFrom-Json`");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("check the transport result and confirm the HTTP status is successful before parsing the body");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("If the status is non-2xx or the body is unexpected");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("Never append a `curl -w` status marker");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("do not blindly retry a parse failure");
-  });
-
-  it("keeps MCP tool discovery separate from the task's read-only intent", () => {
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("follow the search tool's documented query semantics");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("use that for a known identifier");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("search with the unqualified action or tool name, or relevant keywords");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("Do not add an unrequested `read_only_only` or other capability or risk filter");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("Read-only intent belongs in the concrete arguments");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("no result from a narrower filter or mismatched query does not prove the tool is unavailable");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("Treat the returned tool name and schema as authoritative");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("through its paired call tool");
-    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("Never bypass a denial");
+  it("gives agents target-aware tool, MCP, and HTTP diagnostics guidance", () => {
+    for (const prompt of [DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE, DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE]) {
+      expect(prompt).toContain("Repeat discovery after the shell or target changes.");
+      expect(prompt).toContain("do not spend a separate model round on preflight alone");
+      expect(prompt).toContain("Finding `py` alone does not prove Python 3 is installed.");
+      expect(prompt).toContain("use `Select-String` if `rg` is missing");
+      expect(prompt).toContain("Do not add an unrequested `read_only_only` or other capability or risk filter.");
+      expect(prompt).toContain("Treat the returned tool name and schema as authoritative");
+      expect(prompt).toContain("Never append a `curl -w` status marker or other diagnostic text to a JSON stream.");
+      expect(prompt).toContain("do not blindly retry a parse failure");
+    }
   });
 });
 
@@ -1517,17 +1500,22 @@ describe("renderPaperclipWakePrompt", () => {
     );
   });
 
-  it("keeps task and chat defaults to identity and connection guidance", () => {
+  it("keeps task and chat defaults to identity, connection, and tool guidance", () => {
     for (const template of [
       DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
       DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE,
     ]) {
-      expect(template).toContain("You are agent {{agent.id}} ({{agent.name}}).");
+      expect(template.startsWith("You are agent {{agent.id}} ({{agent.name}}).\n")).toBe(true);
       expect(template).toContain("Before running a script or optional executable");
-      expect(template).toContain("py -3 --version");
-      expect(template).toContain("Repeat discovery after the shell or target changes");
+      expect(template).toContain("do not spend a separate model round on preflight alone");
+      expect(template).toContain("Before using optional search or JSON tools");
+      expect(template).toContain("When using assigned MCP tools");
+      expect(template).toContain("For HTTP JSON, keep the response body, HTTP status, headers, and transport diagnostics separate");
       expect(template).toContain(CONNECTION_INTENT_AGENT_GUIDANCE);
     }
+    expect(DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE).toBe(
+      DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
+    );
   });
 
   it("keeps current task data without generic procedures on fresh scoped wake prompts", () => {

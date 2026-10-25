@@ -114,6 +114,16 @@ remaining operations before qualifying the whole capability.
 Gaps: Environment test path checks creation/configuration policy; missing provider auth
 must use its owner setup flow.
 
+Scoped source-only Claude CLI preparation: both the selected environment test
+and normal CLI execution use
+[versioned sandbox preparation](../../packages/adapters/claude-local/src/server/sandbox-cli-version.ts).
+An outdated default sandbox command can use a private pinned compatible CLI;
+local, SSH and custom commands are not replaced. The selected model, engine,
+account and existing actor/company checks remain authoritative. Installer
+failure cannot turn an incompatible CLI into a passing probe. Local subprocess
+controls exercise version checks and installer outcomes; live agent and
+subscription access are `not-run` for this change.
+
 Scoped Legacy Codex shell delivery: resolved task configuration can explicitly
 assign service-secret variables to shell tools through ACP or CLI execution.
 The existing configuration and secret-access checks still authorize that binding;
@@ -264,6 +274,14 @@ own policy and access review.
 Gaps: Task-session listing and execution-context reset require board agent
 management at their HTTP routes. Native `call_api` preserves these denials; native
 continuation remains server-owned.
+
+Scoped source evidence: replacement of a workspace may bootstrap a newly
+admitted provider session only with matching current run/runner/lease identity,
+no prior activity or backup, and an atomic claim of an absent remote session
+directory. Existing sessions retain verified restore. This adds no reset or
+cleanup authority. Follow the [session recipe](../feature-map/runs-adapters.md#session)
+with a board-owned disposable fixture; live provider and actor-access evidence
+remain separate from the executor regressions.
 
 Scoped source-only evidence: [configuration changes](../../server/src/services/agent-configuration.ts)
 and [native execution/recovery](../../server/src/services/native-runtime/native-session-executor.ts)

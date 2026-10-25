@@ -193,6 +193,7 @@ export interface SandboxProviderCapabilities {
 export interface PluginEnvironmentDriverDeclaration {
   /** Provides Runner execution, resource preparation, and PRP connections via environmentTask. */
   supportsTasks?: boolean;
+  freshWorkspaceVersion?: 1;
   /** Stable driver key, unique within the plugin. Namespaced by plugin ID at runtime. */
   driverKey: string;
   /**
@@ -696,8 +697,15 @@ export interface PaperclipPluginManifestV1 {
   agentLifecycle?: true;
   /** Own project storage and durable workspace operations as one contract. */
   workspaceProvider?: {
+    /** Supports bounded run completion separately from removal-safety inspection. */
+    finalizationVersion?: 1;
+    freshWorkspaceVersion?: 1;
     modes: Array<"shared_workspace" | "isolated_workspace" | "operator_branch">;
     strategies: Array<"project_primary" | "git_worktree">;
+    defaultForProjects?: {
+      mode: "shared_workspace" | "isolated_workspace" | "operator_branch";
+      strategy: "project_primary" | "git_worktree";
+    };
   };
   /** Durable, acknowledged resource events delivered to onResourceLifecycle. Requires events.subscribe. */
   resourceLifecycle?: Array<"agent" | "project" | "agent_runtime">;

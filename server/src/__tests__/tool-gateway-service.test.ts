@@ -1,6 +1,9 @@
 import { subscribeDeliveryWork } from "../services/delivery-work-notifications.js";
 import { DELIVERY_QUEUES } from "../services/delivery-work-notifications.js";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -915,12 +918,18 @@ describeEmbeddedPostgres("tool gateway service", () => {
     expect(settledInvocation.idempotencyKey).not.toBeNull();
   });
 
-  it("does not leave unsigned action requests pending when signing is unavailable", async () => {
+  it("does not leave unsigned action requests pending when signing is unavailable", async ({ onTestFinished }) => {
     vi.stubEnv("PAPERCLIP_TOOL_ACTION_SIGNING_SECRET", "");
     const { company, agent, run } = await createRunFixture(db);
     await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
     const gateway = createTestToolGatewayService(db, { toolActionSigningSecret: " " });
     const session = await gateway.createSession(runSessionInput(company, agent, run));
+    const keyDirectory = await mkdtemp(join(tmpdir(), "tool-gateway-signing-failure-"));
+    onTestFinished(() => rm(keyDirectory, { recursive: true, force: true }));
+    const keyFile = join(keyDirectory, "master.key");
+    await writeFile(keyFile, "corrupt-fixture-master-key", { mode: 0o600 });
+    vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "");
+    vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY_FILE", keyFile);
 
     await expect(gateway.executeTool({
       sessionToken: session.token,
@@ -1216,7 +1225,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     ["notifications/initialized", 401],
     ["notifications/initialized", 403],
     ["notifications/initialized", 503],
-  ] as const)("gates only authentication failures during %s with HTTP %s", async (method, status) => {
+  ] as const)("reports HTTP status and gates only authentication failures during %s with HTTP %s", async (method, status) => {
     const { company, agent, run } = await createRunFixture(db);
     const { connection } = await createRemoteMcpToolFixture(db, company.id);
     await db.update(toolConnections).set({
@@ -1236,7 +1245,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     const tool = (await gateway.listToolsForSession(session.token)).find((entry) => entry.connectionId === connection.id)!;
 
     await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: {} }))
-      .rejects.toMatchObject({ reasonCode: "mcp_remote_fetch_failed" });
+      .rejects.toMatchObject({ reasonCode: "mcp_remote_status", details: { status, execution: { response: { httpStatus: status } } } });
     const [updated] = await db.select().from(toolConnections).where(eq(toolConnections.id, connection.id));
     const authenticationFailure = status === 401 || status === 403;
     expect(updated.healthStatus).toBe(authenticationFailure ? "error" : "ok");
