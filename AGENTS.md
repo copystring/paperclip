@@ -7,15 +7,32 @@ Guidance for human and AI contributors working in this repository.
 Paperclip is a control plane for AI-agent companies.
 The current implementation target is V1 and is defined in `doc/SPEC-implementation.md`.
 
-## 2. Read This First
+## 2. Load Context for the Current Task
 
-Before making changes, read in this order:
+Read this file and `doc/GOAL.md` first. Then use the references below for the
+current change; they are not a requirement to load every document in full
+before every heartbeat:
 
-1. `doc/GOAL.md`
-2. `doc/PRODUCT.md`
-3. `doc/SPEC-implementation.md`
-4. `doc/DEVELOPING.md`
-5. `doc/DATABASE.md`
+- `doc/PRODUCT.md`: the affected product behavior and user outcome.
+- `doc/SPEC-implementation.md`: the affected contracts and state transitions.
+- `doc/DEVELOPING.md`: the relevant development, execution and verification path.
+- `doc/DATABASE.md`: the relevant persistence, query, locking or migration rules
+  when the change touches those concerns.
+
+Use headings or targeted searches to locate the relevant sections, then read
+those sections completely, including any directly applicable referenced rules.
+Read and follow applicable nested `AGENTS.md` files before editing their scope.
+Expand the scope for cross-cutting changes, architecture, security,
+authorization or migration risks, or when the affected contract is unclear.
+The scoped repository rules below remain mandatory.
+
+Reuse context already read for this task when its source and relevant content
+have not changed. A new heartbeat does not require restarting a documentation
+survey. For truncated output, request a smaller range of the missing relevant
+section; do not count a hash or requested range as proof that its content was
+read. Once the applicable context is complete, continue the task rather than
+surveying unrelated documentation. This changes context loading only; it does
+not relax authority, review, ownership, budget or verification requirements.
 
 `doc/SPEC.md` is long-horizon product context.
 `doc/SPEC-implementation.md` is the concrete V1 build contract.

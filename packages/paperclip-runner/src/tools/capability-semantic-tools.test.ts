@@ -241,6 +241,34 @@ describe("Capability exposure and authorization", () => {
     )).toEqual([]);
   });
 
+  it("validates the actual create_task capability receipt without requiring task details in value", async () => {
+    const createTaskInputSchema = capabilitySemanticTool("create_task")!.inputSchema;
+    expect(validateJsonSchema(createTaskInputSchema, { title: "Missing assignment" })).not.toEqual([]);
+    expect(validateJsonSchema(createTaskInputSchema, { title: "Null assignment", assigneeActorId: null })).not.toEqual([]);
+    expect(validateJsonSchema(createTaskInputSchema, { title: "Self assignment", assigneeActorId: "actor-1" })).toEqual([]);
+    const { runtime } = await runtimeFor({ actorGrants: ["delegation:tasks:create"] });
+    const result = await runtime.invoke({
+      operationId: "create_task",
+      input: { title: "Delegated computation", assigneeActorId: "actor-1" },
+      idempotencyKey: "create-task-receipt-schema",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected create_task success");
+    expect(result.value).toMatchObject({
+      disposition: "applied",
+      entityRefs: expect.arrayContaining([expect.stringMatching(/^task:/)]),
+    });
+    expect(result.value).not.toHaveProperty("task");
+    expect(validateJsonSchema(
+      capabilitySemanticTool("create_task")!.outputSchema,
+      structuredClone(result) as unknown as CapabilityJsonValue,
+    )).toEqual([]);
+    expect(validateJsonSchema(
+      capabilitySemanticTool("create_task")!.outputSchema,
+      { ...structuredClone(result), value: "legacy non-object result" } as unknown as CapabilityJsonValue,
+    )).toEqual([]);
+  });
+
   it("executes the minimum always-tool workflow through the mock command contract", async () => {
     const { adapter, runtime } = await runtimeFor();
     const written = await runtime.invoke({

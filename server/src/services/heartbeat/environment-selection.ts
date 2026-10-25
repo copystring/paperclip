@@ -17,7 +17,7 @@ import {
   type ParsedExecutionWorkspaceMode,
 } from "../execution-workspace-policy.js";
 import { assertTaskWorkspaceExecutionAccess, assertTaskWorkspaceSourceProjectAccess } from "../task-workspace-access.js";
-import { shouldUseIsolatedTaskDirectory } from "../isolated-task-directory.js";
+import { hasIsolatedTaskDirectoryIncompatibleWorkspaceRequirements, isReusableRepoLessTaskDirectory, shouldUseIsolatedTaskDirectory } from "../isolated-task-directory.js";
 import {
   findNativeChatWorkspaceScope,
   nativeChatWorkspaceCwd,
@@ -469,19 +469,30 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
       preserveImplicitDefaultSettings: ["project", "task_default"].includes(taskWorkspaceIntent.source) });
   }
   const explicitTaskDirectory = !isDotRun && taskWorkspaceIntent?.selection.kind === "task_directory";
-  const useIsolatedTaskDirectory = !isDotRun && issueRef !== null && ((fresh && !workspaceProjectContext?.hasWorkspace && !issueRef.projectWorkspaceId) || shouldUseIsolatedTaskDirectory({
+  const configuredWorkspaceStrategies = [
+    config.workspaceStrategy,
+    issueAssigneeOverrides?.adapterConfig?.workspaceStrategy,
+    projectExecutionWorkspacePolicy?.workspaceStrategy,
+    issueExecutionWorkspaceSettings?.workspaceStrategy,
+  ];
+  const freshRepoLessTaskDirectory = fresh && !workspaceProjectContext?.hasWorkspace &&
+    !issueRef?.projectWorkspaceId &&
+    !hasIsolatedTaskDirectoryIncompatibleWorkspaceRequirements(configuredWorkspaceStrategies);
+  const useIsolatedTaskDirectory = !isDotRun && issueRef !== null && (freshRepoLessTaskDirectory || shouldUseIsolatedTaskDirectory({
     trustPreset: trustPreset.kind,
     environmentDriver: selectedEnvironmentForConfig?.driver ?? null,
     mode: requestedExecutionWorkspaceMode,
     hasProjectWorkspace: workspaceProjectContext?.hasWorkspace ?? false,
     projectWorkspaceId: issueRef.projectWorkspaceId,
-    workspaceStrategies: [
-      config.workspaceStrategy,
-      issueAssigneeOverrides?.adapterConfig?.workspaceStrategy,
-      projectExecutionWorkspacePolicy?.workspaceStrategy,
-      issueExecutionWorkspaceSettings?.workspaceStrategy,
-    ],
+    workspaceStrategies: configuredWorkspaceStrategies,
   }));
+  const taskDirectoryStrategyCanUsePrimary = !isDotRun &&
+    !hasIsolatedTaskDirectoryIncompatibleWorkspaceRequirements(configuredWorkspaceStrategies) &&
+    ((explicitTaskDirectory || useIsolatedTaskDirectory) ||
+      Boolean(reusableExistingExecutionWorkspace && await isReusableRepoLessTaskDirectory({
+        companyId: agent.companyId,
+        workspace: reusableExistingExecutionWorkspace,
+      })));
   return {
     persistedRunnerProfile,
     persistedNativeExecutionInput,
@@ -504,5 +515,6 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
     materializeNativeChatWorktree,
     explicitTaskDirectory,
     useIsolatedTaskDirectory,
+    taskDirectoryStrategyCanUsePrimary,
   };
 }

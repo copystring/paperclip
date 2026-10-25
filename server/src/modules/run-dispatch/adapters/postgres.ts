@@ -1,3 +1,5 @@
+import { makeNonDispatchReceipt } from "../../../services/non-dispatch-receipt.js";
+import { recoveryManagerTriageService } from "../../../services/recovery/manager-triage.js";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { validateReconstructedWorkspaceDispatch } from "../../../services/native-runtime/native-workspace-reconstruction.js";
@@ -103,6 +105,7 @@ type LoadStalenessFactsInput = {
 type CancelSuppressedRetryInput = {
   runId: string;
   companyId: string;
+  sourceRun: HeartbeatRun;
   now: Date;
   reason: string;
   errorCode: string;
@@ -222,9 +225,13 @@ export function createPostgresRunDispatchAdapter(
         : readNonEmptyString(parseObject(hint.contextSnapshot).issueId);
 
       const locked = async (typedTx: Db, publications: ActivityPublication[]) => {
-        // Recovery always takes coordinator before issue/run. Only the
-        // accounting phase acquires the company lock and evaluates budgets.
+        // Recovery always takes coordinator before privacy/source/issue/run.
+        // Only the accounting phase acquires company accounting and evaluates budgets.
         await lockRunBudgetRecoveryOwnerInTransaction(typedTx, input.companyId, input.runId, input.recoveryLeaseOwner);
+        const triageActionId = readNonEmptyString(parseObject(hint.contextSnapshot).managerTriageActionId);
+        if (mode === "ownership" && triageActionId) {
+          await recoveryManagerTriageService(typedTx).lockSource(input.companyId, triageActionId);
+        }
         if (hintedIssueId) {
           await typedTx
             .select({ id: issues.id })
@@ -705,6 +712,17 @@ export function createPostgresRunDispatchAdapter(
     tx: Db,
     input: CancelSuppressedRetryInput,
   ): Promise<CancelSuppressedRetryResult> {
+    const [receiptIssue] = input.issueId
+      ? await tx.select({ statusVersion: issues.statusVersion }).from(issues).where(and(
+          eq(issues.companyId, input.companyId), eq(issues.id, input.issueId),
+        )).limit(1)
+      : [];
+    const receipt = makeNonDispatchReceipt(
+      input.sourceRun,
+      input.errorCode,
+      "scheduled_retry_gate",
+      receiptIssue?.statusVersion ?? null,
+    );
     const [row] = await tx
       .update(heartbeatRuns)
       .set({
@@ -712,6 +730,7 @@ export function createPostgresRunDispatchAdapter(
         finishedAt: input.now,
         error: input.reason,
         errorCode: input.errorCode,
+        ...(receipt ? { resultJson: { ...parseObject(input.sourceRun.resultJson), nonDispatchReceipt: receipt } } : {}),
         updatedAt: input.now,
       })
       .where(
@@ -811,6 +830,7 @@ export function createPostgresRunDispatchAdapter(
         const cancelled = await cancelSuppressedRetryInTx(tx as unknown as Db, {
           runId: input.runId,
           companyId: input.companyId,
+          sourceRun: run,
           now,
           reason: "Scheduled retry suppressed because the agent no longer exists",
           errorCode: "agent_not_invokable",
@@ -846,6 +866,7 @@ export function createPostgresRunDispatchAdapter(
         const cancelled = await cancelSuppressedRetryInTx(tx as unknown as Db, {
           runId: input.runId,
           companyId: input.companyId,
+          sourceRun: run,
           now,
           reason: gate.reason,
           errorCode: gate.errorCode,
@@ -911,6 +932,15 @@ export function createPostgresRunDispatchAdapter(
     providerDispatchNotStarted = false,
   ): Promise<CancelStaleQueuedRunOutcome> {
       await notifyDeliveryWork(tx, DELIVERY_QUEUES.accounting, run.companyId);
+      const [receiptIssue] = await tx.select({ statusVersion: issues.statusVersion }).from(issues).where(and(
+        eq(issues.companyId, run.companyId), eq(issues.id, issueId),
+      )).limit(1);
+      const receipt = makeNonDispatchReceipt(
+        run,
+        decision.errorCode,
+        "stale_queued_run_gate",
+        receiptIssue?.statusVersion ?? null,
+      );
       const [row] = await tx
         .update(heartbeatRuns)
         .set({
@@ -921,6 +951,7 @@ export function createPostgresRunDispatchAdapter(
           resultJson: {
             ...parseObject(run.resultJson),
             stopReason: decision.errorCode,
+            ...(receipt ? { nonDispatchReceipt: receipt } : {}),
             ...(providerDispatchNotStarted && decision.errorCode === "issue_waiting_for_response"
               ? { preDispatchResponseWait: { version: 1, providerWorkStarted: false } }
               : {}),
@@ -1292,6 +1323,10 @@ export function createPostgresRunDispatchAdapter(
           eq(nativeRunFinalizations.companyId, run.companyId), eq(nativeRunFinalizations.runId, run.id),
           eq(nativeRunFinalizations.leaseOwner, input.recoveryLeaseOwner), sql`${nativeRunFinalizations.leaseExpiresAt} > clock_timestamp()`)) : [];
         if (!owner) return { dispatched: false as const, admissionBlockReason: "Native recovery no longer owns provider dispatch" };
+      }
+      if (readNonEmptyString(parseObject(run.contextSnapshot).managerTriageActionId)) {
+        const triageBlock = await recoveryManagerTriageService(tx).dispatchBlock(run, true);
+        if (triageBlock) return { dispatched: false as const, admissionBlockReason: triageBlock };
       }
       await tx.update(heartbeatRuns).set({ usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb)
         || ${JSON.stringify({ budgetDispatch: { ...claim, handedOffAt: new Date().toISOString() } })}::jsonb` })

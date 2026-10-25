@@ -10726,6 +10726,15 @@ registerCurrentRoute({
 
 registerCurrentRoute({
   method: "post",
+  path: "/api/issues/{id}/recovery-actions/revalidate-non-dispatch",
+  tags: ["issues"],
+  summary: "Revalidate retained recovery holds against verified non-dispatch evidence",
+  body: z.object({ expectedStatusVersion: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER) }),
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
   path: "/api/issues/{id}/recovery-actions/resume-workspace-finalization",
   tags: ["issues"],
   summary: "Resume a saved native result after operator verification of the prior workspace owner's stop",

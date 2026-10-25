@@ -5,7 +5,7 @@ import { rm } from "node:fs/promises";
 import { hostname } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
-import { agents, agentWakeupRequests, authSessions, authUsers, caseEvents, caseHandoffs, cases, companies, companyMemberships,
+import { agents, agentWakeupRequests, authSessions, authUsers, caseEvents, caseHandoffs, cases, companies, companyMemberships, environmentLeases,
   createDb, heartbeatRunEvents, heartbeatRuns, issueComments, issues } from "@paperclipai/db";
 import { issueRecoveryActions, issueRelations } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -20,6 +20,7 @@ import { prepareHeartbeatRunScratch, cleanupHeartbeatRunScratch } from "../servi
 import { appendHeartbeatRunEvent } from "../services/heartbeat-run-events.js";
 import { createAgentIdentityRedactor } from "../services/agent-identity-redaction.js";
 import { createHeartbeatRunOutput } from "../services/heartbeat/run-output.js";
+import { terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
 
 describe("durable case handoff queue admission", () => {
   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -342,14 +343,109 @@ describe("durable case handoff queue admission", () => {
       nextAttemptAt: new Date(Date.now() + 60_000) }).where(eq(caseHandoffs.id, f.handoffId));
     await heartbeatService(db).requestCaseHandoffYield({ runId: sourceRunId, issueId: f.issueId, handoffId: f.handoffId });
     const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId));
-    expect(source).toMatchObject({ status: "cancelled", startedAt: null, runtimeModeResolvedAt: null,
-      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
-        caseHandoffExecutionReleased: { runId: sourceRunId, issueId: f.issueId } } });
+    expect(source).toMatchObject({ status: "cancelled", runtimeMode: "legacy", startedAt: null, runtimeModeResolvedAt: null,
+      processStartedAt: null, processPid: null, processGroupId: null, executionStage: null,
+      resultJson: { caseHandoffYieldStop: true, reassignmentStopRequested: true, reassignmentStopConfirmed: true,
+        startupCancellation: { errorCode: "issue_reassigned" }, cancellation: { source: "control_plane", expected: true },
+        executionRecovery: { kind: "bootstrap", providerWorkStarted: false }, caseHandoffId: f.handoffId } });
     expect(await isCaseHandoffSourceReleased(db, { runId: sourceRunId, issueId: f.issueId })).toBe(true);
+    const [releasedSource] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId));
+    expect(releasedSource.resultJson).toMatchObject({
+      caseHandoffExecutionReleased: { schema: "paperclip.case-handoff-release.v1", runId: sourceRunId, issueId: f.issueId },
+    });
     const [handoff] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, f.handoffId));
     expect(handoff.state).toBe("awaiting_release");
     expect(handoff.nextAttemptAt.getTime()).toBeLessThanOrEqual(Date.now());
   });
+  it("preserves ordinary queued reassignment bootstrap evidence without case handoff intent", async () => {
+    const f = await fixture(), sourceRunId = randomUUID(), now = new Date();
+    const [source] = await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId: f.companyId, agentId: f.agentId,
+      status: "queued", runtimeMode: "legacy", contextSnapshot: { issueId: f.issueId }, responsibleUserId: f.userId }).returning();
+    await db.update(issues).set({ executionRunId: sourceRunId }).where(eq(issues.id, f.issueId));
+    const terminal = await terminalizeLegacyExecution({ db, run: source!, status: "cancelled", fromStatuses: ["queued"],
+      patch: { errorCode: "issue_reassigned", finishedAt: now, resultJson: {
+        cancellation: { source: "control_plane", expected: true, initiator: { type: "system" }, reason: "reassigned",
+          recordedAt: now.toISOString() },
+        startupCancellation: { errorCode: "issue_reassigned", requestedAt: now.toISOString() },
+        executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      } } });
+    expect(terminal?.resultJson).toMatchObject({ executionRecovery: { kind: "bootstrap", providerWorkStarted: false } });
+  });
+  it.each(["dispatch_claimed", "runtime_identity", "active_lease", "foreign_handoff", "operator_stop",
+    "wrong_cancellation_initiator", "malformed_cancellation", "stale_patch_erases_provider_evidence",
+    "current_operator_cancellation", "current_wrong_startup_cancellation", "dispatch_claimed_stale_bootstrap",
+    "current_operator_cancellation_stale_bootstrap", "later_interrupted_settlement",
+    "locked_interrupted_without_work_flag_patch_missing", "locked_interrupted_without_work_flag_stale_bootstrap",
+    "locked_interrupted_later_settlement", "locked_interrupted_with_provider_flag_stale_bootstrap"] as const)(
+    "does not record queued case-handoff bootstrap evidence after %s", async scenario => {
+      const f = await fixture(), sourceRunId = randomUUID(), startedAt = new Date();
+      const [source] = await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId: f.companyId, agentId: f.agentId,
+        status: "queued", runtimeMode: "legacy", contextSnapshot: { issueId: f.issueId }, responsibleUserId: f.userId,
+        resultJson: ["stale_patch_erases_provider_evidence", "later_interrupted_settlement"].includes(scenario)
+          ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: true } }
+          : scenario.startsWith("locked_interrupted_")
+            ? { executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled",
+              ...(["locked_interrupted_with_provider_flag_stale_bootstrap", "locked_interrupted_later_settlement"].includes(scenario)
+                ? { providerWorkStarted: true } : {}) },
+              executionCancellation: { state: "acknowledged" } }
+          : ["current_operator_cancellation", "current_operator_cancellation_stale_bootstrap"].includes(scenario)
+            ? { cancellation: { source: "operator", expected: true, initiator: { type: "user" }, reason: "operator stop",
+                recordedAt: startedAt.toISOString() } }
+            : scenario === "current_wrong_startup_cancellation"
+              ? { startupCancellation: { errorCode: "agent_paused" } }
+              : null,
+      }).returning();
+      await db.update(issues).set({ executionRunId: sourceRunId }).where(eq(issues.id, f.issueId));
+      await db.update(caseHandoffs).set({ sourceRunId, state: "awaiting_release", createdAt: new Date(Date.now() - 31_000) })
+        .where(eq(caseHandoffs.id, f.handoffId));
+      if (["dispatch_claimed", "dispatch_claimed_stale_bootstrap"].includes(scenario)) await db.update(heartbeatRuns).set({ status: "running", startedAt,
+        runtimeModeResolvedAt: startedAt, executionStage: "preparing" }).where(eq(heartbeatRuns.id, sourceRunId));
+      if (scenario === "runtime_identity") await db.update(heartbeatRuns).set({ runtimeModeResolvedAt: startedAt })
+        .where(eq(heartbeatRuns.id, sourceRunId));
+      if (scenario === "active_lease") await db.insert(environmentLeases).values({ companyId: f.companyId,
+        heartbeatRunId: sourceRunId, provider: "fixture" });
+      const resultJson = { caseHandoffYieldStop: scenario !== "operator_stop", reassignmentStopRequested: true,
+        reassignmentStopConfirmed: true, caseHandoffId: scenario === "foreign_handoff" ? randomUUID() : f.handoffId,
+        cancellation: { source: scenario === "operator_stop" ? "operator" : "control_plane", expected: true,
+          initiator: { type: scenario === "wrong_cancellation_initiator" ? "user" : "system" },
+          reason: "fixture stop", recordedAt: scenario === "malformed_cancellation" ? "invalid" : startedAt.toISOString() },
+        ...(["stale_patch_erases_provider_evidence", "dispatch_claimed_stale_bootstrap",
+          "current_operator_cancellation_stale_bootstrap", "locked_interrupted_without_work_flag_stale_bootstrap",
+          "locked_interrupted_with_provider_flag_stale_bootstrap"].includes(scenario)
+          ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } }
+          : scenario === "locked_interrupted_later_settlement"
+            ? { executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true,
+              actionOutcomes: "settled", settledAt: startedAt.toISOString(), providerWorkStarted: false } }
+          : scenario === "later_interrupted_settlement"
+            ? { executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" } }
+            : {}),
+        startupCancellation: { errorCode: "issue_reassigned", requestedAt: startedAt.toISOString() } };
+      const terminal = await terminalizeLegacyExecution({ db, run: source!, status: "cancelled",
+        fromStatuses: ["queued", "running"], patch: { finishedAt: startedAt,
+          errorCode: scenario === "operator_stop" ? "cancelled" : "issue_reassigned", resultJson } });
+      expect(terminal).toMatchObject({ status: "cancelled" });
+      if (["current_operator_cancellation", "current_operator_cancellation_stale_bootstrap"].includes(scenario))
+        expect(terminal?.resultJson?.cancellation).toMatchObject({ source: "operator", initiator: { type: "user" } });
+      if (scenario === "current_wrong_startup_cancellation")
+        expect(terminal?.resultJson?.startupCancellation).toMatchObject({ errorCode: "agent_paused" });
+      if (["stale_patch_erases_provider_evidence", "later_interrupted_settlement"].includes(scenario)) {
+        expect(terminal?.resultJson).toMatchObject({ executionRecovery: { providerWorkStarted: true } });
+        if (scenario === "later_interrupted_settlement") expect(terminal?.resultJson).toMatchObject({
+          executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" },
+        });
+      } else if (scenario.startsWith("locked_interrupted_")) {
+        expect(terminal?.resultJson).toMatchObject({
+          executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" },
+          executionCancellation: { state: "acknowledged" },
+        });
+        if (scenario === "locked_interrupted_with_provider_flag_stale_bootstrap")
+          expect(terminal?.resultJson?.executionRecovery).toMatchObject({ providerWorkStarted: true });
+        if (scenario === "locked_interrupted_later_settlement")
+          expect(terminal?.resultJson?.executionRecovery).toMatchObject({ settledAt: startedAt.toISOString(), providerWorkStarted: true });
+      } else expect(terminal?.resultJson).not.toHaveProperty("executionRecovery");
+      if (!scenario.startsWith("locked_interrupted_"))
+        expect(await isCaseHandoffSourceReleased(db, { runId: sourceRunId, issueId: f.issueId })).toBe(false);
+    });
   it("does not launch an old same-agent receipt after a later phase without an assignment version change", async () => {
     const f = await fixture(), heartbeat = heartbeatService(db);
     const queued = await heartbeat.wakeup(f.agentId, f.options);

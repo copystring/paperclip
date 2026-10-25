@@ -174,6 +174,7 @@ const AUTHORED_PLANS: Record<string, PlanFactory> = {
         {
           title: `Dependent follow-up for ${entry.id}`,
           description: "Created blocked so the dependency is first-class, not prose.",
+          assigneeActorId: fixture.actorId,
           blockedByTaskIds: [fixture.taskId],
         },
         "child",
@@ -310,6 +311,7 @@ const AUTHORED_PLANS: Record<string, PlanFactory> = {
             {
               title: `Selected continuation task: ${optionId}`,
               description: `Created from ${entry.id} result.selectedOptionIds entry ${optionId}.`,
+              assigneeActorId: fixture.actorId,
             },
             `selected-${index + 1}`,
             `Create the task selected by continuation option ${optionId}.`,
@@ -335,14 +337,14 @@ const AUTHORED_PLANS: Record<string, PlanFactory> = {
     ],
   }),
 
-  "mh-subtask-tree-01": (entry) => ({
+  "mh-subtask-tree-01": (entry, fixture) => ({
     restraint: false,
     controlPlaneCapabilities: [...CHECKOUT_CAPABILITIES, BLOCKER_WAKE_CAPABILITY, RECONCILE_CAPABILITY],
     steps: [
       read("get_task_context", {}, "Read the parent task before creating the tree."),
       write(
         "create_task",
-        { title: `${entry.id} — step 1: design`, description: "First sequenced subtask." },
+        { title: `${entry.id} — step 1: design`, description: "First sequenced subtask.", assigneeActorId: fixture.actorId },
         "child-1",
         "Create the first subtask in the sequence.",
       ),
@@ -351,6 +353,7 @@ const AUTHORED_PLANS: Record<string, PlanFactory> = {
         {
           title: `${entry.id} — step 2: implement`,
           description: "Second subtask, blocked on the first.",
+          assigneeActorId: fixture.actorId,
           blockedByTaskIds: [CREATED_TASK_REF(1)],
         },
         "child-2",
@@ -602,7 +605,7 @@ function derivedWorkSteps(
       return [
         write(
           "create_task",
-          { title: `${marker}: delegated follow-up`, description: marker },
+          { title: `${marker}: delegated follow-up`, description: marker, assigneeActorId: fixture.actorId },
           "child",
           "Delegate the follow-up as a first-class task.",
         ),

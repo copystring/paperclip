@@ -2616,6 +2616,7 @@ export function heartbeatService(
         materializeNativeChatWorktree,
         explicitTaskDirectory,
         useIsolatedTaskDirectory,
+        taskDirectoryStrategyCanUsePrimary,
       } = await timePreparation("environment_selection", () => selectHeartbeatEnvironment(db, {
         run, agent,
         task: { issueRef, issueContext, issueId, context, executionProjectId, workspaceProjectContext, boundSourceWorkspace,
@@ -2632,7 +2633,7 @@ export function heartbeatService(
         run, agent,
         task: { issueId, context, responsibleUserId, acceptedPlanContinuationWake, acceptedPlanWakeRoutingDecision, taskProjectContext, routineEnvContext },
         config: { sourceWorkspaceConfig, aiBinding },
-        policy: { trustPreset, useIsolatedTaskDirectory, explicitTaskDirectory },
+        policy: { trustPreset, useIsolatedTaskDirectory, explicitTaskDirectory, taskDirectoryStrategyCanUsePrimary },
         environment: { selectedEnvironmentId, selectedEnvironmentForConfig, resolvedInstanceSettings, persistedNativeExecutionInput },
         services: { secretsSvc, companySkills, appendRunEvent, finalizeAiConnectionBusyDeferral },
         onFailureSecretsResolved: (readSecrets) => { readFailureReportSecrets = () => [...readSecrets(), ...identityRedactor.values]; },
@@ -2705,6 +2706,7 @@ export function heartbeatService(
           effectiveExecutionWorkspaceMode,
           requestedExecutionWorkspaceMode,
           useIsolatedTaskDirectory,
+          taskDirectoryStrategyCanUsePrimary,
           nativeChatWorkspaceScope,
           projectExecutionWorkspacePolicy,
           issueExecutionWorkspaceSettings,
@@ -2807,7 +2809,7 @@ export function heartbeatService(
           }
           return { dispatched: false };
         }
-        const enforceContinuationOwnership = Boolean(issueId && (isResolvedInteractionContinuationWakeContext(context) ||
+        const enforceContinuationOwnership = Boolean(issueId && (typeof context.managerTriageActionId === "string" || isResolvedInteractionContinuationWakeContext(context) ||
           typeof context.workspaceReconstructionActionId === "string" ||
           ["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? "")));
         if (issueId && enforceContinuationOwnership) {

@@ -212,6 +212,49 @@ describe("releaseIssueExecution", () => {
     else expect(transaction.finalizePromotedWake).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { currentAttempt: false, expectedOutcome: "released" },
+    { currentAttempt: true, expectedOutcome: "blocked" },
+  ])("uses the current review decision boundary before recovery classification (%s)", async ({ currentAttempt, expectedOutcome }) => {
+    const decisionId = "decision-1";
+    const issue = {
+      ...ISSUE,
+      status: "in_review",
+      assigneeAgentId: null,
+      executionState: {
+        status: "pending",
+        currentParticipant: { type: "agent", agentId: RUN.agentId },
+        lastDecisionId: decisionId,
+      },
+    };
+    const run = {
+      ...RUN,
+      status: "cancelled",
+      contextSnapshot: {
+        wakeReason: "execution_review_requested",
+        retryReason: "execution_review_participant_recovery",
+      },
+    };
+    const transaction = createFakeTransaction({
+      isRunInCurrentExecutionReviewAttempt: vi.fn(async () => currentAttempt),
+    });
+    const release = createReleaseIssueExecution({
+      issueLock: createFakeIssueLock(createFakeHost(), transaction, issue, run),
+      recovery: createFakeRecovery(),
+    });
+
+    const result = await release({ companyId: RUN.companyId, runId: RUN.id, now: new Date() });
+
+    expect(result.outcome.kind).toBe(expectedOutcome);
+    expect(transaction.isRunInCurrentExecutionReviewAttempt).toHaveBeenCalledWith({
+      companyId: issue.companyId,
+      issueId: issue.id,
+      runId: run.id,
+      decisionId,
+    });
+    expect(transaction.queueReviewParticipantRecoveryRun).not.toHaveBeenCalled();
+  });
+
   it.each(["closing", "mixed_comments", "explicit_resume", "interaction", "other_source_task", "parent_open"])(
     "checks late completed-delegation mentions without dropping independent input (%s)", async (scenario) => {
       const originalCommentIds = ["closing-comment", "second-comment"];
@@ -793,6 +836,20 @@ describe("releaseIssueExecution", () => {
     const result = await release({ companyId: RUN.companyId, runId: RUN.id, now: new Date() });
     expect(result.outcome.kind).toBe("queued_recovery");
     expect(transaction.queueImmediateRecoveryRun).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([true, false])("honors adapter-proved automatic authority exhaustion (%s) without blocking a separate human intent", async automaticRecoverySuppressed => {
+    const transaction = createFakeTransaction();
+    const recovery = createFakeRecovery();
+    const release = createReleaseIssueExecution({
+      issueLock: createFakeIssueLock(createFakeHost(), transaction,
+        { ...ISSUE, originKind: "recovery_manager_triage" }, { ...RUN, automaticRecoverySuppressed }),
+      recovery,
+    });
+    const result = await release({ companyId: RUN.companyId, runId: RUN.id, now: new Date() });
+    expect(result.outcome.kind).toBe(automaticRecoverySuppressed ? "released" : "queued_recovery");
+    expect(transaction.queueImmediateRecoveryRun).toHaveBeenCalledTimes(automaticRecoverySuppressed ? 0 : 1);
+    expect(recovery.escalateStrandedAssignedIssue).not.toHaveBeenCalled();
   });
 
   it("throws WakeQueueApplicationError with code responsible_user_unresolved for a recovery run, without queuing it", async () => {

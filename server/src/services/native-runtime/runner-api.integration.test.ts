@@ -1063,7 +1063,7 @@ else if(m.id!==undefined) send({id:m.id,result:{}});
 
   it("creates child tasks after seeding and preserves company numbering", async () => {
     const fixture = await server.fixture();
-    await expect(fixture.authority.execute({ tool: "create_task", callId: "child", arguments: { title: "Verify release notes", description: "Check before shipping.", assigneeActorId: null, idempotencyKey: "child" } })).resolves.toBeDefined();
+    await expect(fixture.authority.execute({ tool: "create_task", callId: "child", arguments: { title: "Verify release notes", description: "Check before shipping.", assigneeActorId: fixture.agentId, idempotencyKey: "child" } })).resolves.toBeDefined();
     const children = (await fixture.snapshot()).issues.filter(issue => issue.parentId === fixture.issueId);
     expect(children).toHaveLength(1);
     expect(children[0].issueNumber).toBe(3);
