@@ -242,6 +242,10 @@ describe("Capability exposure and authorization", () => {
   });
 
   it("validates the actual create_task capability receipt without requiring task details in value", async () => {
+    const createTaskInputSchema = capabilitySemanticTool("create_task")!.inputSchema;
+    expect(validateJsonSchema(createTaskInputSchema, { title: "Missing assignment" })).not.toEqual([]);
+    expect(validateJsonSchema(createTaskInputSchema, { title: "Null assignment", assigneeActorId: null })).not.toEqual([]);
+    expect(validateJsonSchema(createTaskInputSchema, { title: "Self assignment", assigneeActorId: "actor-1" })).toEqual([]);
     const { runtime } = await runtimeFor({ actorGrants: ["delegation:tasks:create"] });
     const result = await runtime.invoke({
       operationId: "create_task",

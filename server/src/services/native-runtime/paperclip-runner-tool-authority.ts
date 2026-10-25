@@ -84,7 +84,7 @@ import {
   projects,
   issueThreadInteractions,
 } from "@paperclipai/db";
-import { CAPABILITY_SEMANTIC_TOOL_CATALOG, runnerCodexDynamicToolsFit, SemanticToolOutcomeUnknownError } from "../../vendor/paperclip-runner/index.js";
+import { CAPABILITY_SEMANTIC_TOOL_CATALOG, paperclipSemanticAction, runnerCodexDynamicToolsFit, SemanticToolOutcomeUnknownError } from "../../vendor/paperclip-runner/index.js";
 import { agentService } from "../agents.js";
 import { approvalService } from "../approvals.js";
 import { documentService } from "../documents.js";
@@ -311,7 +311,9 @@ export class PaperclipRunnerToolAuthority {
                   },
                 },
               }
-            : descriptor.inputSchema,
+            : descriptor.operationId === "create_task"
+              ? paperclipSemanticAction("create_task")?.inputSchema ?? descriptor.inputSchema
+              : descriptor.inputSchema,
       }));
     // Keep the provider session's direct tool catalog stable across ordinary
     // and truncated external-chat turns. Execution still fails closed unless
@@ -1499,6 +1501,14 @@ export class PaperclipRunnerToolAuthority {
             assigneeUserId: existingChild.assigneeUserId,
           },
         };
+      }
+      // Older create_task receipts may have omitted the assignee and were
+      // interpreted as self-assignment. Preserve exact replays above, but new
+      // effects must name their sole recipient explicitly.
+      const hasExplicitAgentRecipient = typeof input.assigneeActorId === "string" && input.assigneeActorId.trim() !== "";
+      const hasExplicitUserRecipient = typeof input.assigneeUserId === "string" && input.assigneeUserId.trim() !== "";
+      if (hasExplicitAgentRecipient === hasExplicitUserRecipient) {
+        throw badRequest("Choose exactly one explicit agent or person assignee");
       }
       let deduplicated = false;
       const issueId = randomUUID();

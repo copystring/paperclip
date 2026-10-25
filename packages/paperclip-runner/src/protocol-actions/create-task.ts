@@ -1,6 +1,6 @@
 /** Canonical definition and documentation for `create_task`. */
 const delegationGuidance =
-  " For delegation to another agent, use list_agents to resolve the explicitly requested recipient from the current company roster: use an exact returned agent ID or exact unique name, or an exact role/title match only when the request names that role/title and exactly one listed agent matches. Pass the resolved ID as assigneeActorId; omitting the field assigns this agent. Never infer a recipient from the task title or use a hardcoded role-to-ID mapping. If the requested recipient is absent or ambiguous, ask before creating. If a follow-up or review task needs this task's result, include this task's exact ID in blockedByTaskIds so it cannot start early; create independent tasks without that dependency. Verify the receipt's task ID and assignee before claiming the handoff succeeded; missing task or assignee data is unconfirmed.";
+  " Every create_task call requires exactly one explicit nonempty assigneeActorId or assigneeUserId; include your own agent ID when assigning yourself. Resolve agent recipients with list_agents and people with list_people. For a named agent, use the exact returned ID or exact unique name, or an exact role/title match only when requested and unique. Never infer a recipient from the task title or a hardcoded mapping, and never change a requested recipient to yourself because another argument or tool call failed. If the requested recipient is absent or ambiguous, ask before creating. If a child needs this task's result, include this task's exact ID in the child's blockedByTaskIds. If this parent needs a child's result before finishing, use set_dependencies to add the child's exact ID to this parent's blockers, preserving existing blockers, and keep the parent open until it resolves; never make the child depend on its waiting parent. Independent review must use the configured review stage or another actor; a self-assigned child is not independent review. Verify the receipt's task ID and assignee before claiming the handoff succeeded; missing task or assignee data is unconfirmed.";
 const createTaskDescription =
   "Create a project task from a conversation, or a child from an ordinary task. Persist initialPlan before execution. Set status to backlog when the user wants to save or plan work without starting it; backlog tasks never wake an agent. Omitted status means todo, subject to blockers." + delegationGuidance;
 
@@ -42,14 +42,16 @@ export const createTaskAction = {
       "operationId": "create_task",
       "input": {
         "idempotencyKey": "example",
-        "title": "example"
+        "title": "example",
+        "assigneeActorId": "example-agent"
       }
     },
     "scenarioCall": {
       "operationId": "create_task",
       "idempotencyKey": "example",
       "input": {
-        "title": "example"
+        "title": "example",
+        "assigneeActorId": "example-agent"
       }
     },
     "success": {
@@ -120,7 +122,7 @@ export const createTaskAction = {
               "string",
               "null"
             ],
-            "description": "Agent ID returned by list_agents. Omit or pass null only to assign the current agent; delegation requires the explicitly selected recipient ID.",
+            "description": "Explicit nonempty agent ID from list_agents, including when assigning this agent.",
             "maxLength": 20000
           },
           "status": {
@@ -161,9 +163,24 @@ export const createTaskAction = {
             "description": "Relevant markdown plan saved on the new task before execution starts."
           }
         },
-        "required": [
-          "idempotencyKey",
-          "title"
+        "required": ["idempotencyKey", "title"],
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["assigneeActorId"],
+            "properties": {
+              "assigneeActorId": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+              "assigneeUserId": { "type": "null" }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["assigneeUserId"],
+            "properties": {
+              "assigneeActorId": { "type": "null" },
+              "assigneeUserId": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" }
+            }
+          }
         ],
         "additionalProperties": false
       },
@@ -270,10 +287,11 @@ export const createTaskAction = {
           "description": {
             "type": "string"
           },
-          "assigneeUserId": { "type": ["string", "null"], "description": "Company person ID from list_people. Mutually exclusive with assigneeActorId." },
           "assigneeActorId": {
             "type": "string",
-            "description": "Agent ID returned by list_agents. Omit this field to assign the current agent; delegation requires the explicitly selected recipient ID."
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "Explicit agent ID, including this agent when self-assigning."
           },
           "status": {
             "enum": ["backlog", "todo"],
@@ -290,9 +308,7 @@ export const createTaskAction = {
             }
           }
         },
-        "required": [
-          "title"
-        ],
+        "required": ["title", "assigneeActorId"],
         "additionalProperties": false
       },
       "outputSchema": {

@@ -53,6 +53,36 @@ describe("OpenCode local skill injection", () => {
     await fs.rm(configHome, { recursive: true, force: true });
   });
 
+  it.each([
+    ["fresh", null],
+    ["resumed", "prior-session"],
+  ] as const)("includes the shared delegation contract in the actual %s prompt", async (_label, sessionId) => {
+    const commandPath = path.join(configHome, "fake-opencode-delegation");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    runProcessMock.mockReset().mockResolvedValueOnce(probeResult({ stdout: JSON.stringify({
+      type: "text", sessionID: "delegation-session", part: { text: "Reply" },
+    }) }));
+    let prompt = "";
+    await execute({
+      runId: `delegation-${_label}`,
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: { sessionId, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: commandPath, cwd: configHome, model: "openai/gpt-5", env: { OPENCODE_ALLOW_ALL_MODELS: "1" } },
+      context: {},
+      onMeta: async meta => { prompt = String(meta.prompt ?? ""); },
+      onLog: async () => {},
+    });
+    expect(prompt).toContain("Paperclip task delegation contract:");
+    expect(prompt).toContain("exactly one explicit, nonempty assigneeActorId or assigneeUserId");
+    expect(prompt).toContain("Resolve agent IDs with list_agents and person IDs with list_people");
+    expect(prompt).toContain("do not silently assign the task to yourself");
+    expect(prompt).toContain("If this parent needs a child's result before finishing, add the child's exact ID to the parent's blockers with set_dependencies");
+    expect(prompt).toContain("never make the child depend on its waiting parent");
+    expect(prompt).not.toContain("include this task's exact ID in the child's blockedByTaskIds and do not finish the parent");
+    expect(prompt).toContain("a self-assigned child is not an independent review");
+    expect(prompt).toContain("verify its task ID and persisted assignee");
+  });
+
   it("delivers discovered image input to the process without changing its configured model", async () => {
     const server = createServer((_req, res) => res.writeHead(200).end(JSON.stringify({
       data: [{ id: "alias", capabilities: { vision: true } }],

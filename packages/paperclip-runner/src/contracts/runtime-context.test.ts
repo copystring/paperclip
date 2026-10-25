@@ -60,11 +60,17 @@ describe("persisted native execution prompts", () => {
     const current = savedContext(PAPERCLIP_EXECUTION_PROMPT_REVISION, PAPERCLIP_EXECUTION_PROMPT);
     expect(parseNativeRuntimeContext(current)).toEqual(current);
     expect(PAPERCLIP_EXECUTION_PROMPT).not.toMatch(/\b(?:cases?|workflows?|Mermaid)\b|stateDiagram-v2|(?:create|read|handoff)_case|(?:list|read|create|update)_workflow/i);
-    expect(PAPERCLIP_EXECUTION_PROMPT).toContain("an exact match to the declared role/title only when the request specifies that role/title");
+    expect(PAPERCLIP_EXECUTION_PROMPT).toContain("Every create_task call requires exactly one explicit, nonempty assigneeActorId or assigneeUserId");
+    expect(PAPERCLIP_EXECUTION_PROMPT).toContain("including the current agent's ID for self-assignment");
+    expect(PAPERCLIP_EXECUTION_PROMPT).toContain("Keep the recipient the user requested if a project, dependency, or other tool call fails");
+    expect(PAPERCLIP_EXECUTION_PROMPT).toContain("If this parent needs a child's result before finishing, use set_dependencies to add the child's exact ID to this parent's blockers");
+    expect(PAPERCLIP_EXECUTION_PROMPT).toContain("never make the child depend on its waiting parent");
+    expect(PAPERCLIP_EXECUTION_PROMPT).not.toContain("If a child result is needed before finishing this task, include this task's exact ID in blockedByTaskIds");
+    expect(PAPERCLIP_EXECUTION_PROMPT).toContain("a self-assigned child is not independent review");
     expect(PAPERCLIP_EXECUTION_PROMPT).toContain("Never infer a recipient from the task title or use a hardcoded role-to-ID mapping");
     expect(PAPERCLIP_EXECUTION_PROMPT).toContain("if the receipt is refused, unknown, erroneous, or lacks task or assignee data");
     expect(PAPERCLIP_EXECUTION_PROMPT).toContain("report the outcome as unconfirmed");
-    expect(PAPERCLIP_EXECUTION_PROMPT).toContain("include that predecessor's exact task ID in blockedByTaskIds");
+    expect(PAPERCLIP_EXECUTION_PROMPT).toContain("use set_dependencies to add its ID while preserving existing blocker IDs");
   });
 
   it.each(["revision", "text"])("requires a non-empty prompt %s", (field) => {

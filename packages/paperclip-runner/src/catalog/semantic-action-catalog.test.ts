@@ -102,22 +102,32 @@ describe("semantic action catalog", () => {
       const validate = ajv.compile(schema);
       const input = { title: "Hello", idempotencyKey: "hello", assigneeUserId: "company-owner" };
       expect(validate(input), JSON.stringify(validate.errors)).toBe(true);
-      expect(validate({ ...input, assigneeUserId: null })).toBe(true);
+      expect(validate({ title: "Self", idempotencyKey: "self", assigneeActorId: "agent-1" })).toBe(true);
+      expect(validate({ title: "Person", idempotencyKey: "person", assigneeUserId: "person-1", assigneeActorId: null })).toBe(true);
+      expect(validate({ ...input, assigneeUserId: null })).toBe(false);
+      expect(validate({ idempotencyKey: "missing", title: "Missing assignee" })).toBe(false);
+      expect(validate({ ...input, assigneeUserId: "" })).toBe(false);
+      expect(validate({ ...input, assigneeUserId: "   " })).toBe(false);
+      expect(validate({ ...input, assigneeActorId: "agent-1" })).toBe(false);
       expect(validate({ ...input, assigneeUserId: 42 })).toBe(false);
+      expect(validate({ ...input, assigneeUserId: "person-1", assigneeActorId: "agent-1" })).toBe(false);
       expect(validate({ ...input, undeclaredField: true })).toBe(false);
     }
     expect(createTaskAction.documentation.description).toContain("list_agents");
     expect(createTaskAction.documentation.description).toContain("missing task or assignee data is unconfirmed");
     expect(createTaskAction.documentation.description).toContain("exact role/title match");
-    expect(createTaskAction.documentation.description).toContain("hardcoded role-to-ID mapping");
-    expect(createTaskAction.documentation.description).toContain("include this task's exact ID in blockedByTaskIds");
-    expect(paperclipSemanticAction("create_task")!.description).toContain("Pass the resolved ID as assigneeActorId");
+    expect(createTaskAction.documentation.description).toContain("hardcoded mapping");
+    expect(createTaskAction.documentation.description).toContain("If this parent needs a child's result before finishing, use set_dependencies");
+    expect(createTaskAction.documentation.description).not.toContain("If a child result is needed before finishing this task, include this task's exact ID");
+    expect(paperclipSemanticAction("create_task")!.description).toContain("exactly one explicit nonempty assigneeActorId or assigneeUserId");
     expect(paperclipSemanticAction("create_task")!.inputSchema.properties?.blockedByTaskIds?.description).toContain("must finish before this task starts");
     expect(listAgentsAction.documentation.description).toContain("exact match to one listed profile's role/title");
     const validateScenario = ajv.compile(createTaskAction.scenario.descriptor.inputSchema);
     expect(validateScenario({ title: "Self assignment", assigneeActorId: "actor-1" })).toBe(true);
-    expect(validateScenario({ title: "Self assignment", assigneeActorId: null })).toBe(false);
-    expect(createTaskAction.scenario.descriptor.inputSchema.properties.assigneeActorId.description).toContain("Omit this field");
+    expect(validateScenario({ title: "Missing assignment" })).toBe(false);
+    expect(validateScenario({ title: "Self assignment", assigneeActorId: "" })).toBe(false);
+    expect(validateScenario({ title: "Self assignment", assigneeActorId: "   " })).toBe(false);
+    expect(createTaskAction.scenario.descriptor.inputSchema.properties.assigneeActorId.description).toContain("including this agent");
     expect(createTaskAction.scenario.descriptor.inputSchema.properties.assigneeActorId.description).not.toContain("pass null");
   });
 

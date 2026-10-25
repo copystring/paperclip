@@ -81,7 +81,7 @@ describe("runner backlog task creation", () => {
 
   it.each([false, true])("persists the plan without waking an assigned backlog task (conversation=%s)", async conversation => {
     const f = await fixture(conversation);
-    const call = { tool: "create_task", callId: "save-later", arguments: { idempotencyKey: "save-later", title: "Plan for later", status: "backlog", initialPlan: "1. Check status.\n2. Save the plan.\n3. Confirm creation." } };
+    const call = { tool: "create_task", callId: "save-later", arguments: { idempotencyKey: "save-later", title: "Plan for later", assigneeActorId: f.agentId, status: "backlog", initialPlan: "1. Check status.\n2. Save the plan.\n3. Confirm creation." } };
     const receipt = await f.authority.execute(call) as { task: { id: string } };
     expect(receipt).toMatchObject({ scheduledWakeIds: [], task: { status: "backlog", assigneeActorId: f.agentId, parentId: conversation ? null : f.issueId } });
     const [task] = await db.select().from(issues).where(eq(issues.id, receipt.task.id));
@@ -104,7 +104,7 @@ describe("runner backlog task creation", () => {
     const f = await fixture(true);
     const blockerId = randomUUID();
     await db.insert(issues).values({ id: blockerId, companyId: f.companyId, title: "Prerequisite", status });
-    const receipt = await f.authority.execute({ tool: "create_task", callId: "held", arguments: { idempotencyKey: "held", title: "Held task", status: "backlog", blockedByTaskIds: [blockerId] } }) as { task: { id: string } };
+    const receipt = await f.authority.execute({ tool: "create_task", callId: "held", arguments: { idempotencyKey: "held", title: "Held task", assigneeActorId: f.agentId, status: "backlog", blockedByTaskIds: [blockerId] } }) as { task: { id: string } };
     expect(receipt).toMatchObject({ task: { status: "backlog" }, scheduledWakeIds: [] });
     expect(await issueService(db).getRelationSummaries(receipt.task.id)).toMatchObject({ blockedBy: [expect.objectContaining({ id: blockerId })] });
     expect(f.enqueueWakeup).not.toHaveBeenCalled();

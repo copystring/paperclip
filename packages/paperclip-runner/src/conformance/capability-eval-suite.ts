@@ -247,10 +247,10 @@ function operationPlan(row: CapabilityEvalRow): OperationPlan {
   if (always) return { ...always, grants: [] };
   const optionalByGroup: Partial<Record<string, OperationPlan>> = {
     se: { operationId: "search_tasks", input: { query: row.id }, grants: ["discovery:tasks:read"] },
-    su: { operationId: "create_task", input: { title: marker }, grants: ["delegation:tasks:create"] },
+    su: { operationId: "create_task", input: { title: marker, assigneeActorId: "actor-1" }, grants: ["delegation:tasks:create"] },
     ap: { operationId: "request_approval", input: { approvalType: "fixture", payload: { caseId: row.id } }, grants: ["governance:approvals:request"] },
     rf: { operationId: "list_agents", input: {}, grants: ["discovery:agents:read"] },
-    mh: { operationId: "create_task", input: { title: marker }, grants: ["delegation:tasks:create"] },
+    mh: { operationId: "create_task", input: { title: marker, assigneeActorId: "actor-1" }, grants: ["delegation:tasks:create"] },
   };
   const optional = optionalByGroup[row.group];
   if (optional) return optional;

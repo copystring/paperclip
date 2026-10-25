@@ -556,21 +556,41 @@ const descriptors: readonly PaperclipSemanticActionDescriptor[] = [
     effect: "write",
     requiredClaims: ["delegation:tasks:create"],
     allowedModes: STANDARD_MODE,
-    inputSchema: object(
-      {
-        ...idempotency,
-        title: text("Task title.", 500),
-        projectId: nullableText("Project identifier for the new task."),
-        initialPlan: nullableText("Remaining execution steps to persist as the task plan. Exclude completed planning, approval, and handoff steps; cite the source plan revision and approval. A copied plan is not a new approval gate."),
-        description: nullableText("Child task description."),
-        assigneeActorId: nullableText("Agent ID returned by list_agents. Omit or pass null only to assign the current agent; delegation requires the explicitly selected recipient ID.", 200),
-        assigneeUserId: nullableText("Company person ID from list_people. Mutually exclusive with assigneeActorId.", 200),
-        status: { enum: ["backlog", "todo"], description: "Initial status. Use backlog to save work without execution. Defaults to todo (blocked when dependencies are unresolved)." },
-        priority: { enum: ["critical", "high", "medium", "low"] },
-        blockedByTaskIds: stringArray("Exact task IDs that must finish before this task starts. Include the predecessor ID when this task needs its result; do not infer blockers from titles or roles."),
-      },
-      ["idempotencyKey", "title"],
-    ),
+    inputSchema: {
+      ...object(
+        {
+          ...idempotency,
+          title: text("Task title.", 500),
+          projectId: nullableText("Project identifier for the new task."),
+          initialPlan: nullableText("Remaining execution steps to persist as the task plan. Exclude completed planning, approval, and handoff steps; cite the source plan revision and approval. A copied plan is not a new approval gate."),
+          description: nullableText("Child task description."),
+          assigneeActorId: nullableText("Required explicit agent ID from list_agents, including when assigning this agent.", 200),
+          assigneeUserId: nullableText("Required explicit company person ID from list_people when assigning a person.", 200),
+          status: { enum: ["backlog", "todo"], description: "Initial status. Use backlog to save work without execution. Defaults to todo (blocked when dependencies are unresolved)." },
+          priority: { enum: ["critical", "high", "medium", "low"] },
+          blockedByTaskIds: stringArray("Exact task IDs that must finish before this task starts. Include the predecessor ID when this task needs its result; do not infer blockers from titles or roles."),
+        },
+        ["idempotencyKey", "title"],
+      ),
+      oneOf: [
+        {
+          type: "object",
+          required: ["assigneeActorId"],
+          properties: {
+            assigneeActorId: { ...text("Explicit agent ID from list_agents, including this agent.", 200), pattern: "\\S" },
+            assigneeUserId: { type: "null" },
+          },
+        },
+        {
+          type: "object",
+          required: ["assigneeUserId"],
+          properties: {
+            assigneeActorId: { type: "null" },
+            assigneeUserId: { ...text("Explicit company person ID from list_people.", 200), pattern: "\\S" },
+          },
+        },
+      ],
+    },
     outputSchema: createTaskReceipt,
   }),
   descriptor({

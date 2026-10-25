@@ -1,7 +1,7 @@
 import { connectorToolDefinitionsForSkills } from "../connector-runtime.js";
 import * as cloudIdentity from "../cloud-runtime-identity.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { LOW_TRUST_REVIEW_PRESET, upsertIssueDocumentSchema } from "@paperclipai/shared";
 import { and, eq, inArray } from "drizzle-orm";
 import {
@@ -1162,9 +1162,16 @@ describe("PaperclipRunnerToolAuthority", () => {
         return null;
       },
     });
-    expect(authority.definitions().map((tool) => tool.name)).toContain(
-      "create_task",
-    );
+    const toolDefinitions = authority.definitions();
+    expect(toolDefinitions.map((tool) => tool.name)).toContain("create_task");
+    const createTaskDefinition = toolDefinitions.find((tool) => tool.name === "create_task")!;
+    expect(createTaskDefinition.inputSchema).toMatchObject({
+      properties: { assigneeActorId: expect.any(Object), assigneeUserId: expect.any(Object) },
+      oneOf: expect.arrayContaining([
+        expect.objectContaining({ required: ["assigneeActorId"] }),
+        expect.objectContaining({ required: ["assigneeUserId"] }),
+      ]),
+    });
 
     const prerequisite = await authority.execute({
       tool: "create_task",
@@ -1172,6 +1179,7 @@ describe("PaperclipRunnerToolAuthority", () => {
       arguments: {
         idempotencyKey: "ordinary-prerequisite",
         title: "Prepare delegated input",
+        assigneeActorId: agentId,
         description:
           "A self-contained prerequisite delegated from the active task.",
       },
@@ -1202,6 +1210,7 @@ describe("PaperclipRunnerToolAuthority", () => {
       arguments: {
         idempotencyKey: "ordinary-dependent",
         title: "Use delegated input",
+        assigneeActorId: agentId,
         blockedByTaskIds: [prerequisiteId],
       },
     });
@@ -1242,6 +1251,7 @@ describe("PaperclipRunnerToolAuthority", () => {
         arguments: {
           idempotencyKey: "ordinary-ready-dependent",
           title: "Start after completed delegated input",
+          assigneeActorId: agentId,
           blockedByTaskIds: [prerequisiteId],
         },
       }),
@@ -1291,6 +1301,7 @@ describe("PaperclipRunnerToolAuthority", () => {
         arguments: {
           idempotencyKey: "ordinary-prerequisite",
           title: "Prepare delegated input",
+          assigneeActorId: agentId,
           description:
             "A self-contained prerequisite delegated from the active task.",
         },
@@ -1306,6 +1317,7 @@ describe("PaperclipRunnerToolAuthority", () => {
         arguments: {
           idempotencyKey: "ordinary-prerequisite",
           title: "Conflicting title for the same caller key",
+          assigneeActorId: agentId,
         },
       }),
     ).rejects.toThrow("paperclip_runner_tool_idempotency_conflict");
@@ -1358,6 +1370,7 @@ describe("PaperclipRunnerToolAuthority", () => {
         arguments: {
           idempotencyKey: "foreign-blocker",
           title: "Invalid foreign blocker",
+          assigneeActorId: agentId,
           blockedByTaskIds: [foreignIssueId],
         },
       }),
@@ -1366,6 +1379,138 @@ describe("PaperclipRunnerToolAuthority", () => {
     expect(
       await db.select().from(issues).where(eq(issues.parentId, issueId)),
     ).toHaveLength(3);
+  });
+
+  it("requires one explicit recipient for new effects and preserves legacy replays", async () => {
+    const testIssueId = randomUUID();
+    const firstRunId = randomUUID();
+    const secondRunId = randomUUID();
+    const otherAgentId = randomUUID();
+    const personId = randomUUID();
+    const wakes: Array<{ agentId: string; options: Record<string, unknown> }> = [];
+    await db.insert(agents).values({
+      id: otherAgentId,
+      companyId,
+      name: "Other teammate",
+      adapterType: "paperclip_runner",
+      adapterConfig: { provider: "codex" },
+      runtimeConfig: {},
+      status: "active",
+    });
+    await db.insert(authUsers).values({ id: personId, name: "Task owner", email: `${personId}@example.test`, createdAt: new Date(), updatedAt: new Date() });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: personId, status: "active", membershipRole: "operator" });
+    await db.insert(issues).values({ id: testIssueId, companyId, title: "Recipient contract source", status: "in_progress", workMode: "standard", assigneeAgentId: agentId });
+    await db.insert(heartbeatRuns).values({ id: firstRunId, companyId, agentId, status: "running", runtimeMode: "native", nativeIssueId: testIssueId, invocationSource: "assignment", triggerDetail: "system", contextSnapshot: { issueId: testIssueId } });
+    await db.update(issues).set({ executionRunId: firstRunId }).where(eq(issues.id, testIssueId));
+    const authority = new PaperclipRunnerToolAuthority(db, {
+      companyId,
+      agentId,
+      issueId: testIssueId,
+      runId: firstRunId,
+      enqueueWakeup: async (wakeAgentId, options) => {
+        wakes.push({ agentId: wakeAgentId, options });
+        return null;
+      },
+    });
+    const key = "correct-after-invalid";
+    const common = { idempotencyKey: key, title: "Explicit recipient child" };
+    const beforeIssues = await db.select().from(issues).where(eq(issues.parentId, testIssueId));
+    const beforeActivity = await db.select().from(activityLog).where(eq(activityLog.companyId, companyId));
+    const invalidAssignees = [
+      {},
+      { assigneeActorId: null },
+      { assigneeUserId: null },
+      { assigneeActorId: null, assigneeUserId: null },
+      { assigneeActorId: "" },
+      { assigneeActorId: "   " },
+      { assigneeUserId: "" },
+      { assigneeUserId: " \t " },
+      { assigneeActorId: agentId, assigneeUserId: personId },
+    ];
+    for (const [index, assignee] of invalidAssignees.entries()) {
+      await expect(authority.execute({
+        tool: "create_task",
+        callId: `invalid-assignee-${index}`,
+        arguments: { ...common, ...assignee },
+      })).rejects.toThrow();
+    }
+    expect(await db.select().from(issues).where(eq(issues.parentId, testIssueId))).toEqual(beforeIssues);
+    expect(await db.select().from(activityLog).where(eq(activityLog.companyId, companyId))).toEqual(beforeActivity);
+    expect(wakes).toHaveLength(0);
+
+    const self = await authority.execute({
+      tool: "create_task",
+      callId: "corrected-assignee",
+      arguments: { ...common, assigneeActorId: agentId },
+    }) as { disposition: string; task: { id: string; assigneeActorId: string; assigneeUserId: string | null } };
+    expect(self).toMatchObject({ disposition: "applied", task: { assigneeActorId: agentId, assigneeUserId: null } });
+    const other = await authority.execute({
+      tool: "create_task",
+      callId: "other-agent-assignee",
+      arguments: { idempotencyKey: "other-agent", title: "Other recipient", assigneeActorId: otherAgentId },
+    }) as { task: { assigneeActorId: string } };
+    expect(other.task.assigneeActorId).toBe(otherAgentId);
+    const person = await authority.execute({
+      tool: "create_task",
+      callId: "person-assignee",
+      arguments: { idempotencyKey: "person-recipient", title: "Person recipient", assigneeUserId: personId },
+    }) as { task: { assigneeActorId: string | null; assigneeUserId: string } };
+    expect(person.task).toMatchObject({ assigneeActorId: null, assigneeUserId: personId });
+
+    const legacyKey = "legacy-cross-run";
+    const legacyTitle = "Prior implicit self assignment";
+    const legacyCreated = await authority.execute({
+      tool: "create_task",
+      callId: "seed-legacy-origin",
+      arguments: { idempotencyKey: legacyKey, title: legacyTitle, assigneeActorId: agentId },
+    }) as { task: { id: string } };
+    const legacyInput = { idempotencyKey: legacyKey, title: legacyTitle };
+    const legacyFingerprint = createHash("sha256").update(JSON.stringify(legacyInput)).digest("hex");
+    await db.update(issues).set({ originFingerprint: legacyFingerprint }).where(eq(issues.id, legacyCreated.task.id));
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, firstRunId));
+    await db.insert(heartbeatRuns).values({ id: secondRunId, companyId, agentId, status: "running", runtimeMode: "native", nativeIssueId: testIssueId, invocationSource: "automation", triggerDetail: "system", contextSnapshot: { issueId: testIssueId } });
+    await db.update(issues).set({ executionRunId: secondRunId }).where(eq(issues.id, testIssueId));
+
+    const legacyReceiptResult = {
+      commandId: `create-task:${legacyCreated.task.id}`,
+      disposition: "applied",
+      stateRevision: 1,
+      entityRefs: [legacyCreated.task.id],
+      scheduledWakeIds: [],
+      task: { id: legacyCreated.task.id, identifier: null, parentId: testIssueId, status: "todo", assigneeActorId: agentId, assigneeUserId: null },
+    };
+    await db.update(heartbeatRuns).set({ resultJson: { semanticToolReceipts: {
+      "legacy-same-run": { operationId: "create_task", input: { idempotencyKey: "legacy-same-run", title: legacyTitle }, result: legacyReceiptResult },
+    } } }).where(eq(heartbeatRuns.id, secondRunId));
+    const retryAuthority = new PaperclipRunnerToolAuthority(db, {
+      companyId,
+      agentId,
+      issueId: testIssueId,
+      runId: secondRunId,
+      enqueueWakeup: async (wakeAgentId, options) => {
+        wakes.push({ agentId: wakeAgentId, options });
+        return null;
+      },
+    });
+    await expect(retryAuthority.execute({
+      tool: "create_task",
+      callId: "same-run-legacy-replay",
+      arguments: { idempotencyKey: "legacy-same-run", title: legacyTitle },
+    })).resolves.toEqual(legacyReceiptResult);
+    await expect(retryAuthority.execute({
+      tool: "create_task",
+      callId: "cross-run-legacy-replay",
+      arguments: legacyInput,
+    })).resolves.toMatchObject({ disposition: "duplicate", task: { id: legacyCreated.task.id, assigneeActorId: agentId } });
+    expect((await db.select().from(activityLog).where(eq(activityLog.entityId, legacyCreated.task.id))).filter(row => row.action === "issue.created")).toHaveLength(1);
+    expect(wakes.filter(wake => wake.options.reason === "issue_assigned")).toHaveLength(3);
+
+    const childIds = (await db.select({ id: issues.id }).from(issues).where(eq(issues.parentId, testIssueId))).map(row => row.id);
+    await db.delete(issues).where(inArray(issues.id, [...childIds, testIssueId]));
+    await db.delete(heartbeatRuns).where(inArray(heartbeatRuns.id, [firstRunId, secondRunId]));
+    await db.delete(companyMemberships).where(and(eq(companyMemberships.companyId, companyId), eq(companyMemberships.principalId, personId)));
+    await db.delete(authUsers).where(eq(authUsers.id, personId));
+    await db.delete(agents).where(eq(agents.id, otherAgentId));
   });
 
   it("rejects mutations after reassignment, run replacement, or terminalization", async () => {
@@ -1483,6 +1628,7 @@ describe("PaperclipRunnerToolAuthority", () => {
     const authority = new PaperclipRunnerToolAuthority(db, { companyId, agentId, issueId, runId });
     const call = { tool: "create_task", callId: "identity-child", arguments: {
       idempotencyKey: "identity-child", title: "Keep the initiating identity",
+      assigneeActorId: agentId,
       responsibleUserId: "forged-user", originIdentityContextId: "forged-context",
     } };
     const first = await authority.execute(call) as { task: { id: string } };
@@ -1494,6 +1640,7 @@ describe("PaperclipRunnerToolAuthority", () => {
       continuationIdentityContextId: origin.id });
     const second = await authority.execute({ ...call, callId: "identity-child-b", arguments: {
       idempotencyKey: "identity-child-b", title: "Use the next instruction identity",
+      assigneeActorId: agentId,
     } }) as { task: { id: string } };
     const [nextChild] = await db.select().from(issues).where(eq(issues.id, second.task.id));
     expect(nextChild.originIdentityContextId).toBe(pending!.id);

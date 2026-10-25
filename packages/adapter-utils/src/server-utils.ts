@@ -2277,10 +2277,11 @@ export function selectPaperclipPromptSections(
     includeExecutionContract?: boolean;
     nativeWakeReaderAvailable?: boolean;
   } = {},
-): { taskContextNote: string; wakePrompt: string } {
+): { taskContextNote: string; wakePrompt: string; taskDelegationGuidance: string } {
   const taskContextNote = selectPaperclipTaskMarkdown(context, options);
   return {
     taskContextNote,
+    taskDelegationGuidance: PAPERCLIP_TASK_DELEGATION_GUIDANCE,
     wakePrompt: renderPaperclipWakePrompt(context?.paperclipWake, {
       resumedSession: options.resumedSession,
       includeExecutionContract: options.includeExecutionContract,
@@ -2290,6 +2291,15 @@ export function selectPaperclipPromptSections(
     }),
   };
 }
+
+/** Shared with legacy adapters so delegation semantics reach actual tool calls. */
+export const PAPERCLIP_TASK_DELEGATION_GUIDANCE = [
+  "Paperclip task delegation contract:",
+  "Every create_task call must include exactly one explicit, nonempty assigneeActorId or assigneeUserId. Include the current agent's explicit ID when creating a task for yourself. Resolve agent IDs with list_agents and person IDs with list_people; for a requested agent, use the exact returned ID or a unique exact name or explicitly requested role/title match.",
+  "Keep the recipient the user requested if a project, dependency, or other tool call fails. Fix that input and retry the task creation with the intended assignee; do not silently assign the task to yourself. If the recipient is absent or ambiguous, ask before creating the task.",
+  "If a child needs this task's result, include this task's exact ID in the child's blockedByTaskIds. If this parent needs a child's result before finishing, add the child's exact ID to the parent's blockers with set_dependencies and keep the parent open until it resolves; never make the child depend on its waiting parent. Use the configured review stage or another actor for independent review; a self-assigned child is not an independent review.",
+  "After creation, inspect the receipt and verify its task ID and persisted assignee match the intended recipient before reporting a handoff. An error or incomplete receipt does not confirm that a task was created.",
+].join("\n");
 
 // Runtime-only connector skills are supplied by the server after assignment resolution.
 // Shared-home adapters consume them here on fresh and resumed runs without installing
