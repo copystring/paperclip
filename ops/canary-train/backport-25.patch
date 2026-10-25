@@ -6463,7 +6463,7 @@ index c2516d302..406dde810 100644
              // Offer the input to the active external agent, but keep a durable queued wake
              // until it reads the comment. A finish racing the event tick must
 diff --git a/server/src/services/heartbeat/retries.ts b/server/src/services/heartbeat/retries.ts
-index 329a4da75..332a9410c 100644
+index 329a4da75..9ecdf8d96 100644
 --- a/server/src/services/heartbeat/retries.ts
 +++ b/server/src/services/heartbeat/retries.ts
 @@ -1,4 +1,5 @@
@@ -6472,15 +6472,7 @@ index 329a4da75..332a9410c 100644
  import { infrastructureRetryDelayMs } from "../system-recovery-state.js";
  import {
    WORKSPACE_VALIDATION_FAILURE_CODE,
-@@ -406,12 +407,18 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
-       delayMs?: number;
-     },
-   ) {
-+    if (await isAutomaticManagerTriageRun(db, run)) return { outcome: "not_scheduled" as const,
-+      reason: "The separately reserved manager invocation is exhausted.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
-     if (await hasCaseHandoffForRun(run)) return { outcome: "not_scheduled" as const,
-       reason: "The durable case handoff owns successor work.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
-     if (["openai_dot", "muse"].includes(String(parseObject(agent.adapterConfig).provider))
+@@ -412,6 +413,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
          || ["openai_dot", "muse"].includes(String(parseObject(parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput).provider).kind))) {
        return { outcome: "not_scheduled" as const, reason: "Dot external execution must be reconciled before a new assignment; Paperclip cannot confirm its external stop.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
      }
@@ -6491,6 +6483,17 @@ index 329a4da75..332a9410c 100644
      if (run.errorCode === "provider_tool_definition_invalid") {
        return { outcome: "not_scheduled" as const,
          reason: "Repair the invalid tool definitions before starting a new attempt.",
+@@ -511,6 +516,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
+       };
+     }
+ 
++    // Existing handoffs and an exhausted retry allowance settle without DB
++    // admission. Only a candidate successor needs the separate triage guard.
++    if (await isAutomaticManagerTriageRun(db, run)) return { outcome: "not_scheduled" as const,
++      reason: "The separately reserved manager invocation is exhausted.", issueId };
+     if (await legacyExecutionNeedsReconciliationWithEvidence(db, run)) {
+       return {
+         outcome: "not_scheduled" as const,
 diff --git a/server/src/services/heartbeat/run-lifecycle.ts b/server/src/services/heartbeat/run-lifecycle.ts
 index 5f299e855..323d82fcf 100644
 --- a/server/src/services/heartbeat/run-lifecycle.ts
@@ -7907,28 +7910,67 @@ index dc319eaed..f4a8fb012 100644
    if (episode.attempt >= episode.maxAttempts) return { kind: "exhausted", attempt: episode.attempt, maxAttempts: episode.maxAttempts };
    const nextAttempt = episode.attempt + 1;
    return {
+diff --git a/server/src/services/recovery/manager-triage-budget.test.ts b/server/src/services/recovery/manager-triage-budget.test.ts
+new file mode 100644
+index 000000000..3f2bd854e
+--- /dev/null
++++ b/server/src/services/recovery/manager-triage-budget.test.ts
+@@ -0,0 +1,26 @@
++import { describe, expect, it, vi } from "vitest";
++import type { Db, heartbeatRuns } from "@paperclipai/db";
++import { hasExplicitUserWake, isAutomaticManagerTriageRun, managerTriageWakeAllowed } from "./manager-triage-budget.js";
++
++describe("manager triage admission scope", () => {
++  const run = (context: Record<string, unknown> = {}) => ({ issueId: null, contextSnapshot: context }) as typeof heartbeatRuns.$inferSelect;
++  function guardedDatabase() {
++    const access = vi.fn(() => { throw new Error("Unbound history must not query issue UUIDs"); });
++    return { db: new Proxy({}, { get: access }) as Db, access };
++  }
++
++  it.each([{}, { issueId: "AIW-23" }, { issueId: "not-a-uuid" }])("does not promote an unbound legacy label to an issue query: %j", async context => {
++    const f = guardedDatabase();
++    expect(await isAutomaticManagerTriageRun(f.db, run(context))).toBe(false);
++    expect(await hasExplicitUserWake(f.db, run(context))).toBe(false);
++    expect(f.access).not.toHaveBeenCalled();
++  });
++
++  it("fails closed for an unbound triage marker and invalid retry provenance", async () => {
++    const f = guardedDatabase();
++    expect(await isAutomaticManagerTriageRun(f.db, run({ managerTriageActionId: "marker" }))).toBe(true);
++    expect(await managerTriageWakeAllowed(f.db, { companyId: "company", issueId: "issue", agentId: "agent",
++      context: { retryOfRunId: "old-label" } })).toBe(false);
++    expect(f.access).not.toHaveBeenCalled();
++  });
++});
 diff --git a/server/src/services/recovery/manager-triage-budget.ts b/server/src/services/recovery/manager-triage-budget.ts
 new file mode 100644
-index 000000000..aa94212f1
+index 000000000..cf070cb09
 --- /dev/null
 +++ b/server/src/services/recovery/manager-triage-budget.ts
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,64 @@
 +import { and, eq, sql } from "drizzle-orm";
 +import { agentWakeupRequests, heartbeatRuns, issues, type Db } from "@paperclipai/db";
++import { isUuidLike } from "@paperclipai/shared";
 +
 +export const MANAGER_TRIAGE_ORIGIN = "recovery_manager_triage";
 +type Run = typeof heartbeatRuns.$inferSelect;
 +const record = (value: unknown): Record<string, unknown> =>
 +  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 +
++function issueBinding(run: Run) {
++  const candidate = run.issueId ?? record(run.contextSnapshot).issueId;
++  return typeof candidate === "string" && isUuidLike(candidate) ? candidate : null;
++}
++
 +/** Only durable, same-task user provenance grants a new intent after auto triage. */
 +export async function hasExplicitUserWake(db: Db, run: Run) {
-+  const issueId = record(run.contextSnapshot).issueId ?? run.issueId;
++  const issueId = issueBinding(run);
++  if (!issueId) return false;
 +  let current: Run | undefined = run;
 +  const seen = new Set<string>();
 +  for (let depth = 0; current && depth < 32; depth++) {
 +    if (seen.has(current.id) || current.companyId !== run.companyId || current.agentId !== run.agentId ||
-+        (record(current.contextSnapshot).issueId ?? current.issueId) !== issueId) return false;
++        issueBinding(current) !== issueId) return false;
 +    seen.add(current.id);
 +    if (current.wakeupRequestId) {
 +      const [wake] = await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
@@ -7948,8 +7990,8 @@ index 000000000..aa94212f1
 +
 +export async function isAutomaticManagerTriageRun(db: Db, run: Run) {
 +  if (typeof record(run.contextSnapshot).managerTriageActionId !== "string") {
-+    const issueId = record(run.contextSnapshot).issueId ?? run.issueId;
-+    if (typeof issueId !== "string") return false;
++    const issueId = issueBinding(run);
++    if (!issueId) return false;
 +    const [issue] = await db.select({ originKind: issues.originKind }).from(issues)
 +      .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId))).limit(1);
 +    if (issue?.originKind !== MANAGER_TRIAGE_ORIGIN) return false;
@@ -7963,10 +8005,10 @@ index 000000000..aa94212f1
 +}) {
 +  if (input.actorType === "user" && input.actorId) return true;
 +  const priorId = input.context.retryOfRunId;
-+  if (typeof priorId !== "string") return false;
++  if (typeof priorId !== "string" || !isUuidLike(priorId)) return false;
 +  const [prior] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, priorId),
 +    eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.agentId, input.agentId),
-+    sql`coalesce(${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.issueId}::text) = ${input.issueId}`,
++    sql`coalesce(${heartbeatRuns.issueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId') = ${input.issueId}`,
 +  )).limit(1);
 +  return Boolean(prior && await hasExplicitUserWake(db, prior));
 +}
