@@ -1,3 +1,90 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 2fe511d0b..bc29b36af 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -7,15 +7,32 @@ Guidance for human and AI contributors working in this repository.
+ Paperclip is a control plane for AI-agent companies.
+ The current implementation target is V1 and is defined in `doc/SPEC-implementation.md`.
+ 
+-## 2. Read This First
+-
+-Before making changes, read in this order:
+-
+-1. `doc/GOAL.md`
+-2. `doc/PRODUCT.md`
+-3. `doc/SPEC-implementation.md`
+-4. `doc/DEVELOPING.md`
+-5. `doc/DATABASE.md`
++## 2. Load Context for the Current Task
++
++Read this file and `doc/GOAL.md` first. Then use the references below for the
++current change; they are not a requirement to load every document in full
++before every heartbeat:
++
++- `doc/PRODUCT.md`: the affected product behavior and user outcome.
++- `doc/SPEC-implementation.md`: the affected contracts and state transitions.
++- `doc/DEVELOPING.md`: the relevant development, execution and verification path.
++- `doc/DATABASE.md`: the relevant persistence, query, locking or migration rules
++  when the change touches those concerns.
++
++Use headings or targeted searches to locate the relevant sections, then read
++those sections completely, including any directly applicable referenced rules.
++Read and follow applicable nested `AGENTS.md` files before editing their scope.
++Expand the scope for cross-cutting changes, architecture, security,
++authorization or migration risks, or when the affected contract is unclear.
++The scoped repository rules below remain mandatory.
++
++Reuse context already read for this task when its source and relevant content
++have not changed. A new heartbeat does not require restarting a documentation
++survey. For truncated output, request a smaller range of the missing relevant
++section; do not count a hash or requested range as proof that its content was
++read. Once the applicable context is complete, continue the task rather than
++surveying unrelated documentation. This changes context loading only; it does
++not relax authority, review, ownership, budget or verification requirements.
+ 
+ `doc/SPEC.md` is long-horizon product context.
+ `doc/SPEC-implementation.md` is the concrete V1 build contract.
+diff --git a/doc/execution-semantics.md b/doc/execution-semantics.md
+index ea1531131..830457a00 100644
+--- a/doc/execution-semantics.md
++++ b/doc/execution-semantics.md
+@@ -777,6 +777,36 @@ Use an issue-backed recovery action only when the recovery is genuinely independ
+ 
+ A comment or system notice can be evidence for a recovery action, but it is not a recovery action by itself. Comment-only recovery is not a healthy liveness path because it does not define a typed owner, wake or monitor policy, retry bound, timeout, escalation path, or resolution outcome.
+ 
++#### Bounded manager triage after owner disposition exhaustion
++
++An automatically escalated, exhausted owner-disposition episode may reserve one
++independent technical triage task for the source owner's current `reportsTo`
++manager. The source task and its recovery action retain their ownership,
++fingerprint and spent attempt ledger. The triage task, recovery-action link,
++one-invocation manager budget, wake and scheduled run are persisted atomically;
++competing workers and restart cannot allocate another slot for that action.
++
++This lane applies only to a successful, settled legacy source with no newer
++execution or durable wait. It preserves pause/Stop, unknown outcomes, human
++ownership, review and approval gates, and company/project/manager budgets.
++Admission revalidates the source version, action, manager and gates immediately
++before dispatch. Manager tasks cannot recursively generate manager triage or
++consume an extra automatic invocation through ordinary owner repair.
++
++The manager diagnoses or coordinates real independent repair work using the
++existing task and dependency paths. A triage report is not permission to replay
++unknown effects, reset the source budget or take over the source task. The
++source recovery remains visible while the manager task is open; existing
++reconciliation can fold it when an actual new execution or dependency path is
++established. Failed or inconclusive triage does not silently replenish its
++one-invocation allowance. A terminal manager run without a completed deliverable
++or durable waiting path leaves one actionable board-owned blocker with its exact
++run, failure and decision options. Repeated sweeps do not duplicate that notice.
++All automatic queue and retry producers honor the actual task origin even when
++their context omits the triage marker. A new authenticated human instruction is
++a separate intent; only its durable, same-company/task/agent wake and retry
++provenance can use the ordinary continuation path.
++
+ #### Recovery action freshness
+ 
+ Source-scoped recovery actions are snapshots of the source issue's liveness state at the time the action was opened. They must be revalidated after newer durable source activity, including source issue status changes, assignee changes, blocker changes, execution policy or monitor changes, document or work-product updates that define a valid waiting path, and structured resume or disposition updates.
 diff --git a/doc/idle-sleep-safety.md b/doc/idle-sleep-safety.md
 index 8153e2125..18e0b404c 100644
 --- a/doc/idle-sleep-safety.md
@@ -3894,6 +3981,19 @@ index 842159d91..836b3af07 100644
    it("wakes the assignee on comment-only issue updates", async () => {
      const existing = makeIssue({
        assigneeAgentId: ASSIGNEE_AGENT_ID,
+diff --git a/server/src/__tests__/legacy-continuation-authority.test.ts b/server/src/__tests__/legacy-continuation-authority.test.ts
+index 9d8bbd35d..5138b724a 100644
+--- a/server/src/__tests__/legacy-continuation-authority.test.ts
++++ b/server/src/__tests__/legacy-continuation-authority.test.ts
+@@ -9,7 +9,7 @@ import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.j
+ describe("legacy continuation persisted authority", () => {
+   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
+   let db: ReturnType<typeof createDb>;
+-  beforeAll(async () => { temporary = await startEmbeddedPostgresTestDatabase("legacy-authority-"); db = createDb(temporary.connectionString); }, 20_000);
++  beforeAll(async () => { temporary = await startEmbeddedPostgresTestDatabase("legacy-authority-"); db = createDb(temporary.connectionString); }, 120_000);
+   afterAll(async () => { await db?.$client.end({ timeout: 0 }); await temporary?.cleanup(); });
+   async function fixture(context: Record<string, unknown> = {}, continuationAttempt = 0) {
+     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), runId = randomUUID();
 diff --git a/server/src/__tests__/project-tools-pagination.test.ts b/server/src/__tests__/project-tools-pagination.test.ts
 index b676221a6..f30440f6e 100644
 --- a/server/src/__tests__/project-tools-pagination.test.ts
@@ -3939,6 +4039,276 @@ index b676221a6..f30440f6e 100644
    it("requests bounded summaries and normalizes continuation cursors", async () => {
      const page = { projects: [{ id: "abcdefab-0000-4000-8000-000000000001", name: "Project", status: "in_progress", description: "Summary", descriptionTruncated: true }], nextCursor: "abcdefab-0000-4000-8000-000000000001" };
      const fetch = vi.fn(async (_url: string, _options: RequestInit) => ({ ok: true, json: async () => page }));
+diff --git a/server/src/__tests__/recovery-manager-triage.test.ts b/server/src/__tests__/recovery-manager-triage.test.ts
+new file mode 100644
+index 000000000..f669ceac0
+--- /dev/null
++++ b/server/src/__tests__/recovery-manager-triage.test.ts
+@@ -0,0 +1,264 @@
++import { randomUUID } from "node:crypto";
++import { and, eq, sql } from "drizzle-orm";
++import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
++import { agents, agentWakeupRequests, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
++import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
++import { MANAGER_TRIAGE_ORIGIN, recoveryManagerTriageService } from "../services/recovery/manager-triage.js";
++import { heartbeatService } from "../services/heartbeat.js";
++import { issueTreeControlService } from "../services/issue-tree-control.js";
++import { recoveryService } from "../services/recovery/service.js";
++import { hasExplicitUserWake, isAutomaticManagerTriageRun, managerTriageWakeAllowed } from "../services/recovery/manager-triage-budget.js";
++
++describe("durable bounded recovery manager triage", () => {
++  let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
++  let db: ReturnType<typeof createDb>;
++  beforeAll(async () => {
++    temporary = await startEmbeddedPostgresTestDatabase("paperclip-manager-triage-");
++    db = createDb(temporary.connectionString);
++    const now = new Date();
++    await db.insert(authUsers).values({ id: "triage-owner", name: "Triage Owner", email: "triage-owner@example.test",
++      emailVerified: true, createdAt: now, updatedAt: now });
++  }, 120_000);
++  afterAll(async () => { await temporary?.cleanup(); });
++
++  async function fixture() {
++    const companyId = randomUUID(), managerId = randomUUID(), ownerId = randomUUID();
++    const issueId = randomUUID(), runId = randomUUID(), actionId = randomUUID();
++    await db.insert(companies).values({ id: companyId, name: "Triage contract", issuePrefix: `T${companyId.slice(0, 6)}`, defaultResponsibleUserId: "triage-owner" });
++    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "triage-owner", membershipRole: "owner", status: "active" });
++    await db.insert(agents).values({ id: managerId, companyId, name: "Manager", role: "ceo", status: "idle", adapterType: "codex_local", runtimeConfig: { heartbeat: { wakeOnDemand: true } } });
++    await db.insert(agents).values({ id: ownerId, companyId, name: "Owner", role: "engineer", reportsTo: managerId, status: "idle", adapterType: "codex_local" });
++    await db.insert(issues).values({ id: issueId, companyId, title: "Implement export", status: "blocked", assigneeAgentId: ownerId, responsibleUserId: "triage-owner" });
++    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: ownerId, issueId,
++      invocationSource: "automation", status: "succeeded", runtimeMode: "legacy", responsibleUserId: "triage-owner", finishedAt: new Date(), contextSnapshot: { issueId } });
++    await db.insert(issueRecoveryActions).values({ id: actionId, companyId, sourceIssueId: issueId,
++      kind: "deliberate_wait_without_target", cause: "deliberate_wait_without_target", ownerType: "board",
++      fingerprint: `episode:${runId}`, attemptCount: 2, maxAttempts: null,
++      evidence: { latestRunId: runId, terminalReason: "unchanged_source_state_exhausted", sourceAttemptCount: 2, sourceMaxAttempts: 2 },
++      wakePolicy: { type: "board_escalation" }, nextAction: "Inspect the disposition." });
++    const service = () => recoveryManagerTriageService(db);
++    const action = () => db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, actionId)).then(r => r[0]!);
++    const source = () => db.select().from(issues).where(eq(issues.id, issueId)).then(r => r[0]!);
++    return { companyId, managerId, ownerId, issueId, runId, actionId, service, action, source };
++  }
++
++  it("atomically reserves exactly one separate manager task and invocation across competing workers and restart", async () => {
++    const f = await fixture(); const before = await f.action();
++    const states = await Promise.all([f.service().reserve(f.actionId), f.service().reserve(f.actionId)]);
++    expect(states[0]).toBeTruthy(); expect(states[1]).toEqual(states[0]);
++    const again = await f.service().reserve(f.actionId); expect(again).toEqual(states[0]);
++    expect(await db.select().from(issues).where(and(eq(issues.companyId, f.companyId), eq(issues.originKind, MANAGER_TRIAGE_ORIGIN)))).toHaveLength(1);
++    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId));
++    expect(wakes).toHaveLength(1); expect(wakes[0].agentId).toBe(f.managerId);
++    const after = await f.action();
++    expect(after).toMatchObject({ ownerType: "board", attemptCount: before.attemptCount, maxAttempts: before.maxAttempts,
++      fingerprint: before.fingerprint, evidence: { sourceAttemptCount: 2, sourceMaxAttempts: 2, managerTriage: { attemptCount: 1, maxAttempts: 1, managerId: f.managerId } } });
++    expect(await f.source()).toMatchObject({ status: "blocked", assigneeAgentId: f.ownerId });
++    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, again!.runId));
++    expect(run).toMatchObject({ status: "scheduled_retry", agentId: f.managerId, issueId: again!.issueId });
++    expect(await f.service().dispatchBlock(run)).toBeNull();
++  });
++
++  it.each(["paused", "terminated", "missing", "foreign"])("does not reserve for a %s manager", async kind => {
++    const f = await fixture();
++    if (kind === "missing") await db.update(agents).set({ reportsTo: null }).where(eq(agents.id, f.ownerId));
++    else if (kind === "foreign") {
++      const other = await fixture(); await db.update(agents).set({ reportsTo: other.managerId }).where(eq(agents.id, f.ownerId));
++    } else await db.update(agents).set({ status: kind }).where(eq(agents.id, f.managerId));
++    expect(await f.service().reserve(f.actionId)).toBeNull();
++    expect((await f.action()).recoveryIssueId).toBeNull();
++  });
++
++  it.each(["unknown", "user", "approval", "human_wait", "chain", "paused_company", "unspent"])("preserves the %s boundary", async kind => {
++    const f = await fixture();
++    if (kind === "unknown") await db.update(heartbeatRuns).set({ status: "interrupted" }).where(eq(heartbeatRuns.id, f.runId));
++    if (kind === "user") await db.update(issues).set({ assigneeAgentId: null, assigneeUserId: "human" }).where(eq(issues.id, f.issueId));
++    if (kind === "approval") await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: f.issueId,
++      kind: "request_confirmation", status: "pending", payload: { version: 1, prompt: "Allow publication?" } });
++    if (kind === "human_wait") await db.update(issues).set({ unblockDescriptor: { owner: "board", action: "Human decision" } }).where(eq(issues.id, f.issueId));
++    if (kind === "chain") await db.update(issues).set({ originKind: MANAGER_TRIAGE_ORIGIN }).where(eq(issues.id, f.issueId));
++    if (kind === "paused_company") await db.update(companies).set({ status: "paused" }).where(eq(companies.id, f.companyId));
++    if (kind === "unspent") await db.update(issueRecoveryActions).set({ attemptCount: 1 }).where(eq(issueRecoveryActions.id, f.actionId));
++    expect(await f.service().reserve(f.actionId)).toBeNull();
++  });
++
++  it("waits for actual predecessor ownership release before creating a manager turn", async () => {
++    const f = await fixture();
++    await db.update(heartbeatRuns).set({ controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(heartbeatRuns.id, f.runId));
++    expect(await f.service().reserve(f.actionId)).toBeNull();
++    await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: new Date(0) }).where(eq(heartbeatRuns.id, f.runId));
++    expect(await f.service().reserve(f.actionId)).toBeTruthy();
++  });
++
++  it("fails closed after a reserved source changes and never grants a second manager slot", async () => {
++    const f = await fixture(), state = await f.service().reserve(f.actionId); expect(state).toBeTruthy();
++    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, state!.runId));
++    await db.update(issues).set({ status: "done", statusVersion: 1 }).where(eq(issues.id, f.issueId));
++    expect(await f.service().dispatchBlock(run)).toBe("manager_triage_source_changed_or_held");
++    const [duplicate] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.managerId,
++      issueId: state!.issueId, invocationSource: "automation", status: "queued", contextSnapshot: { issueId: state!.issueId } }).returning();
++    expect(await f.service().dispatchBlock(duplicate)).toBe("manager_triage_slot_not_reserved");
++  });
++
++  it.each(["hold", "owner_paused", "manager_budget"])("does not reserve across %s", async gate => {
++    const f = await fixture();
++    if (gate === "hold") await issueTreeControlService(db).createHold(f.companyId, f.issueId,
++      { mode: "pause", actor: { actorType: "user", actorId: "triage-owner", userId: "triage-owner" } });
++    if (gate === "owner_paused") await db.update(agents).set({ status: "paused" }).where(eq(agents.id, f.ownerId));
++    if (gate === "manager_budget") await db.update(agents).set({ status: "paused", pauseReason: "budget" }).where(eq(agents.id, f.managerId));
++    expect(await f.service().reserve(f.actionId)).toBeNull();
++    expect((await f.action()).attemptCount).toBe(2);
++  });
++
++  it.each(["hold", "stop", "approval", "manager_budget"])("revalidates %s introduced after reservation", async gate => {
++    const f = await fixture(), state = await f.service().reserve(f.actionId); expect(state).toBeTruthy();
++    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, state!.runId));
++    if (gate === "hold") await issueTreeControlService(db).createHold(f.companyId, f.issueId,
++      { mode: "pause", actor: { actorType: "user", actorId: "triage-owner", userId: "triage-owner" } });
++    if (gate === "stop") await db.update(heartbeatRuns).set({ status: "cancelled", errorCode: "operator_cancelled" }).where(eq(heartbeatRuns.id, f.runId));
++    if (gate === "approval") await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: f.issueId,
++      kind: "request_confirmation", status: "pending", payload: { version: 1, prompt: "Allow next action?" } });
++    if (gate === "manager_budget") await db.update(agents).set({ status: "paused", pauseReason: "budget" }).where(eq(agents.id, f.managerId));
++    expect(await f.service().dispatchBlock(run)).not.toBeNull();
++    expect((await f.action()).attemptCount).toBe(2);
++  });
++
++  it("starts the manager through the real scheduled dispatch and local process adapter after predecessor end", async () => {
++    const f = await fixture(), marker = `manager-executed-${randomUUID()}`;
++    await db.update(agents).set({ adapterType: "process", adapterConfig: { command: process.execPath,
++      args: ["-e", `console.log(JSON.stringify({marker:${JSON.stringify(marker)},run:process.env.PAPERCLIP_RUN_ID}))`],
++      cwd: process.cwd(), timeoutSec: 20 } }).where(eq(agents.id, f.managerId));
++    const state = await f.service().reserve(f.actionId); expect(state).toBeTruthy();
++    const heartbeat = heartbeatService(db);
++    await heartbeat.promoteDueScheduledRetries();
++    await heartbeat.resumeQueuedRunsForAgent(f.companyId, f.managerId);
++    await vi.waitFor(async () => {
++      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, state!.runId));
++      expect(run.status, run.error ?? undefined).toBe("succeeded");
++      expect(run.stdoutExcerpt).toContain(marker);
++      expect(run.stdoutExcerpt).toContain(state!.runId);
++      const [manager] = await db.select().from(agents).where(eq(agents.id, f.managerId));
++      expect(manager.status).toBe("idle");
++    }, { timeout: 25_000, interval: 100 });
++    await heartbeat.drainActiveRunExecutions();
++    expect((await f.action()).attemptCount).toBe(2);
++  }, 35_000);
++
++  it("does not replenish a failed manager invocation through repeated sweeps or provider retry", async () => {
++    const f = await fixture(), state = await f.service().reserve(f.actionId); expect(state).toBeTruthy();
++    await db.update(heartbeatRuns).set({ status: "failed", finishedAt: new Date(), errorCode: "adapter_failed" }).where(eq(heartbeatRuns.id, state!.runId));
++    await db.update(agentWakeupRequests).set({ status: "failed", finishedAt: new Date() }).where(eq(agentWakeupRequests.runId, state!.runId));
++    await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, state!.issueId));
++    const enqueue = vi.fn(async () => null);
++    for (let i = 0; i < 3; i++) await recoveryService(db, { enqueueWakeup: enqueue }).reconcileStrandedAssignedIssues();
++    expect((await heartbeatService(db).scheduleBoundedRetry(state!.runId))?.outcome).toBe("not_scheduled");
++    expect(enqueue).not.toHaveBeenCalled();
++    expect(await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, f.companyId), eq(heartbeatRuns.agentId, f.managerId)))).toHaveLength(1);
++    expect((await f.action()).attemptCount).toBe(2);
++  });
++
++  it("rejects automatic queue producers even when they omit the manager marker", async () => {
++    const f = await fixture(), state = await f.service().reserve(f.actionId);
++    const heartbeat = heartbeatService(db);
++    expect(await heartbeat.wakeup(f.managerId, { source: "automation", triggerDetail: "system",
++      reason: "issue_missing_comment_retry", requestedByActorType: "system",
++      contextSnapshot: { issueId: state!.issueId }, payload: { issueId: state!.issueId } })).toBeNull();
++    await heartbeat.drainActiveRunExecutions();
++    expect(await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, f.companyId), eq(heartbeatRuns.agentId, f.managerId)))).toHaveLength(1);
++    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId))).toHaveLength(1);
++  });
++
++  it("accepts a durable new human intent and its same-task retry, but rejects forged cross-task provenance", async () => {
++    const f = await fixture(), state = await f.service().reserve(f.actionId);
++    const [wake] = await db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.managerId,
++      source: "on_demand", status: "consumed", requestedByActorType: "user", requestedByActorId: "triage-owner",
++      payload: { issueId: state!.issueId } }).returning();
++    const [humanRun] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.managerId,
++      issueId: state!.issueId, invocationSource: "on_demand", status: "failed", wakeupRequestId: wake.id,
++      contextSnapshot: { issueId: state!.issueId } }).returning();
++    await db.update(agentWakeupRequests).set({ runId: humanRun.id }).where(eq(agentWakeupRequests.id, wake.id));
++    const [retry] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.managerId,
++      issueId: state!.issueId, invocationSource: "automation", status: "queued", retryOfRunId: humanRun.id,
++      contextSnapshot: { issueId: state!.issueId } }).returning();
++    expect(await hasExplicitUserWake(db, retry)).toBe(true);
++    expect(await isAutomaticManagerTriageRun(db, retry)).toBe(false);
++    expect(await f.service().dispatchBlock(retry)).toBeNull();
++    const input = { companyId: f.companyId, issueId: state!.issueId, agentId: f.managerId,
++      context: { retryOfRunId: humanRun.id } };
++    expect(await managerTriageWakeAllowed(db, input)).toBe(true);
++    expect(await managerTriageWakeAllowed(db, { ...input, issueId: f.issueId })).toBe(false);
++    const [forged] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.managerId,
++      issueId: f.issueId, invocationSource: "automation", status: "queued", retryOfRunId: humanRun.id,
++      contextSnapshot: { issueId: f.issueId } }).returning();
++    expect(await hasExplicitUserWake(db, forged)).toBe(false);
++  });
++
++  it("settles an exhausted manager once with a concrete visible decision and unchanged source allowance", async () => {
++    const f = await fixture(), state = await f.service().reserve(f.actionId);
++    await db.update(heartbeatRuns).set({ status: "failed", finishedAt: new Date(), errorCode: "adapter_failed" }).where(eq(heartbeatRuns.id, state!.runId));
++    await db.update(agentWakeupRequests).set({ status: "failed", finishedAt: new Date() }).where(eq(agentWakeupRequests.runId, state!.runId));
++    expect(await f.service().settle(f.actionId)).toBe(true);
++    expect(await f.service().settle(f.actionId)).toBe(false);
++    const [child] = await db.select().from(issues).where(eq(issues.id, state!.issueId));
++    expect(child.status).toBe("blocked");
++    expect(child.unblockDescriptor).toMatchObject({ owner: "board" });
++    expect(child.unblockDescriptor?.action).toContain(state!.runId);
++    expect(child.unblockDescriptor?.action).toContain("cancelled?");
++    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, state!.issueId))).toHaveLength(1);
++    expect(await f.action()).toMatchObject({ attemptCount: 2, evidence: { sourceAttemptCount: 2,
++      sourceMaxAttempts: 2, managerTriage: { phase: "exhausted", attemptCount: 1, maxAttempts: 1 } } });
++    expect(await f.source()).toMatchObject({ status: "blocked", assigneeAgentId: f.ownerId });
++  });
++
++  it("keeps a real human wait after the manager run intact", async () => {
++    const f = await fixture(), state = await f.service().reserve(f.actionId);
++    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, state!.runId));
++    await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: state!.issueId,
++      kind: "request_confirmation", status: "pending", payload: { version: 1, prompt: "Authorize the concrete patch?" } });
++    expect(await f.service().settle(f.actionId)).toBe(false);
++    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, state!.issueId))).toHaveLength(0);
++  });
++
++  it("fences a source change between preliminary checks and the final adapter handoff", async () => {
++    const f = await fixture(), marker = `must-not-execute-${randomUUID()}`;
++    await db.update(agents).set({ adapterType: "process", adapterConfig: { command: process.execPath,
++      args: ["-e", `console.log(${JSON.stringify(marker)})`], cwd: process.cwd(), timeoutSec: 20 } }).where(eq(agents.id, f.managerId));
++    const state = await f.service().reserve(f.actionId); expect(state).toBeTruthy();
++    let raced = false;
++    const heartbeat = heartbeatService(db, { afterResolvedInteractionContinuationDispatchCheck: async ({ runId }) => {
++      if (runId !== state!.runId || raced) return;
++      raced = true;
++      await db.update(issues).set({ status: "done", statusVersion: 1 }).where(eq(issues.id, f.issueId));
++    } });
++    await heartbeat.promoteDueScheduledRetries();
++    await heartbeat.resumeQueuedRunsForAgent(f.companyId, f.managerId);
++    await heartbeat.drainActiveRunExecutions();
++    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, state!.runId));
++    expect(raced).toBe(true);
++    expect(run.status).not.toBe("succeeded");
++    expect(run.stdoutExcerpt ?? "").not.toContain(marker);
++    const attempts = await db.select({ id: heartbeatRuns.id, status: heartbeatRuns.status,
++      retryOfRunId: heartbeatRuns.retryOfRunId, contextSnapshot: heartbeatRuns.contextSnapshot,
++      scheduledRetryReason: heartbeatRuns.scheduledRetryReason }).from(heartbeatRuns).where(and(
++        eq(heartbeatRuns.companyId, f.companyId), eq(heartbeatRuns.issueId, state!.issueId)));
++    const [actualChild] = await db.select({ originKind: issues.originKind }).from(issues).where(eq(issues.id, state!.issueId));
++    expect(actualChild.originKind).toBe(MANAGER_TRIAGE_ORIGIN);
++    expect(attempts, JSON.stringify(attempts.map(a => ({ ...a, contextSnapshot: {
++      source: a.contextSnapshot?.source, wakeReason: a.contextSnapshot?.wakeReason,
++      managerTriageActionId: a.contextSnapshot?.managerTriageActionId } })))).toHaveLength(1);
++    expect((await f.action()).attemptCount).toBe(2);
++  }, 35_000);
++
++  it("rolls back the task, wake and budget link if durable run insertion fails", async () => {
++    const f = await fixture(), constraint = `triage_fault_${f.companyId.replaceAll("-", "")}`;
++    await db.execute(sql`alter table heartbeat_runs add constraint ${sql.identifier(constraint)}
++      check (company_id <> ${sql.raw(`'${f.companyId}'::uuid`)} or scheduled_retry_reason is distinct from 'recovery_manager_triage')`);
++    try { await expect(f.service().reserve(f.actionId)).rejects.toThrow(); }
++    finally { await db.execute(sql`alter table heartbeat_runs drop constraint ${sql.identifier(constraint)}`); }
++    expect((await f.action()).recoveryIssueId).toBeNull();
++    expect((await f.action()).attemptCount).toBe(2);
++    expect(await db.select().from(issues).where(and(eq(issues.companyId, f.companyId), eq(issues.originKind, MANAGER_TRIAGE_ORIGIN)))).toHaveLength(0);
++    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId))).toHaveLength(0);
++    expect(await f.service().reserve(f.actionId)).toBeTruthy();
++  });
++});
 diff --git a/server/src/__tests__/restart-readiness-route.integration.test.ts b/server/src/__tests__/restart-readiness-route.integration.test.ts
 new file mode 100644
 index 000000000..b450235c8
@@ -4314,15 +4684,16 @@ index ef5da7d36..dde7a3598 100644
      heartbeatSchedulerInterval = setInterval(() => {
        if (!isWarmStandby() && !isIdleTaskDrainActive()) callback();
 diff --git a/server/src/modules/run-dispatch/adapters/postgres.ts b/server/src/modules/run-dispatch/adapters/postgres.ts
-index e45cd770b..fc8b2c76b 100644
+index e45cd770b..37e8320e2 100644
 --- a/server/src/modules/run-dispatch/adapters/postgres.ts
 +++ b/server/src/modules/run-dispatch/adapters/postgres.ts
-@@ -1,3 +1,4 @@
+@@ -1,3 +1,5 @@
 +import { makeNonDispatchReceipt } from "../../../services/non-dispatch-receipt.js";
++import { recoveryManagerTriageService } from "../../../services/recovery/manager-triage.js";
  import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
  import { getExecutionBlocker } from "../../../services/execution-blocker.js";
  import { validateReconstructedWorkspaceDispatch } from "../../../services/native-runtime/native-workspace-reconstruction.js";
-@@ -103,6 +104,7 @@ type LoadStalenessFactsInput = {
+@@ -103,6 +105,7 @@ type LoadStalenessFactsInput = {
  type CancelSuppressedRetryInput = {
    runId: string;
    companyId: string;
@@ -4330,7 +4701,23 @@ index e45cd770b..fc8b2c76b 100644
    now: Date;
    reason: string;
    errorCode: string;
-@@ -705,6 +707,17 @@ export function createPostgresRunDispatchAdapter(
+@@ -222,9 +225,13 @@ export function createPostgresRunDispatchAdapter(
+         : readNonEmptyString(parseObject(hint.contextSnapshot).issueId);
+ 
+       const locked = async (typedTx: Db, publications: ActivityPublication[]) => {
+-        // Recovery always takes coordinator before issue/run. Only the
+-        // accounting phase acquires the company lock and evaluates budgets.
++        // Recovery always takes coordinator before privacy/source/issue/run.
++        // Only the accounting phase acquires company accounting and evaluates budgets.
+         await lockRunBudgetRecoveryOwnerInTransaction(typedTx, input.companyId, input.runId, input.recoveryLeaseOwner);
++        const triageActionId = readNonEmptyString(parseObject(hint.contextSnapshot).managerTriageActionId);
++        if (mode === "ownership" && triageActionId) {
++          await recoveryManagerTriageService(typedTx).lockSource(input.companyId, triageActionId);
++        }
+         if (hintedIssueId) {
+           await typedTx
+             .select({ id: issues.id })
+@@ -705,6 +712,17 @@ export function createPostgresRunDispatchAdapter(
      tx: Db,
      input: CancelSuppressedRetryInput,
    ): Promise<CancelSuppressedRetryResult> {
@@ -4348,7 +4735,7 @@ index e45cd770b..fc8b2c76b 100644
      const [row] = await tx
        .update(heartbeatRuns)
        .set({
-@@ -712,6 +725,7 @@ export function createPostgresRunDispatchAdapter(
+@@ -712,6 +730,7 @@ export function createPostgresRunDispatchAdapter(
          finishedAt: input.now,
          error: input.reason,
          errorCode: input.errorCode,
@@ -4356,7 +4743,7 @@ index e45cd770b..fc8b2c76b 100644
          updatedAt: input.now,
        })
        .where(
-@@ -811,6 +825,7 @@ export function createPostgresRunDispatchAdapter(
+@@ -811,6 +830,7 @@ export function createPostgresRunDispatchAdapter(
          const cancelled = await cancelSuppressedRetryInTx(tx as unknown as Db, {
            runId: input.runId,
            companyId: input.companyId,
@@ -4364,7 +4751,7 @@ index e45cd770b..fc8b2c76b 100644
            now,
            reason: "Scheduled retry suppressed because the agent no longer exists",
            errorCode: "agent_not_invokable",
-@@ -846,6 +861,7 @@ export function createPostgresRunDispatchAdapter(
+@@ -846,6 +866,7 @@ export function createPostgresRunDispatchAdapter(
          const cancelled = await cancelSuppressedRetryInTx(tx as unknown as Db, {
            runId: input.runId,
            companyId: input.companyId,
@@ -4372,7 +4759,7 @@ index e45cd770b..fc8b2c76b 100644
            now,
            reason: gate.reason,
            errorCode: gate.errorCode,
-@@ -911,6 +927,15 @@ export function createPostgresRunDispatchAdapter(
+@@ -911,6 +932,15 @@ export function createPostgresRunDispatchAdapter(
      providerDispatchNotStarted = false,
    ): Promise<CancelStaleQueuedRunOutcome> {
        await notifyDeliveryWork(tx, DELIVERY_QUEUES.accounting, run.companyId);
@@ -4388,7 +4775,7 @@ index e45cd770b..fc8b2c76b 100644
        const [row] = await tx
          .update(heartbeatRuns)
          .set({
-@@ -921,6 +946,7 @@ export function createPostgresRunDispatchAdapter(
+@@ -921,6 +951,7 @@ export function createPostgresRunDispatchAdapter(
            resultJson: {
              ...parseObject(run.resultJson),
              stopReason: decision.errorCode,
@@ -4396,6 +4783,17 @@ index e45cd770b..fc8b2c76b 100644
              ...(providerDispatchNotStarted && decision.errorCode === "issue_waiting_for_response"
                ? { preDispatchResponseWait: { version: 1, providerWorkStarted: false } }
                : {}),
+@@ -1293,6 +1324,10 @@ export function createPostgresRunDispatchAdapter(
+           eq(nativeRunFinalizations.leaseOwner, input.recoveryLeaseOwner), sql`${nativeRunFinalizations.leaseExpiresAt} > clock_timestamp()`)) : [];
+         if (!owner) return { dispatched: false as const, admissionBlockReason: "Native recovery no longer owns provider dispatch" };
+       }
++      if (readNonEmptyString(parseObject(run.contextSnapshot).managerTriageActionId)) {
++        const triageBlock = await recoveryManagerTriageService(tx).dispatchBlock(run, true);
++        if (triageBlock) return { dispatched: false as const, admissionBlockReason: triageBlock };
++      }
+       await tx.update(heartbeatRuns).set({ usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb)
+         || ${JSON.stringify({ budgetDispatch: { ...claim, handedOffAt: new Date().toISOString() } })}::jsonb` })
+         .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId)));
 diff --git a/server/src/modules/wake-queue/adapters/postgres.test.ts b/server/src/modules/wake-queue/adapters/postgres.test.ts
 index 9fcacd4cb..504a6fdae 100644
 --- a/server/src/modules/wake-queue/adapters/postgres.test.ts
@@ -4507,7 +4905,7 @@ index 9fcacd4cb..504a6fdae 100644
      const companyId = await seedCompany();
      const agentId = await seedAgent({ companyId });
 diff --git a/server/src/modules/wake-queue/adapters/postgres.ts b/server/src/modules/wake-queue/adapters/postgres.ts
-index 450214755..11d734d96 100644
+index 450214755..643bf1bca 100644
 --- a/server/src/modules/wake-queue/adapters/postgres.ts
 +++ b/server/src/modules/wake-queue/adapters/postgres.ts
 @@ -5,7 +5,7 @@ import { isCompletedOnboardingHandoffWake } from "../../../services/chat-complet
@@ -4519,7 +4917,15 @@ index 450214755..11d734d96 100644
  import type { Db } from "@paperclipai/db";
  import { extractIssueReferenceIdentifiers, isUuidLike } from "@paperclipai/shared";
  import {
-@@ -222,7 +222,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
+@@ -32,6 +32,7 @@ import { HttpError } from "../../../errors.js";
+ import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
+ import { issueTreeControlService, isVerifiedIssueTreeControlInteractionWake } from "../../../services/issue-tree-control.js";
+ import { isAutomaticRecoverySuppressedByPauseHold } from "../../../services/recovery/pause-hold-guard.js";
++import { isAutomaticManagerTriageRun } from "../../../services/recovery/manager-triage-budget.js";
+ import { classifyContinuationFailure, executionReviewAttemptBoundaryCondition } from "../../../services/recovery/service.js";
+ import { issueService } from "../../../services/issues.js";
+ import { issueRecoveryActionService } from "../../../services/issue-recovery-actions.js";
+@@ -222,7 +223,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
          paused: !invokability.invokable && invokability.reason === "paused" };
      },
  
@@ -4528,7 +4934,7 @@ index 450214755..11d734d96 100644
        while (true) {
          const row = await tx
            .select()
-@@ -231,6 +231,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
+@@ -231,6 +232,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
              and(
                eq(agentWakeupRequests.companyId, companyId),
                eq(agentWakeupRequests.status, DEFERRED_WAKE_STATUS),
@@ -4536,7 +4942,15 @@ index 450214755..11d734d96 100644
                excludedWakeIds?.length ? notInArray(agentWakeupRequests.id, excludedWakeIds) : undefined,
                sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issueId}`,
                interruptQueueId ? eq(agentWakeupRequests.id, interruptQueueId) : undefined,
-@@ -1196,6 +1197,30 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
+@@ -1129,6 +1131,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
+         if (!currentRun) throw new Error(`wake-queue: run ${input.runId} disappeared while releasing issue execution`);
+         run = currentRun;
+         const runSnapshot = toRunSnapshot(run);
++        runSnapshot.automaticRecoverySuppressed = await isAutomaticManagerTriageRun(tx, run);
+         if (input.resumeStrandedQueue && (!run.finishedAt || !["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status))) {
+           return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
+         }
+@@ -1196,6 +1199,30 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
              )).limit(1)
            : [];
          const cancellation = readRunCancellation(run.resultJson);
@@ -4567,7 +4981,7 @@ index 450214755..11d734d96 100644
          const queuedOperatorStop = run.runtimeMode === "legacy" && run.status === "cancelled" &&
            run.runtimeModeResolvedAt === null && run.startedAt === null && run.processStartedAt === null &&
            run.processPid === null && run.processGroupId === null &&
-@@ -1217,6 +1242,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
+@@ -1217,6 +1244,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
              (run.status === "cancelled" &&
              (queuedOperatorStop || parseObject(run.resultJson?.executionCancellation).state === "acknowledged" || isAcknowledgedNativeStop(run)) &&
              !interruptedQueue),
@@ -4575,7 +4989,7 @@ index 450214755..11d734d96 100644
          };
          const preDrain = decidePreDrain(preDrainFacts);
  
-@@ -1301,7 +1327,10 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
+@@ -1301,7 +1329,10 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
            return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
          }
  
@@ -4609,8 +5023,21 @@ index 6469b7af3..b76f175af 100644
    getQueuedCommentLiveness(input: {
      companyId: string;
      issueId: string;
+diff --git a/server/src/modules/wake-queue/application/types.ts b/server/src/modules/wake-queue/application/types.ts
+index 5d793c0b4..a8e431088 100644
+--- a/server/src/modules/wake-queue/application/types.ts
++++ b/server/src/modules/wake-queue/application/types.ts
+@@ -29,6 +29,8 @@ export type RunSnapshot = {
+    * or an agent pause. Release must not immediately re-queue such a run.
+    */
+   operatorStopped?: boolean;
++  /** Adapter-proved exhaustion of a separately bounded automatic authority. */
++  automaticRecoverySuppressed?: boolean;
+ };
+ 
+ export type IssueSnapshot = {
 diff --git a/server/src/modules/wake-queue/application/use-cases.test.ts b/server/src/modules/wake-queue/application/use-cases.test.ts
-index 790c16166..68b2ac118 100644
+index 790c16166..e0cf36344 100644
 --- a/server/src/modules/wake-queue/application/use-cases.test.ts
 +++ b/server/src/modules/wake-queue/application/use-cases.test.ts
 @@ -212,6 +212,49 @@ describe("releaseIssueExecution", () => {
@@ -4663,8 +5090,29 @@ index 790c16166..68b2ac118 100644
    it.each(["closing", "mixed_comments", "explicit_resume", "interaction", "other_source_task", "parent_open"])(
      "checks late completed-delegation mentions without dropping independent input (%s)", async (scenario) => {
        const originalCommentIds = ["closing-comment", "second-comment"];
+@@ -795,6 +838,20 @@ describe("releaseIssueExecution", () => {
+     expect(transaction.queueImmediateRecoveryRun).toHaveBeenCalledTimes(1);
+   });
+ 
++  it.each([true, false])("honors adapter-proved automatic authority exhaustion (%s) without blocking a separate human intent", async automaticRecoverySuppressed => {
++    const transaction = createFakeTransaction();
++    const recovery = createFakeRecovery();
++    const release = createReleaseIssueExecution({
++      issueLock: createFakeIssueLock(createFakeHost(), transaction,
++        { ...ISSUE, originKind: "recovery_manager_triage" }, { ...RUN, automaticRecoverySuppressed }),
++      recovery,
++    });
++    const result = await release({ companyId: RUN.companyId, runId: RUN.id, now: new Date() });
++    expect(result.outcome.kind).toBe(automaticRecoverySuppressed ? "released" : "queued_recovery");
++    expect(transaction.queueImmediateRecoveryRun).toHaveBeenCalledTimes(automaticRecoverySuppressed ? 0 : 1);
++    expect(recovery.escalateStrandedAssignedIssue).not.toHaveBeenCalled();
++  });
++
+   it("throws WakeQueueApplicationError with code responsible_user_unresolved for a recovery run, without queuing it", async () => {
+     const transaction = createFakeTransaction();
+     const host = createFakeHost({ resolveResponsibleUserId: vi.fn(async () => null) });
 diff --git a/server/src/modules/wake-queue/application/use-cases.ts b/server/src/modules/wake-queue/application/use-cases.ts
-index ab89c3933..48657692f 100644
+index ab89c3933..8db5ac192 100644
 --- a/server/src/modules/wake-queue/application/use-cases.ts
 +++ b/server/src/modules/wake-queue/application/use-cases.ts
 @@ -11,6 +11,7 @@ import {
@@ -4683,6 +5131,16 @@ index ab89c3933..48657692f 100644
        ...(preservedWakeIds.length ? { excludedWakeIds: preservedWakeIds } : {}),
      });
      if (!candidate) break;
+@@ -547,7 +549,8 @@ async function runReleaseRecoveryTail(
+   // and for a paused agent escalated the issue to `blocked`. The periodic sweep
+   // already stands down for operator cancels; this keeps release consistent.
+   const operatorStopped = run.status === "cancelled" && run.operatorStopped === true;
+-  const suppressImmediateRecovery = input.suppressImmediateRecovery === true || operatorStopped || Boolean(
++  const suppressImmediateRecovery = input.suppressImmediateRecovery === true || operatorStopped ||
++    run.automaticRecoverySuppressed === true || Boolean(
+     issue.conversationAgentId && issue.conversationUserId &&
+     issue.conversationState === "waiting" && issue.status === "in_review"
+   );
 diff --git a/server/src/modules/wake-queue/domain/policy.test.ts b/server/src/modules/wake-queue/domain/policy.test.ts
 index 1d73e887e..f1ec4b161 100644
 --- a/server/src/modules/wake-queue/domain/policy.test.ts
@@ -5405,6 +5863,19 @@ index e56141565..97ef97a5b 100644
            await tx
              .update(issueRecoveryActions)
              .set({
+diff --git a/server/src/services/heartbeat.ts b/server/src/services/heartbeat.ts
+index 8e181ed64..e175a50d6 100644
+--- a/server/src/services/heartbeat.ts
++++ b/server/src/services/heartbeat.ts
+@@ -2807,7 +2807,7 @@ export function heartbeatService(
+           }
+           return { dispatched: false };
+         }
+-        const enforceContinuationOwnership = Boolean(issueId && (isResolvedInteractionContinuationWakeContext(context) ||
++        const enforceContinuationOwnership = Boolean(issueId && (typeof context.managerTriageActionId === "string" || isResolvedInteractionContinuationWakeContext(context) ||
+           typeof context.workspaceReconstructionActionId === "string" ||
+           ["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? "")));
+         if (issueId && enforceContinuationOwnership) {
 diff --git a/server/src/services/heartbeat/queue.test.ts b/server/src/services/heartbeat/queue.test.ts
 index 9af4a5ac9..8e03f67b9 100644
 --- a/server/src/services/heartbeat/queue.test.ts
@@ -5622,10 +6093,12 @@ index 9af4a5ac9..8e03f67b9 100644
      const { company, agent, issue, wake, run } = await fixture("queued");
      const [record] = await db.insert(cases).values({ companyId: company.id, caseNumber: 1, identifier: "QM-CASE-1",
 diff --git a/server/src/services/heartbeat/queue.ts b/server/src/services/heartbeat/queue.ts
-index c2516d302..4828402ec 100644
+index c2516d302..406dde810 100644
 --- a/server/src/services/heartbeat/queue.ts
 +++ b/server/src/services/heartbeat/queue.ts
-@@ -2,6 +2,10 @@ import { authorizationService } from "../authorization.js";
+@@ -1,7 +1,12 @@
+ import { authorizationService } from "../authorization.js";
++import { MANAGER_TRIAGE_ORIGIN, managerTriageWakeAllowed } from "../recovery/manager-triage-budget.js";
  import { assertTaskRetryConversationAllowed, readTaskRetryIntent, retireSupersededTaskRetry } from "../task-retry.js";
  import { insertIssueComment } from "../issue-comment-writes.js";
  import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
@@ -5636,7 +6109,7 @@ index c2516d302..4828402ec 100644
  import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
  import { normalizeAgentNameKey } from "./retries.js";
  import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
-@@ -345,8 +349,32 @@ function readNonEmptyString(value: unknown): string | null {
+@@ -345,8 +350,32 @@ function readNonEmptyString(value: unknown): string | null {
    return typeof value === "string" && value.trim().length > 0 ? value : null;
  }
  
@@ -5669,7 +6142,7 @@ index c2516d302..4828402ec 100644
    const {
      setRunStatus,
      setWakeupStatus,
-@@ -1759,6 +1787,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -1759,6 +1788,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
      const now = new Date();
      const reason =
        "Cancelled because issue dependencies are still blocked; Paperclip will wake the assignee when blockers resolve";
@@ -5687,7 +6160,7 @@ index c2516d302..4828402ec 100644
      const cancelled = await setRunStatus(run.id, "cancelled", {
        finishedAt: now,
        error: reason,
-@@ -1766,6 +1805,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -1766,6 +1806,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
        resultJson: {
          ...parseObject(run.resultJson),
          stopReason: "issue_dependencies_blocked",
@@ -5704,7 +6177,7 @@ index c2516d302..4828402ec 100644
          effectiveTimeoutSec: 0,
          timeoutConfigured: false,
          timeoutSource: "dependency_gate",
-@@ -1829,6 +1878,106 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -1829,6 +1879,106 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
          logger.warn({ err, queueId: wake.id }, "failed to resume interrupted comment queue");
        });
      }
@@ -5811,7 +6284,15 @@ index c2516d302..4828402ec 100644
      // A server restart or a message/cleanup race can leave a deferred wake
      // after its owner has released the issue lock. Revisit it through the same
      // release admission, so recovery holds and operator Stops still apply.
-@@ -3079,6 +3228,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -3067,6 +3217,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+               id: issues.id,
+               companyId: issues.companyId,
+               identifier: issues.identifier,
++              originKind: issues.originKind,
+               conversationAgentId: issues.conversationAgentId,
+               conversationUserId: issues.conversationUserId,
+               conversationState: issues.conversationState,
+@@ -3079,6 +3230,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                executionWorkspaceSettings: issues.executionWorkspaceSettings,
                assigneeAgentId: issues.assigneeAgentId,
                assigneeUserId: issues.assigneeUserId,
@@ -5820,7 +6301,20 @@ index c2516d302..4828402ec 100644
                monitorNextCheckAt: issues.monitorNextCheckAt,
                monitorWakeRequestedAt: issues.monitorWakeRequestedAt,
                executionRunId: issues.executionRunId,
-@@ -3121,6 +3272,22 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -3113,6 +3266,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+             return { kind: "skipped" as const };
+           }
+ 
++          if (issue.originKind === MANAGER_TRIAGE_ORIGIN && !(await managerTriageWakeAllowed(tx as unknown as Db, {
++            companyId: agent.companyId, issueId: issue.id, agentId,
++            actorType: opts.requestedByActorType, actorId: opts.requestedByActorId,
++            context: enrichedContextSnapshot,
++          }))) return { kind: "skipped" as const };
++
+           if (taskRetryActorId) {
+             await assertTaskRetryConversationAllowed(tx as unknown as Db, issue, taskRetryActorId);
+             if (await retireSupersededTaskRetry(tx as unknown as Db, {
+@@ -3121,6 +3280,22 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
              })) return { kind: "deferred" as const };
            }
            const issueStateGuard = opts.issueStateGuard;
@@ -5843,7 +6337,7 @@ index c2516d302..4828402ec 100644
            const activeMonitorRun = issueStateGuard?.monitorNextCheckAt === undefined ? null
              : await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
                eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.nativeIssueId, issue.id),
-@@ -3131,6 +3298,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -3131,6 +3306,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
              (!issueStateGuard.statuses.includes(issue.status) ||
                issue.assigneeAgentId !== issueStateGuard.assigneeAgentId ||
                (issueStateGuard.statusVersion !== undefined && issue.statusVersion !== issueStateGuard.statusVersion) ||
@@ -5851,7 +6345,7 @@ index c2516d302..4828402ec 100644
                (issueStateGuard.monitorNextCheckAt !== undefined && (
                  activeMonitorRun !== null || issue.assigneeUserId !== null ||
                  issue.monitorNextCheckAt?.toISOString() !== issueStateGuard.monitorNextCheckAt ||
-@@ -3151,13 +3319,22 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -3151,13 +3327,22 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                payload: {
                  ...(payload ?? {}),
                  heartbeatSkip: {
@@ -5876,7 +6370,7 @@ index c2516d302..4828402ec 100644
                  },
                },
                status: "skipped",
-@@ -3191,15 +3368,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -3191,15 +3376,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                !isUuidLike(actionId) ||
                source !== "automation" ||
                triggerDetail !== "system" ||
@@ -5892,7 +6386,7 @@ index c2516d302..4828402ec 100644
                ["done", "cancelled"].includes(issue.status)
              )
                return { kind: "skipped" as const };
-@@ -3222,11 +3396,31 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -3222,11 +3404,31 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                action?.evidence.executionReconciliation,
              );
              const sourceRunId = readNonEmptyString(decision.runId);
@@ -5925,7 +6419,7 @@ index c2516d302..4828402ec 100644
                !sourceRunId ||
                !isUuidLike(sourceRunId) ||
                decision.providerStopped !== true ||
-@@ -3234,8 +3428,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -3234,8 +3436,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                  String(decision.actionOutcome),
                ) ||
                !readNonEmptyString(decision.outcomeEvidence) ||
@@ -5934,7 +6428,7 @@ index c2516d302..4828402ec 100644
                !["pending", "delivered"].includes(
                  String(action.evidence.continuationDelivery),
                )
-@@ -3278,7 +3470,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -3278,7 +3478,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                  !existingRun ||
                  existingRun.contextSnapshot?.issueId !== issue.id ||
                  existingRun.contextSnapshot?.recoveryActionId !== action.id ||
@@ -5947,7 +6441,7 @@ index c2516d302..4828402ec 100644
                )
                  return { kind: "deferred" as const };
                return { kind: "replayed" as const, run: existingRun };
-@@ -3299,9 +3495,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -3299,9 +3503,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                if ((readNonEmptyString(decision.workspaceRepairEvidence)?.length ?? 0) < 20)
                  return { kind: "skipped" as const };
                // Repair does not reset the remaining automatic retry budget.
@@ -5959,7 +6453,7 @@ index c2516d302..4828402ec 100644
            }
  
            let continuationWait = { reason: "execution_recovery", message: "Waiting for execution recovery. Your message is saved." };
-@@ -3876,7 +4072,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
+@@ -3876,7 +4080,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
              // The resolved action is already a durable retry outbox. Do not merge
              // its fresh-session contract into unrelated work or create a second
              // deferred wake that could later replay the same reconciliation.
@@ -5969,10 +6463,24 @@ index c2516d302..4828402ec 100644
              // Offer the input to the active external agent, but keep a durable queued wake
              // until it reads the comment. A finish racing the event tick must
 diff --git a/server/src/services/heartbeat/retries.ts b/server/src/services/heartbeat/retries.ts
-index 329a4da75..6f6d2edb2 100644
+index 329a4da75..332a9410c 100644
 --- a/server/src/services/heartbeat/retries.ts
 +++ b/server/src/services/heartbeat/retries.ts
-@@ -412,6 +412,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
+@@ -1,4 +1,5 @@
+ import { deriveTaskKeyWithHeartbeatFallback } from "./run-state.js";
++import { isAutomaticManagerTriageRun } from "../recovery/manager-triage-budget.js";
+ import { infrastructureRetryDelayMs } from "../system-recovery-state.js";
+ import {
+   WORKSPACE_VALIDATION_FAILURE_CODE,
+@@ -406,12 +407,18 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
+       delayMs?: number;
+     },
+   ) {
++    if (await isAutomaticManagerTriageRun(db, run)) return { outcome: "not_scheduled" as const,
++      reason: "The separately reserved manager invocation is exhausted.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
+     if (await hasCaseHandoffForRun(run)) return { outcome: "not_scheduled" as const,
+       reason: "The durable case handoff owns successor work.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
+     if (["openai_dot", "muse"].includes(String(parseObject(agent.adapterConfig).provider))
          || ["openai_dot", "muse"].includes(String(parseObject(parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput).provider).kind))) {
        return { outcome: "not_scheduled" as const, reason: "Dot external execution must be reconciled before a new assignment; Paperclip cannot confirm its external stop.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
      }
@@ -5984,17 +6492,18 @@ index 329a4da75..6f6d2edb2 100644
        return { outcome: "not_scheduled" as const,
          reason: "Repair the invalid tool definitions before starting a new attempt.",
 diff --git a/server/src/services/heartbeat/run-lifecycle.ts b/server/src/services/heartbeat/run-lifecycle.ts
-index 5f299e855..5bd10710a 100644
+index 5f299e855..323d82fcf 100644
 --- a/server/src/services/heartbeat/run-lifecycle.ts
 +++ b/server/src/services/heartbeat/run-lifecycle.ts
-@@ -1,5 +1,6 @@
+@@ -1,5 +1,7 @@
  import { notifyExecutionRunWork } from "../execution-control-notifications.js";
++import { isAutomaticManagerTriageRun } from "../recovery/manager-triage-budget.js";
  import os from "node:os";
 +import { isUnclaimedRun, matchesNonDispatchSource } from "../non-dispatch-receipt.js";
  import {
    DEFERRED_WAKE_CONTEXT_KEY,
    EXECUTION_PATH_HEARTBEAT_RUN_STATUSES,
-@@ -1033,6 +1034,15 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
+@@ -1033,6 +1035,15 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
        .where(eq(heartbeatRuns.id, runId))
        .then((rows) => rows[0] ?? null);
  
@@ -6010,7 +6519,7 @@ index 5f299e855..5bd10710a 100644
      if (previousStatus && patch?.resultJson !== undefined) patch = { ...patch,
        resultJson: preserveWorkspaceRestoreRecoveryMetadata(previousStatus.resultJson, patch.resultJson),
      };
-@@ -1049,9 +1059,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
+@@ -1049,9 +1060,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
      if (
        status === "cancelled" &&
        previousStatus?.status === "queued" &&
@@ -6021,7 +6530,7 @@ index 5f299e855..5bd10710a 100644
      ) {
        patch = {
          ...patch,
-@@ -1070,6 +1078,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
+@@ -1070,6 +1079,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
              status,
              patch,
              reconcileIfNeeded: true,
@@ -6029,7 +6538,7 @@ index 5f299e855..5bd10710a 100644
            })
          : writer
              .update(heartbeatRuns)
-@@ -1145,9 +1154,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
+@@ -1145,9 +1155,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
      if (
        status === "cancelled" &&
        previousStatus?.status === "queued" &&
@@ -6040,6 +6549,14 @@ index 5f299e855..5bd10710a 100644
      ) {
        patch = {
          ...patch,
+@@ -2330,6 +2338,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
+     agent: typeof agents.$inferSelect,
+     issueId: string,
+   ) {
++    if (await isAutomaticManagerTriageRun(db, run)) return null;
+     const invokability = await getAgentInvokability(agent);
+     if (!invokability.invokable) {
+       await appendRunEvent(run, {
 diff --git a/server/src/services/heartbeat/run-preparation.ts b/server/src/services/heartbeat/run-preparation.ts
 index 02d9bcaa8..8eed1616e 100644
 --- a/server/src/services/heartbeat/run-preparation.ts
@@ -7390,8 +7907,355 @@ index dc319eaed..f4a8fb012 100644
    if (episode.attempt >= episode.maxAttempts) return { kind: "exhausted", attempt: episode.attempt, maxAttempts: episode.maxAttempts };
    const nextAttempt = episode.attempt + 1;
    return {
+diff --git a/server/src/services/recovery/manager-triage-budget.ts b/server/src/services/recovery/manager-triage-budget.ts
+new file mode 100644
+index 000000000..aa94212f1
+--- /dev/null
++++ b/server/src/services/recovery/manager-triage-budget.ts
+@@ -0,0 +1,57 @@
++import { and, eq, sql } from "drizzle-orm";
++import { agentWakeupRequests, heartbeatRuns, issues, type Db } from "@paperclipai/db";
++
++export const MANAGER_TRIAGE_ORIGIN = "recovery_manager_triage";
++type Run = typeof heartbeatRuns.$inferSelect;
++const record = (value: unknown): Record<string, unknown> =>
++  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
++
++/** Only durable, same-task user provenance grants a new intent after auto triage. */
++export async function hasExplicitUserWake(db: Db, run: Run) {
++  const issueId = record(run.contextSnapshot).issueId ?? run.issueId;
++  let current: Run | undefined = run;
++  const seen = new Set<string>();
++  for (let depth = 0; current && depth < 32; depth++) {
++    if (seen.has(current.id) || current.companyId !== run.companyId || current.agentId !== run.agentId ||
++        (record(current.contextSnapshot).issueId ?? current.issueId) !== issueId) return false;
++    seen.add(current.id);
++    if (current.wakeupRequestId) {
++      const [wake] = await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
++        eq(agentWakeupRequests.id, current.wakeupRequestId), eq(agentWakeupRequests.companyId, run.companyId),
++        eq(agentWakeupRequests.agentId, run.agentId), eq(agentWakeupRequests.runId, current.id),
++        eq(agentWakeupRequests.requestedByActorType, "user"), sql`${agentWakeupRequests.requestedByActorId} is not null`,
++      )).limit(1);
++      if (wake) return true;
++    }
++    if (!current.retryOfRunId) return false;
++    [current] = await db.select().from(heartbeatRuns).where(and(
++      eq(heartbeatRuns.id, current.retryOfRunId), eq(heartbeatRuns.companyId, run.companyId),
++    )).limit(1);
++  }
++  return false;
++}
++
++export async function isAutomaticManagerTriageRun(db: Db, run: Run) {
++  if (typeof record(run.contextSnapshot).managerTriageActionId !== "string") {
++    const issueId = record(run.contextSnapshot).issueId ?? run.issueId;
++    if (typeof issueId !== "string") return false;
++    const [issue] = await db.select({ originKind: issues.originKind }).from(issues)
++      .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId))).limit(1);
++    if (issue?.originKind !== MANAGER_TRIAGE_ORIGIN) return false;
++  }
++  return !(await hasExplicitUserWake(db, run));
++}
++
++export async function managerTriageWakeAllowed(db: Db, input: {
++  companyId: string; issueId: string; agentId: string;
++  actorType?: string | null; actorId?: string | null; context: Record<string, unknown>;
++}) {
++  if (input.actorType === "user" && input.actorId) return true;
++  const priorId = input.context.retryOfRunId;
++  if (typeof priorId !== "string") return false;
++  const [prior] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, priorId),
++    eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.agentId, input.agentId),
++    sql`coalesce(${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.issueId}::text) = ${input.issueId}`,
++  )).limit(1);
++  return Boolean(prior && await hasExplicitUserWake(db, prior));
++}
+diff --git a/server/src/services/recovery/manager-triage.ts b/server/src/services/recovery/manager-triage.ts
+new file mode 100644
+index 000000000..0a41104d1
+--- /dev/null
++++ b/server/src/services/recovery/manager-triage.ts
+@@ -0,0 +1,278 @@
++import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
++import { agents, agentWakeupRequests, companies, heartbeatRuns, issueRecoveryActions, issues, type Db } from "@paperclipai/db";
++import { budgetService } from "../budgets.js";
++import { readChatControlRecoveryStop } from "../chat-control-recovery-stop.js";
++import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
++import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
++import { persistActivity, publishActivity, type ActivityPublication } from "../activity-log.js";
++import { executeIssuePostCommitActions, issueService, type IssuePostCommitAction } from "../issues.js";
++import { collectDispositionRepairSourceState } from "./disposition-repair.js";
++import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
++
++import { MANAGER_TRIAGE_ORIGIN, hasExplicitUserWake } from "./manager-triage-budget.js";
++export { MANAGER_TRIAGE_ORIGIN } from "./manager-triage-budget.js";
++const SCHEMA = "paperclip.recovery-manager-triage.v1";
++type Issue = typeof issues.$inferSelect;
++type Action = typeof issueRecoveryActions.$inferSelect;
++type Run = typeof heartbeatRuns.$inferSelect;
++type Reservation = {
++  schema: typeof SCHEMA;
++  managerId: string;
++  sourceOwnerId: string;
++  sourceRunId: string;
++  sourceStatusVersion: number;
++  fingerprint: string;
++  issueId: string;
++  runId: string;
++  attemptCount: 1;
++  maxAttempts: 1;
++};
++const record = (value: unknown): Record<string, unknown> =>
++  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
++
++function reservation(action: Action): Reservation | null {
++  const value = record(action.evidence.managerTriage);
++  if (value.schema !== SCHEMA || value.attemptCount !== 1 || value.maxAttempts !== 1 ||
++      !Number.isSafeInteger(value.sourceStatusVersion) ||
++      !["managerId", "sourceOwnerId", "sourceRunId", "fingerprint", "issueId", "runId"]
++        .every(key => typeof value[key] === "string" && value[key])) return null;
++  return value as unknown as Reservation;
++}
++
++/** The source ledger is never charged or reset by this independent repair lane. */
++export function recoveryManagerTriageService(db: Db) {
++  async function eligible(database: Db, source: Issue, action: Action, sourceRun: Run, managerId: string, readOnly = false) {
++    const sourceMaximum = action.evidence.sourceMaxAttempts;
++    if (!Number.isSafeInteger(sourceMaximum) || (sourceMaximum as number) < 1 ||
++        action.evidence.sourceAttemptCount !== action.attemptCount || action.attemptCount < (sourceMaximum as number)) return false;
++    if (action.companyId !== source.companyId || action.sourceIssueId !== source.id ||
++        action.kind !== "deliberate_wait_without_target" || action.cause !== "deliberate_wait_without_target" ||
++        action.status !== "active" || action.ownerType !== "board" ||
++        record(action.wakePolicy).type !== "board_escalation" ||
++        action.evidence.terminalReason !== "unchanged_source_state_exhausted" ||
++        source.status !== "blocked" || !source.assigneeAgentId || source.assigneeUserId ||
++        source.originKind === MANAGER_TRIAGE_ORIGIN || source.originKind === "chat_channel" || source.conversationAgentId ||
++        sourceRun.companyId !== source.companyId || sourceRun.agentId !== source.assigneeAgentId ||
++        sourceRun.status !== "succeeded" || sourceRun.errorCode || sourceRun.runtimeMode === "native" ||
++        Boolean(sourceRun.controllerBootId && sourceRun.controllerLeaseExpiresAt && sourceRun.controllerLeaseExpiresAt.getTime() > Date.now()) ||
++        action.evidence.latestRunId !== sourceRun.id ||
++        (sourceRun.issueId !== source.id && record(sourceRun.contextSnapshot).issueId !== source.id)) return false;
++    const unblockOwner = record(source.unblockDescriptor).owner;
++    if (unblockOwner === "board" || record(unblockOwner).userId) return false;
++    const [owner] = await database.select().from(agents).where(and(
++      eq(agents.id, source.assigneeAgentId), eq(agents.companyId, source.companyId),
++    )).limit(1);
++    const [manager] = await database.select().from(agents).where(and(
++      eq(agents.id, managerId), eq(agents.companyId, source.companyId),
++    )).limit(1);
++    if (!owner || owner.reportsTo !== managerId || managerId === owner.id || !manager ||
++        !(await evaluateAgentInvokabilityFromDb(database, owner)).invokable ||
++        !(await evaluateAgentInvokabilityFromDb(database, manager)).invokable ||
++        !isHeartbeatWakeOnDemandEnabled(manager)) return false;
++    const [state, pause, stop, budget, latest, company, children] = await Promise.all([
++      collectDispositionRepairSourceState(database, { issue: source }),
++      isAutomaticRecoverySuppressedByPauseHold(database, source.companyId, source.id),
++      readChatControlRecoveryStop(database, { companyId: source.companyId, issueId: source.id,
++        agentId: source.assigneeAgentId, sourceRunId: sourceRun.id }),
++      readOnly ? Promise.resolve(null) : budgetService(database).getInvocationBlock(source.companyId, managerId, { projectId: source.projectId }),
++      database.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
++        eq(heartbeatRuns.companyId, source.companyId), or(eq(heartbeatRuns.issueId, source.id),
++          sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${source.id}`),
++      )).orderBy(sql`${heartbeatRuns.createdAt} desc`, sql`${heartbeatRuns.id} desc`).limit(1),
++      database.select({ status: companies.status }).from(companies).where(eq(companies.id, source.companyId)).limit(1),
++      database.select({ id: issues.id }).from(issues).where(and(eq(issues.companyId, source.companyId),
++        eq(issues.parentId, source.id), inArray(issues.status, ["todo", "in_progress", "in_review"]),
++        action.recoveryIssueId ? ne(issues.id, action.recoveryIssueId) : sql`true`,
++      )).limit(1),
++    ]);
++    return !state.hasActiveExecutionPath && !state.hasDurableWaitingPath && !pause &&
++      stop.kind === "clear" && !budget && latest[0]?.id === sourceRun.id &&
++      company[0]?.status === "active" && children.length === 0;
++  }
++
++  async function reserve(actionId: string) {
++    const [candidate] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, actionId)).limit(1);
++    if (!candidate) return null;
++    const publications: ActivityPublication[] = [];
++    const result = await db.transaction(async tx => {
++      // Same ordering as issue create/privacy updates; never take privacy after an issue lock.
++      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${candidate.companyId}`}, 0))`);
++      const [source] = await tx.select().from(issues).where(and(
++        eq(issues.id, candidate.sourceIssueId), eq(issues.companyId, candidate.companyId),
++      )).for("update");
++      const [action] = await tx.select().from(issueRecoveryActions).where(and(
++        eq(issueRecoveryActions.id, actionId), eq(issueRecoveryActions.companyId, candidate.companyId),
++        eq(issueRecoveryActions.sourceIssueId, candidate.sourceIssueId),
++      )).for("update");
++      if (!source || !action) return null;
++      const existing = reservation(action);
++      if (existing) return action.recoveryIssueId === existing.issueId ? existing : null;
++      // An unknown/malformed reservation or existing repair is not a fresh budget.
++      if (action.evidence.managerTriage !== undefined || action.recoveryIssueId) return null;
++      const runId = action.evidence.latestRunId;
++      if (typeof runId !== "string" || !source.assigneeAgentId) return null;
++      const [sourceRun] = await tx.select().from(heartbeatRuns).where(and(
++        eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, source.companyId),
++      )).limit(1);
++      const [owner] = await tx.select().from(agents).where(and(
++        eq(agents.id, source.assigneeAgentId), eq(agents.companyId, source.companyId),
++      )).limit(1);
++      if (!sourceRun || !owner?.reportsTo ||
++          !(await eligible(tx as unknown as Db, source, action, sourceRun, owner.reportsTo))) return null;
++      const managerId = owner.reportsTo;
++      const child = await issueService(db).create(source.companyId, {
++        title: `Repair the execution path for ${source.identifier ?? source.id}`,
++        description: [
++          `Perform one bounded technical triage of recovery action ${action.id} for ${source.identifier ?? source.id}.`,
++          `The source owner ${source.assigneeAgentId} exhausted its disposition allowance; preserve its ownership and counters.`,
++          `Inspect the recorded source run and diagnose the concrete internal execution problem under existing authority. If implementation is required, use an existing repair task or create one bounded repair task directly under source ${source.id}, not under this triage task; record that repair as a first-class source dependency. Finish this triage deliverable after the repair handoff is saved, without waiting for an extra triage invocation.`,
++          "Do not replay unknown effects, reset budgets, bypass Stop/HOLD, make a human decision, or publish without authorization. Never create a manager-triage chain. If a real human decision is needed, state the evidence, precise question, options and next owner on this task.",
++          "Persist the diagnosis and the actual next execution or decision path. A status summary alone is not a repair. This manager handoff has one separately reserved invocation; no automatic extra manager turns are authorized.",
++        ].join("\n\n"),
++        status: "todo", priority: source.priority, parentId: source.id, projectId: source.projectId,
++        goalId: source.goalId, assigneeAgentId: managerId, originKind: MANAGER_TRIAGE_ORIGIN,
++        originId: action.id, idempotencyKey: `manager-triage:${action.id}`,
++        responsibleUserId: sourceRun.responsibleUserId ?? source.responsibleUserId,
++        trustExplicitResponsibleUserId: true, inheritExecutionWorkspaceFromIssueId: source.id,
++      }, tx);
++      const now = new Date();
++      const context = { issueId: child.id, taskId: child.id, source: MANAGER_TRIAGE_ORIGIN,
++        wakeReason: MANAGER_TRIAGE_ORIGIN, managerTriageActionId: action.id };
++      const [wake] = await tx.insert(agentWakeupRequests).values({
++        companyId: source.companyId, agentId: managerId, source: "automation", triggerDetail: "system",
++        reason: MANAGER_TRIAGE_ORIGIN, payload: context, status: "queued",
++        requestedByActorType: "system", idempotencyKey: `manager-triage:${action.id}:1`,
++      }).returning();
++      const [run] = await tx.insert(heartbeatRuns).values({
++        companyId: source.companyId, agentId: managerId, issueId: child.id,
++        invocationSource: "automation", triggerDetail: "system", status: "scheduled_retry",
++        wakeupRequestId: wake.id, scheduledRetryAt: now, scheduledRetryAttempt: 1,
++        scheduledRetryReason: MANAGER_TRIAGE_ORIGIN, contextSnapshot: context,
++        responsibleUserId: sourceRun.responsibleUserId ?? source.responsibleUserId,
++      }).returning();
++      await tx.update(agentWakeupRequests).set({ runId: run.id }).where(eq(agentWakeupRequests.id, wake.id));
++      const state: Reservation = { schema: SCHEMA, managerId, sourceOwnerId: source.assigneeAgentId,
++        sourceRunId: sourceRun.id, sourceStatusVersion: source.statusVersion, fingerprint: action.fingerprint,
++        issueId: child.id, runId: run.id, attemptCount: 1, maxAttempts: 1 };
++      await tx.update(issueRecoveryActions).set({ recoveryIssueId: child.id,
++        evidence: { ...action.evidence, managerTriage: state },
++        nextAction: `Manager triage: ${child.identifier ?? child.id}. Original owner and source budget are unchanged.`,
++        updatedAt: now,
++      }).where(eq(issueRecoveryActions.id, action.id));
++      const { publication } = await persistActivity(tx as unknown as Db, {
++        companyId: source.companyId, actorType: "system", actorId: "recovery",
++        agentId: managerId, action: "issue.recovery_manager_triage_reserved",
++        entityType: "issue_recovery_action", entityId: action.id,
++        details: { sourceIssueId: source.id, sourceOwnerId: source.assigneeAgentId,
++          sourceAttemptCount: action.attemptCount, managerId, managerIssueId: child.id,
++          managerRunId: run.id, managerAttempt: 1, managerMaxAttempts: 1 },
++      });
++      publications.push(publication);
++      return state;
++    });
++    for (const publication of publications) publishActivity(publication);
++    return result;
++  }
++
++  // Called by the final dispatch fence before taking child/run locks. Parent-
++  // first locking also serializes ancestor Hold/Stop and FK-backed approvals.
++  async function lockSource(companyId: string, actionId: string) {
++    const [hint] = await db.select({ sourceIssueId: issueRecoveryActions.sourceIssueId }).from(issueRecoveryActions)
++      .where(and(eq(issueRecoveryActions.id, actionId), eq(issueRecoveryActions.companyId, companyId))).limit(1);
++    if (!hint) return;
++    await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${companyId}`}, 0))`);
++    await db.execute(sql`with recursive ancestry as (
++      select id, parent_id, 0 as depth from issues where id = ${hint.sourceIssueId} and company_id = ${companyId}
++      union all select p.id, p.parent_id, a.depth + 1 from issues p join ancestry a on p.id = a.parent_id
++        where p.company_id = ${companyId}
++    ) select node.id from issues node join ancestry a on node.id = a.id
++      order by a.depth desc for update of node`);
++    await db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions)
++      .where(and(eq(issueRecoveryActions.id, actionId), eq(issueRecoveryActions.companyId, companyId))).for("update");
++  }
++
++  async function dispatchBlock(run: Run, readOnly = false): Promise<string | null> {
++    const context = record(run.contextSnapshot);
++    const issueId = typeof context.issueId === "string" ? context.issueId : run.issueId;
++    if (!issueId) return null;
++    const [child] = await db.select().from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId))).limit(1);
++    if (child?.originKind !== MANAGER_TRIAGE_ORIGIN) return context.managerTriageActionId ? "invalid_manager_triage_binding" : null;
++    // A new authenticated human input is a new intent, not automatic recovery.
++    // Its ordinary native ownership, Hold and budget gates still apply.
++    if (await hasExplicitUserWake(db, run)) return null;
++    const [action] = await db.select().from(issueRecoveryActions).where(and(
++      eq(issueRecoveryActions.companyId, run.companyId), eq(issueRecoveryActions.recoveryIssueId, child.id),
++    )).limit(1);
++    const state = action && reservation(action);
++    if (!action || !state || state.runId !== run.id || state.issueId !== child.id ||
++        state.managerId !== run.agentId || child.assigneeAgentId !== run.agentId ||
++        !["todo", "in_progress"].includes(child.status)) return "manager_triage_slot_not_reserved";
++    const [source] = await db.select().from(issues).where(and(
++      eq(issues.id, action.sourceIssueId), eq(issues.companyId, run.companyId),
++    )).limit(1);
++    const [sourceRun] = await db.select().from(heartbeatRuns).where(and(
++      eq(heartbeatRuns.id, state.sourceRunId), eq(heartbeatRuns.companyId, run.companyId),
++    )).limit(1);
++    if (!source || !sourceRun || source.statusVersion !== state.sourceStatusVersion ||
++        source.assigneeAgentId !== state.sourceOwnerId || action.fingerprint !== state.fingerprint ||
++        !(await eligible(db, source, action, sourceRun, state.managerId, readOnly))) return "manager_triage_source_changed_or_held";
++    if (!readOnly && await budgetService(db).getInvocationBlock(child.companyId, run.agentId,
++      { issueId: child.id, projectId: child.projectId })) return "manager_triage_budget_blocked";
++    return null;
++  }
++
++  /** A spent turn must leave an actionable receipt, never an ownerless live task. */
++  async function settle(actionId: string) {
++    const [hint] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, actionId)).limit(1);
++    if (!hint || !reservation(hint)) return false;
++    const publications: ActivityPublication[] = [];
++    const postCommitActions: IssuePostCommitAction[] = [];
++    const changed = await db.transaction(async tx => {
++      const database = tx as unknown as Db;
++      await recoveryManagerTriageService(database).lockSource(hint.companyId, actionId);
++      const [action] = await tx.select().from(issueRecoveryActions).where(and(
++        eq(issueRecoveryActions.id, actionId), eq(issueRecoveryActions.companyId, hint.companyId),
++      )).limit(1);
++      const state = action && reservation(action);
++      if (!action || !state || action.status !== "active" || action.recoveryIssueId !== state.issueId ||
++          record(action.evidence.managerTriage).settledAt) return false;
++      const [child] = await tx.select().from(issues).where(and(
++        eq(issues.id, state.issueId), eq(issues.companyId, action.companyId),
++      )).for("update");
++      const [run] = await tx.select().from(heartbeatRuns).where(and(
++        eq(heartbeatRuns.id, state.runId), eq(heartbeatRuns.companyId, action.companyId),
++      )).for("update");
++      if (!child || !run || child.originKind !== MANAGER_TRIAGE_ORIGIN ||
++          ["done", "cancelled"].includes(child.status) ||
++          !["succeeded", "failed", "cancelled", "interrupted", "timed_out"].includes(run.status)) return false;
++      // Do not replace a real wait, human decision or a newer authorized turn.
++      const paths = await collectDispositionRepairSourceState(database, { issue: child,
++        excludeRunId: run.id, excludeWakeupRequestId: run.wakeupRequestId });
++      if (paths.hasActiveExecutionPath || paths.hasDurableWaitingPath || child.unblockDescriptor ||
++          await isAutomaticRecoverySuppressedByPauseHold(database, child.companyId, child.id)) return false;
++      const question = `The reserved manager turn ended (${run.status}${run.errorCode ? `: ${run.errorCode}` : ""}) without a completed triage or a durable next step. Inspect run ${run.id}. Should a new, explicitly scoped repair be authorized, or should this repair be cancelled? Preserve the source owner and its exhausted allowance; no automatic extra manager invocation is available.`;
++      const updated = await issueService(db).update(child.id, { status: "blocked",
++        companyGuard: child.companyId,
++        unblockDescriptor: { owner: "board", action: question } }, tx, publications, postCommitActions);
++      if (!updated) return false;
++      await issueService(db).addComment(child.id, question, {}, { authorType: "system" }, tx);
++      await tx.update(issueRecoveryActions).set({
++        evidence: { ...action.evidence, managerTriage: { ...record(action.evidence.managerTriage),
++          phase: "exhausted", settledAt: new Date().toISOString(), terminalRunStatus: run.status } },
++        nextAction: `Manager triage ${child.identifier ?? child.id} needs an explicit decision: inspect its recorded run, authorize a new scoped repair, or cancel. Source ownership and counters are unchanged.`,
++        updatedAt: new Date(),
++      }).where(eq(issueRecoveryActions.id, action.id));
++      const { publication } = await persistActivity(database, { companyId: action.companyId, actorType: "system",
++        actorId: "recovery", action: "issue.recovery_manager_triage_exhausted", entityType: "issue_recovery_action",
++        entityId: action.id, details: { sourceIssueId: action.sourceIssueId, managerIssueId: child.id,
++          managerRunId: run.id, terminalRunStatus: run.status, managerAttempt: 1, managerMaxAttempts: 1 } });
++      publications.push(publication);
++      return true;
++    });
++    for (const publication of publications) publishActivity(publication);
++    await executeIssuePostCommitActions(db, postCommitActions);
++    return changed;
++  }
++
++  return { reserve, dispatchBlock, lockSource, settle };
++}
 diff --git a/server/src/services/recovery/service.ts b/server/src/services/recovery/service.ts
-index 7d4232e37..962ebb89a 100644
+index 7d4232e37..eed0b5320 100644
 --- a/server/src/services/recovery/service.ts
 +++ b/server/src/services/recovery/service.ts
 @@ -13,7 +13,7 @@ import { executionRetryAccounting } from "../execution-recovery-attempt.js";
@@ -7403,7 +8267,15 @@ index 7d4232e37..962ebb89a 100644
  } from "./legacy-continuation.js";
  import { CONTROLLER_LEASE_LOST_FAILURE_CODE, hasLiveLegacyController } from "../legacy-controller-lease.js";
  import { isCompletedOnboardingHandoffWake } from "../chat-completion-delivery.js";
-@@ -216,8 +216,13 @@ type RecoveryWakeupOptions = {
+@@ -154,6 +154,7 @@ import {
+ } from "./origins.js";
+ import { withRecoveryContext } from "./status-only-context.js";
+ import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
++import { MANAGER_TRIAGE_ORIGIN, recoveryManagerTriageService } from "./manager-triage.js";
+ import {
+   collectDispositionRepairSourceState,
+   dispositionRepairDelayMs,
+@@ -216,8 +217,13 @@ type RecoveryWakeupOptions = {
    contextSnapshot?: Record<string, unknown>;
    issueStateGuard?: {
      statuses: string[];
@@ -7418,7 +8290,15 @@ index 7d4232e37..962ebb89a 100644
    };
  };
  
-@@ -2039,11 +2044,7 @@ export function recoveryService(
+@@ -973,6 +979,7 @@ export function recoveryService(
+   const recoveryActionsSvc = issueRecoveryActionService(db);
+   const treeControlSvc = issueTreeControlService(db);
+   const budgets = budgetService(db);
++  const managerTriage = recoveryManagerTriageService(db);
+   let resolvedDependencyWakeBackstopCandidateCursor: string | null = null;
+ 
+   async function getAgent(agentId: string, database: DbOrTransaction = db) {
+@@ -2039,11 +2046,7 @@ export function recoveryService(
      source: string;
      retryOfRunId?: string | null;
      extraContext?: Record<string, unknown>;
@@ -7431,7 +8311,7 @@ index 7d4232e37..962ebb89a 100644
      /**
       * Out-parameter: set `retryExhausted` when no successor was queued
       * because the failed predecessor has spent its bounded transient retry
-@@ -2127,7 +2128,9 @@ export function recoveryService(
+@@ -2127,7 +2130,9 @@ export function recoveryService(
        // The sweep can combine an old in-progress issue snapshot with a newer
        // successful run. Validate eligibility under the enqueue issue lock so
        // completion or reassignment cannot create a redundant continuation.
@@ -7442,7 +8322,7 @@ index 7d4232e37..962ebb89a 100644
          ? {
              issueStateGuard: {
                statuses: ["in_progress"],
-@@ -2135,9 +2138,6 @@ export function recoveryService(
+@@ -2135,9 +2140,6 @@ export function recoveryService(
              },
            }
          : {}),
@@ -7452,7 +8332,7 @@ index 7d4232e37..962ebb89a 100644
        payload: withRecoveryContext(
          {
            issueId: input.issueId,
-@@ -3241,8 +3241,7 @@ export function recoveryService(
+@@ -3241,8 +3243,7 @@ export function recoveryService(
          sourceStateFingerprint: input.fingerprint,
          terminalReason: null,
        },
@@ -7462,11 +8342,63 @@ index 7d4232e37..962ebb89a 100644
        wakePolicy: {
          type: "bounded_owner_disposition_repair",
          retryAgentId: input.issue.assigneeAgentId,
-@@ -4552,7 +4551,20 @@ export function recoveryService(
+@@ -3597,6 +3598,30 @@ export function recoveryService(
+         continue;
+       }
+ 
++      // A manager is independent repair work, never a takeover of the source.
++      // Keep its source case alive until its separately reserved turn settles.
++      if (action.recoveryIssueId && parseObject(action.evidence.managerTriage).schema === "paperclip.recovery-manager-triage.v1") {
++        await managerTriage.settle(action.id);
++        const [triage] = await db.select({ status: issues.status }).from(issues).where(and(
++          eq(issues.companyId, action.companyId), eq(issues.id, action.recoveryIssueId),
++        )).limit(1);
++        if (triage && !["done", "cancelled"].includes(triage.status)) {
++          result.skipped += 1;
++          continue;
++        }
++      }
++
++      if (action.ownerType === "board" && !action.recoveryIssueId &&
++          action.kind === "deliberate_wait_without_target" &&
++          action.evidence.terminalReason === "unchanged_source_state_exhausted") {
++        const reserved = await managerTriage.reserve(action.id);
++        if (reserved) {
++          result.requeued += 1;
++          result.issueIds.push(issue.id);
++          continue;
++        }
++      }
++
+       const [sourceState, healthyChildren, hasNewSourcePath] =
+         await Promise.all([
+           collectDispositionRepairSourceState(db, { issue }),
+@@ -3881,6 +3906,10 @@ export function recoveryService(
+ 
+   async function legacyRepairDispatchBlock(runId: string): Promise<string | null> {
+     const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).limit(1);
++    if (run) {
++      const managerBlock = await managerTriage.dispatchBlock(run);
++      if (managerBlock) return managerBlock;
++    }
+     const context = parseObject(run?.contextSnapshot);
+     if (!run || !parseObject(context.legacyDispositionEpisode).id) return null;
+     if (!["queued", "running", "scheduled_retry"].includes(run.status)) return "repair_not_active";
+@@ -3927,6 +3956,8 @@ export function recoveryService(
+       .then((rows) => rows[0] ?? null);
+     if (!current || current.status === "done" || current.status === "cancelled")
+       return "skipped";
++    // The manager owns one independently reserved turn, not a new repair chain.
++    if (current.originKind === MANAGER_TRIAGE_ORIGIN) return "skipped";
+ 
+     const episode = options.legacyEpisode ?? (
+       parseObject(parseObject(latestRun?.contextSnapshot).legacyDispositionEpisode).id && latestRun
+@@ -4552,7 +4583,21 @@ export function recoveryService(
        .where(
          and(
            isNull(issues.assigneeUserId),
 -          inArray(issues.status, ["todo", "in_progress", "in_review"]),
++          sql`${issues.originKind} IS DISTINCT FROM ${MANAGER_TRIAGE_ORIGIN}`,
 +          or(
 +            inArray(issues.status, ["todo", "in_progress", "in_review"]),
 +            and(
@@ -7484,7 +8416,7 @@ index 7d4232e37..962ebb89a 100644
            or(
              sql`${issues.assigneeAgentId} is not null`,
              eq(issues.status, "in_review"),
-@@ -4617,6 +4629,42 @@ export function recoveryService(
+@@ -4617,6 +4662,42 @@ export function recoveryService(
      }
  
      for (const issue of candidates) {
@@ -7527,7 +8459,7 @@ index 7d4232e37..962ebb89a 100644
        if (issue.originKind === "chat_channel") {
          await settleSlackConversation(db, issue.companyId, issue.id);
          const [current] = await db.select({ externalConversationState: externalConversationStateSql() })
-@@ -5328,6 +5376,16 @@ export function recoveryService(
+@@ -5328,6 +5409,16 @@ export function recoveryService(
            retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
            source: "issue.execution_review_recovery",
            retryOfRunId: participantLatestRun?.id,
@@ -7544,7 +8476,7 @@ index 7d4232e37..962ebb89a 100644
            extraContext: {
              executionStage: buildExecutionStageWakeContext({
                state: pendingExecutionState,
-@@ -5345,11 +5403,6 @@ export function recoveryService(
+@@ -5345,11 +5436,6 @@ export function recoveryService(
              reviewRecoveryInstruction:
                "The previous reviewer run ended while this execution-review stage was still pending. Submit the review decision now, or mark the issue blocked with the exact unblock action.",
            },
