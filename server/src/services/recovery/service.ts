@@ -13,7 +13,7 @@ import { executionRetryAccounting } from "../execution-recovery-attempt.js";
 import { isExplicitContinuationRetryClaim } from "../explicit-continuation-retry-claim.js";
 import {
   decideLegacyContinuation, legacyDispositionEpisode, legacyDispositionFingerprint,
-  LEGACY_DISPOSITION_REPAIR_INSTRUCTION, type LegacyDispositionEpisode,
+  LEGACY_DISPOSITION_REPAIR_INSTRUCTION, OWNER_DISPOSITION_REPAIR_NEXT_ACTION, type LegacyDispositionEpisode,
 } from "./legacy-continuation.js";
 import { CONTROLLER_LEASE_LOST_FAILURE_CODE, hasLiveLegacyController } from "../legacy-controller-lease.js";
 import { isCompletedOnboardingHandoffWake } from "../chat-completion-delivery.js";
@@ -216,8 +216,13 @@ type RecoveryWakeupOptions = {
   contextSnapshot?: Record<string, unknown>;
   issueStateGuard?: {
     statuses: string[];
-    assigneeAgentId: string;
+    assigneeAgentId: string | null;
     statusVersion?: number;
+    reviewAttempt?: {
+      decisionId: string | null;
+      participantAgentId: string;
+      currentStageId?: string | null;
+    };
   };
 };
 
@@ -2039,11 +2044,7 @@ export function recoveryService(
     source: string;
     retryOfRunId?: string | null;
     extraContext?: Record<string, unknown>;
-    issueStateGuard?: {
-      statuses: string[];
-      assigneeAgentId: string;
-      statusVersion?: number;
-    };
+    issueStateGuard?: RecoveryWakeupOptions["issueStateGuard"];
     /**
      * Out-parameter: set `retryExhausted` when no successor was queued
      * because the failed predecessor has spent its bounded transient retry
@@ -2127,16 +2128,15 @@ export function recoveryService(
       // The sweep can combine an old in-progress issue snapshot with a newer
       // successful run. Validate eligibility under the enqueue issue lock so
       // completion or reassignment cannot create a redundant continuation.
-      ...(input.source === "issue.productive_terminal_continuation_recovery"
+      ...(input.issueStateGuard
+        ? { issueStateGuard: input.issueStateGuard }
+        : input.source === "issue.productive_terminal_continuation_recovery"
         ? {
             issueStateGuard: {
               statuses: ["in_progress"],
               assigneeAgentId: input.agentId,
             },
           }
-        : {}),
-      ...(input.issueStateGuard
-        ? { issueStateGuard: input.issueStateGuard }
         : {}),
       payload: withRecoveryContext(
         {
@@ -3241,8 +3241,7 @@ export function recoveryService(
         sourceStateFingerprint: input.fingerprint,
         terminalReason: null,
       },
-      nextAction:
-        "The original owner must replace the parked summary with a terminal, live, blocked, monitored, or typed waiting disposition.",
+      nextAction: OWNER_DISPOSITION_REPAIR_NEXT_ACTION,
       wakePolicy: {
         type: "bounded_owner_disposition_repair",
         retryAgentId: input.issue.assigneeAgentId,
@@ -4552,7 +4551,20 @@ export function recoveryService(
       .where(
         and(
           isNull(issues.assigneeUserId),
-          inArray(issues.status, ["todo", "in_progress", "in_review"]),
+          or(
+            inArray(issues.status, ["todo", "in_progress", "in_review"]),
+            and(
+              eq(issues.status, "blocked"),
+              isNull(issues.conversationAgentId),
+              sql`${issues.originKind} IS DISTINCT FROM 'chat_channel'`,
+              sql`jsonb_typeof(${issues.unblockDescriptor}) = 'object'
+                and jsonb_typeof(${issues.unblockDescriptor}->'owner') = 'object'
+                and jsonb_typeof(${issues.unblockDescriptor}->'owner'->'agentId') = 'string'
+                and ${issues.unblockDescriptor}->'owner'->>'agentId' = ${issues.assigneeAgentId}::text
+                and jsonb_typeof(${issues.unblockDescriptor}->'action') = 'string'
+                and length(trim(${issues.unblockDescriptor}->>'action')) > 0`,
+            ),
+          ),
           or(
             sql`${issues.assigneeAgentId} is not null`,
             eq(issues.status, "in_review"),
@@ -4617,6 +4629,42 @@ export function recoveryService(
     }
 
     for (const issue of candidates) {
+      // Blocked work is normally owned by its external wait or the board. The
+      // only blocked issues admitted above have a schema-valid self-owner
+      // unblock descriptor; feed those exclusively through the existing
+      // bounded legacy disposition path. Never fall through to generic
+      // stranded-work recovery, which may otherwise create a fresh execution.
+      if (issue.status === "blocked") {
+        const latestRun = await getLatestIssueRun(issue.companyId, issue.id);
+        const [source] = latestRun
+          ? await db
+              .select({ runtimeMode: heartbeatRuns.runtimeMode })
+              .from(heartbeatRuns)
+              .where(eq(heartbeatRuns.id, latestRun.id))
+              .limit(1)
+          : [];
+        if (
+          latestRun?.status === "succeeded" &&
+          latestRun.agentId === issue.assigneeAgentId &&
+          source?.runtimeMode !== "native"
+        ) {
+          const outcome = await reconcileLegacyContinuation(latestRun.id);
+          if (outcome === "queued") {
+            result.continuationRequeued += 1;
+            result.dispositionRepairRequeued += 1;
+            result.issueIds.push(issue.id);
+          } else if (outcome === "escalated") {
+            result.escalated += 1;
+            result.issueIds.push(issue.id);
+          } else {
+            result.skipped += 1;
+          }
+        } else {
+          result.skipped += 1;
+        }
+        continue;
+      }
+
       if (issue.originKind === "chat_channel") {
         await settleSlackConversation(db, issue.companyId, issue.id);
         const [current] = await db.select({ externalConversationState: externalConversationStateSql() })
@@ -5328,6 +5376,16 @@ export function recoveryService(
           retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
           source: "issue.execution_review_recovery",
           retryOfRunId: participantLatestRun?.id,
+          issueStateGuard: {
+            statuses: ["in_review"],
+            assigneeAgentId: issue.assigneeAgentId,
+            statusVersion: issue.statusVersion,
+            reviewAttempt: {
+              decisionId: pendingExecutionState.lastDecisionId ?? null,
+              participantAgentId,
+              currentStageId: pendingExecutionState.currentStageId ?? null,
+            },
+          },
           extraContext: {
             executionStage: buildExecutionStageWakeContext({
               state: pendingExecutionState,
@@ -5344,11 +5402,6 @@ export function recoveryService(
               pendingExecutionState.lastDecisionId ?? null,
             reviewRecoveryInstruction:
               "The previous reviewer run ended while this execution-review stage was still pending. Submit the review decision now, or mark the issue blocked with the exact unblock action.",
-          },
-          issueStateGuard: {
-            statuses: ["in_review"],
-            assigneeAgentId: participantAgentId,
-            statusVersion: issue.statusVersion,
           },
           outcome: reviewOutcome,
         });

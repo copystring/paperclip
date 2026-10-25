@@ -145,10 +145,12 @@ Read enough ancestor/comment context to understand _why_ the task exists and wha
 
 **Execution-policy review/approval wakes.** If the issue is `in_review` with `executionState`, inspect `currentStageType`, `currentParticipant`, `returnAssignee`, and `lastDecisionOutcome`.
 
-If `currentParticipant` matches you, submit your decision via the normal update route — there is no separate execution-decision endpoint:
+Only the authorized `currentParticipant` may decide. If the matching action is in `allowedActions`, submit it through the normal issue update route with your authenticated agent identity and `X-Paperclip-Run-Id` — there is no separate execution-decision endpoint:
 
-- Approve: `PATCH /api/issues/{issueId}` with `{ "status": "done", "comment": "Approved: …" }`. If more stages remain, Paperclip keeps the issue in `in_review` and reassigns it to the next participant automatically.
-- Request changes: `PATCH` with `{ "status": "in_progress", "comment": "Changes requested: …" }`. Paperclip converts this into a changes-requested decision and reassigns to `returnAssignee`.
+- Approve: `PATCH /api/issues/{issueId}` with `{ "status": "done", "comment": "Approved: …" }` and `X-Paperclip-Run-Id`. If more stages remain, Paperclip keeps the issue in `in_review` and reassigns it to the next participant automatically.
+- Request changes: `PATCH /api/issues/{issueId}` with `{ "status": "in_progress", "comment": "Changes requested: …" }` and `X-Paperclip-Run-Id`. Paperclip records the changes-requested decision and reassigns to `returnAssignee`.
+
+A comment, report, or statement such as “Approve” is not itself a decision. After the PATCH, `GET /api/issues/{issueId}` and confirm the native `executionState` transition before reporting the decision as complete.
 
 If `currentParticipant` does not match you, do not try to advance the stage — Paperclip will reject other actors with `422`.
 
@@ -270,6 +272,10 @@ Because of that, follow these rules:
 **Step 9 — Delegate if needed.** For ordinary execution tasks, create subtasks with `POST /api/companies/{companyId}/issues` and set `parentId` and `goalId`. If you omit `parentId` while running an ordinary execution task, the server sets `parentId` to your current task and records that default in the creation activity (if you may not create a child under that task, for example under a protected assignment policy, the task stays standalone instead); send `parentId: null` only when the new task is intentionally top-level work (CLI: `--standalone`). Either way the follow-up keeps run provenance, and the task page shows "Created from <your task> by <you>" without implying a blocker. For conversation tasks, use the project handoff above instead. When a follow-up issue needs to stay on the same code change but is not a true child task, set `inheritExecutionWorkspaceFromIssueId` to the source issue. Set `billingCode` for cross-team work.
 
 ### Delegating review tasks
+
+For any delegated task, save its deliverables and verification on that task. Complete its required independent review there, then finish the child. The parent owner consumes the saved result after the dependency wakes the parent and performs any final publication or document update on the parent.
+
+Do not make a child's completion or review depend on writing into its waiting parent. A denied parent write does not invalidate a deliverable already saved on the child: retain that revision, finish the child's remaining authorized work, and report its link in the handback. Reassigning the child to the parent owner does not grant a run permission to write its ancestors. If the parent requested such a write, identify that destination restriction in the handback rather than creating another dependency or repeating the denied operation. Keep separate failures in the deliverable itself open for correction.
 
 Run-scoped writes are subtree-scoped: the delegate's run can write to its own issue and descendants, generally **not** to your issue. Write review-task descriptions accordingly:
 
