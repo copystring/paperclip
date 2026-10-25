@@ -1,8 +1,8 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, access, rename } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, access, rename, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { captureDirectorySnapshot, directorySnapshotSha256, serializeDirectorySnapshot } from "@paperclipai/adapter-utils/workspace-restore-merge";
@@ -29,6 +29,7 @@ import { cleanupExecutionWorkspaceArtifacts } from "../workspace-runtime.js";
 import { buildProjectMentionHref } from "@paperclipai/shared";
 import { trace } from "@opentelemetry/api";
 import { effectiveProjectWorkspacePolicy } from "../project-workspace-provider.js";
+import { resolvePaperclipInstanceRoot } from "../../home-paths.js";
 import { resolveExecutionWorkspaceMode, buildExecutionWorkspaceAdapterConfig } from "../execution-workspace-policy.js";
 import { createLocalDiskStorageProvider } from "../../storage/local-disk-provider.js";
 import { createStorageService } from "../../storage/service.js";
@@ -226,6 +227,23 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
   const readRun = (id: string) => db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id)).then(rows => rows[0]!);
   const leases = (id: string) => db.select().from(environmentLeases).where(eq(environmentLeases.heartbeatRunId, id));
 
+  async function expectIndependentAttemptGitStorage(originalCwd: string, replacementCwd: string,
+    input: HeartbeatWorkspacePreparationInput) {
+    const commonDir = async (cwd: string) => realpath((await execFile("git", ["-C", cwd,
+      "rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim());
+    const originalCommon = await commonDir(originalCwd);
+    const replacementCommon = await commonDir(replacementCwd);
+    const attemptRoot = await realpath(join(resolvePaperclipInstanceRoot(), "isolated-workspace-attempts",
+      input.agent.companyId, input.task.issueId!, input.run.id, "workspace"));
+    // A checkout may be a worktree; its common storage must still belong to
+    // this new attempt, independently of the retained original repository.
+    expect(replacementCommon).not.toBe(originalCommon);
+    const storageRelative = relative(attemptRoot, replacementCommon);
+    expect(isAbsolute(storageRelative)).toBe(false);
+    expect(storageRelative.split(sep)[0]).not.toBe("..");
+    await expect(access(join(replacementCommon, "objects", "info", "alternates"))).rejects.toThrow();
+  }
+
   it("keeps plugin-owned storage untouched when a fresh attempt provider is unavailable", async () => {
     const { input, source, issue } = await fixture(true);
     await db.update(projects).set({ executionWorkspacePolicy: {
@@ -259,8 +277,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     expect(replacement.executionWorkspace.cwd).not.toBe(source);
     expect(await readFile(join(replacement.executionWorkspace.cwd, "README.md"), "utf8")).toBe("source content\n");
     expect(await readFile(join(original.executionWorkspace.cwd, "unpublished.txt"), "utf8")).toBe("keep the old work\n");
-    const common = await execFile("git", ["-C", replacement.executionWorkspace.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    expect(common.stdout.trim()).toBe(join(replacement.executionWorkspace.cwd, ".git"));
+    await expectIndependentAttemptGitStorage(original.executionWorkspace.cwd, replacement.executionWorkspace.cwd, input);
     await expect(access(join(replacement.executionWorkspace.cwd, "unpublished.txt"))).rejects.toThrow();
     expect((await readIssue(issue.id)).executionWorkspaceId).toBe(replacement.persistedExecutionWorkspace!.id);
   }, 30_000);
@@ -298,8 +315,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
       expect(await readFile(join(replacement.executionWorkspace.cwd, "README.md"), "utf8")).toBe("source content\n");
       await expect(access(join(replacement.executionWorkspace.cwd, "unpublished.txt"))).rejects.toThrow();
       expect(await readFile(join(original.executionWorkspace.cwd, "unpublished.txt"), "utf8")).toBe("keep the old work\n");
-      const common = await execFile("git", ["-C", replacement.executionWorkspace.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
-      expect(common.stdout.trim()).toBe(join(replacement.executionWorkspace.cwd, ".git"));
+      await expectIndependentAttemptGitStorage(original.executionWorkspace.cwd, replacement.executionWorkspace.cwd, input);
       expect((await readIssue(issue.id)).executionWorkspaceId).toBe(replacement.persistedExecutionWorkspace!.id);
     }, 30_000,
   );
