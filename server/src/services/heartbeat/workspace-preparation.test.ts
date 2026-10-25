@@ -173,6 +173,7 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
   it("starts a fresh clean task directory without treating it as a Git source", async () => {
     const { input, source, issue } = await fixture();
     input.policy.useIsolatedTaskDirectory = true;
+    input.policy.taskDirectoryStrategyCanUsePrimary = true;
     input.policy.effectiveExecutionWorkspaceMode = "isolated_workspace";
     input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
     input.task.freshWorkspace = { mode: "fresh_isolated_workspace", retryIntentId: input.run.id,
@@ -184,6 +185,126 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     await expect(access(join(prepared.executionWorkspace.cwd, "README.md"))).rejects.toThrow();
     expect(await readFile(join(source, "README.md"), "utf8")).toBe("source content\n");
     expect((await readIssue(issue.id)).executionWorkspaceId).toBe(prepared.persistedExecutionWorkspace!.id);
+  });
+
+  async function prepareRepoLessTaskDirectory(input: HeartbeatWorkspacePreparationInput, issue: NonNullable<HeartbeatWorkspacePreparationInput["task"]["issueRef"]>) {
+    await db.update(issues).set({ projectId: null, projectWorkspaceId: null }).where(eq(issues.id, issue.id));
+    input.task.issueRef = { ...await readIssue(issue.id), projectId: null, projectWorkspaceId: null };
+    input.task.context = { issueId: issue.id };
+    input.policy.useIsolatedTaskDirectory = true;
+    input.policy.taskDirectoryStrategyCanUsePrimary = true;
+    input.policy.effectiveExecutionWorkspaceMode = "isolated_workspace";
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    input.task.freshWorkspace = {
+      mode: "fresh_isolated_workspace",
+      retryIntentId: input.run.id,
+      sourceRunId: input.run.id,
+      retainedSourceIds: [],
+    };
+    input.config.mergedConfig = { workspaceStrategy: { type: "git_worktree" } };
+    return prepareHeartbeatWorkspace(db, input);
+  }
+
+  it("reuses a persisted repo-less task directory on continuation", async () => {
+    const { input, issue } = await fixture();
+    const first = await prepareRepoLessTaskDirectory(input, issue);
+    await writeFile(join(first.executionWorkspace.cwd, "retained.txt"), "keep the task work");
+    input.task.freshWorkspace = null;
+    await reuse(input, first.persistedExecutionWorkspace!);
+    input.policy.useIsolatedTaskDirectory = false;
+    input.policy.taskDirectoryStrategyCanUsePrimary = true;
+
+    const next = await prepareHeartbeatWorkspace(db, input);
+
+    expect(next.persistedExecutionWorkspace).toMatchObject({
+      id: first.persistedExecutionWorkspace!.id,
+      companyId: issue.companyId,
+      sourceIssueId: issue.id,
+      mode: "isolated_workspace",
+      strategyType: "project_primary",
+      providerType: "local_fs",
+      repoUrl: null,
+      branchName: null,
+    });
+    expect(next.executionWorkspace.cwd).toBe(first.executionWorkspace.cwd);
+    expect(await readFile(join(next.executionWorkspace.cwd, "retained.txt"), "utf8")).toBe("keep the task work");
+  });
+
+  it("reuses an authorized parent task directory for a child issue", async () => {
+    const { input, issue } = await fixture();
+    const parent = await prepareRepoLessTaskDirectory(input, issue);
+    input.task.freshWorkspace = null;
+    const [child] = await db.insert(issues).values({
+      companyId: issue.companyId,
+      parentId: issue.id,
+      title: "Child continuation",
+      assigneeAgentId: input.agent.id,
+      executionWorkspaceId: parent.persistedExecutionWorkspace!.id,
+      executionWorkspacePreference: "reuse_existing",
+      executionWorkspaceSettings: { mode: "isolated_workspace" },
+    }).returning();
+    const [childRun] = await db.insert(heartbeatRuns).values({
+      companyId: issue.companyId,
+      agentId: input.agent.id,
+      issueId: child.id,
+      scopeKind: "issue",
+      status: "running",
+      runtimeMode: "legacy",
+    }).returning();
+    const workspace = parent.persistedExecutionWorkspace!;
+    input.run = childRun;
+    input.task.issueId = child.id;
+    input.task.issueRef = child;
+    input.task.context = { issueId: child.id };
+    input.policy.issueExecutionWorkspaceSettings = { mode: "isolated_workspace" };
+    input.policy.useIsolatedTaskDirectory = false;
+    input.policy.taskDirectoryStrategyCanUsePrimary = true;
+    input.policy.effectiveExecutionWorkspaceMode = "isolated_workspace";
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    input.config.mergedConfig = { workspaceStrategy: { type: "git_worktree" } };
+    input.reuse.requestedShouldReuseExisting = true;
+    input.reuse.existingExecutionWorkspace = workspace;
+    input.reuse.reusableExistingExecutionWorkspace = workspace;
+    input.reuse.workspaceReuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
+      issueExecutionWorkspaceId: workspace.id,
+      issueExecutionWorkspacePreference: "reuse_existing",
+      existingExecutionWorkspaceStatus: workspace.status,
+    });
+
+    const childWorkspace = await prepareHeartbeatWorkspace(db, input);
+
+    expect(childWorkspace.executionWorkspace.cwd).toBe(parent.executionWorkspace.cwd);
+    expect(childWorkspace.persistedExecutionWorkspace!.id).toBe(workspace.id);
+  });
+
+  it("rejects a reusable directory whose company ownership differs", async () => {
+    const { input, issue } = await fixture();
+    const first = await prepareRepoLessTaskDirectory(input, issue);
+    input.task.freshWorkspace = null;
+    const workspace = { ...first.persistedExecutionWorkspace!, companyId: "another-company" };
+    await reuse(input, first.persistedExecutionWorkspace!);
+    input.reuse.existingExecutionWorkspace = workspace;
+    input.reuse.reusableExistingExecutionWorkspace = workspace;
+
+    await expect(prepareHeartbeatWorkspace(db, input)).rejects.toMatchObject({
+      resultJson: { workspaceValidation: { reason: "isolated_task_directory_binding_mismatch" } },
+    });
+  });
+
+  it("keeps explicit Git intent blocked when no repository base exists", async () => {
+    const { input, issue } = await fixture();
+    await db.update(issues).set({ projectId: null, projectWorkspaceId: null }).where(eq(issues.id, issue.id));
+    input.task.issueRef = { ...await readIssue(issue.id), projectId: null, projectWorkspaceId: null };
+    input.task.context = { issueId: issue.id };
+    input.policy.effectiveExecutionWorkspaceMode = "isolated_workspace";
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    input.policy.useIsolatedTaskDirectory = false;
+    input.config.mergedConfig = { workspaceStrategy: { type: "git_worktree", existingBranch: "required-branch" } };
+
+    await expect(prepareHeartbeatWorkspace(db, input)).rejects.toMatchObject({
+      resultJson: { workspaceValidation: { reason: "git_worktree_base_not_git_checkout" } },
+    });
+    expect((await readIssue(issue.id)).executionWorkspaceId).toBeNull();
   });
 
   async function reuse(input: HeartbeatWorkspacePreparationInput, workspace: NonNullable<Awaited<ReturnType<typeof prepareHeartbeatWorkspace>>["persistedExecutionWorkspace"]>) {

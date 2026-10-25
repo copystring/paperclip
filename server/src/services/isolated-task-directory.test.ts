@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory } from "./isolated-task-directory.js";
+import { hasIsolatedTaskDirectoryIncompatibleWorkspaceRequirements, isMaterializedIsolatedTaskDirectory, isReusableRepoLessTaskDirectory, materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory } from "./isolated-task-directory.js";
 import { prepareSandboxManagedRuntime, type SandboxManagedRuntimeClient, type SandboxSyncOperation } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
 
 const execFile = promisify(execFileCallback);
@@ -36,6 +36,20 @@ describe("repository-free low-trust workspace selection", () => {
   ])("preserves configured workspace requirements: %j", (override) => {
     expect(shouldUseIsolatedTaskDirectory({ ...policy, ...override })).toBe(false);
   });
+
+  it("does not replace Git, branch, or setup requirements with a task directory", () => {
+    expect(hasIsolatedTaskDirectoryIncompatibleWorkspaceRequirements([undefined, {}])).toBe(false);
+    for (const strategy of [
+      { type: "git_worktree" },
+      { existingBranch: "main" },
+      { baseRef: "main" },
+      { provisionCommand: "setup" },
+      { runtimeProvisionCommand: "setup" },
+      { teardownCommand: "cleanup" },
+    ]) {
+      expect(hasIsolatedTaskDirectoryIncompatibleWorkspaceRequirements([strategy])).toBe(true);
+    }
+  });
 });
 
 describe("isolated task directories", () => {
@@ -63,6 +77,35 @@ describe("isolated task directories", () => {
       expect(otherCwd.startsWith(`${cwd}${path.sep}`)).toBe(false);
       expect(await readdir(otherCwd)).toEqual([]);
     }
+  });
+
+  it("validates a retained directory without recreating a missing workspace", async () => {
+    const identity = await setup();
+    const cwd = await materializeIsolatedTaskDirectory(identity);
+    expect(await isMaterializedIsolatedTaskDirectory({ ...identity, cwd })).toBe(true);
+    await rm(cwd, { recursive: true, force: true });
+    expect(await isMaterializedIsolatedTaskDirectory({ ...identity, cwd })).toBe(false);
+    expect(await readdir(path.dirname(cwd))).toEqual([]);
+  });
+
+  it("validates a retained fresh-attempt directory by its persisted source issue and arbitrary attempt id", async () => {
+    const identity = await setup();
+    const attemptRoot = await materializeIsolatedTaskDirectory({ ...identity, attemptId: "run-random-1" });
+    expect(await isMaterializedIsolatedTaskDirectory({ ...identity, cwd: attemptRoot })).toBe(true);
+    const seededWorkspace = path.join(attemptRoot, "workspace");
+    await mkdir(seededWorkspace);
+    expect(await isMaterializedIsolatedTaskDirectory({ ...identity, cwd: seededWorkspace })).toBe(true);
+    expect(await isMaterializedIsolatedTaskDirectory({ ...identity, companyId: "other-company", cwd: attemptRoot })).toBe(false);
+
+    const workspace = {
+      companyId: identity.companyId, sourceIssueId: identity.issueId,
+      mode: "isolated_workspace", strategyType: "project_primary", providerType: "local_fs",
+      projectId: "organizational-project", projectWorkspaceId: null, repoUrl: null, baseRef: null,
+      branchName: null, cwd: attemptRoot, metadata: { source: "task_session" },
+    };
+    expect(await isReusableRepoLessTaskDirectory({ companyId: identity.companyId, workspace })).toBe(true);
+    expect(await isReusableRepoLessTaskDirectory({ companyId: identity.companyId,
+      workspace: { ...workspace, baseRef: "main" } })).toBe(false);
   });
 
   it("rejects a symlink to another task's directory", async () => {
