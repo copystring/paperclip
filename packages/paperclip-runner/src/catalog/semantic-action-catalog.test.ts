@@ -6,6 +6,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 import { createTaskAction } from "../protocol-actions/create-task.js";
 import { createProjectAction } from "../protocol-actions/create-project.js";
+import { listAgentsAction } from "../protocol-actions/list-agents.js";
 import { handoffCaseAction } from "../protocol-actions/handoff-case.js";
 
 import {
@@ -107,10 +108,17 @@ describe("semantic action catalog", () => {
     }
     expect(createTaskAction.documentation.description).toContain("list_agents");
     expect(createTaskAction.documentation.description).toContain("missing task or assignee data is unconfirmed");
-    expect(createTaskAction.documentation.description).toContain("Do not infer a recipient");
+    expect(createTaskAction.documentation.description).toContain("exact role/title match");
+    expect(createTaskAction.documentation.description).toContain("hardcoded role-to-ID mapping");
     expect(createTaskAction.documentation.description).toContain("include this task's exact ID in blockedByTaskIds");
-    expect(paperclipSemanticAction("create_task")!.description).toContain("pass it as assigneeActorId");
+    expect(paperclipSemanticAction("create_task")!.description).toContain("Pass the resolved ID as assigneeActorId");
     expect(paperclipSemanticAction("create_task")!.inputSchema.properties?.blockedByTaskIds?.description).toContain("must finish before this task starts");
+    expect(listAgentsAction.documentation.description).toContain("exact match to one listed profile's role/title");
+    const validateScenario = ajv.compile(createTaskAction.scenario.descriptor.inputSchema);
+    expect(validateScenario({ title: "Self assignment", assigneeActorId: "actor-1" })).toBe(true);
+    expect(validateScenario({ title: "Self assignment", assigneeActorId: null })).toBe(false);
+    expect(createTaskAction.scenario.descriptor.inputSchema.properties.assigneeActorId.description).toContain("Omit this field");
+    expect(createTaskAction.scenario.descriptor.inputSchema.properties.assigneeActorId.description).not.toContain("pass null");
   });
 
   it("accepts project handoff receipts and preserves ordinary child task receipts", () => {

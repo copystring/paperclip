@@ -60,7 +60,8 @@ describe("persisted native execution prompts", () => {
     const current = savedContext(PAPERCLIP_EXECUTION_PROMPT_REVISION, PAPERCLIP_EXECUTION_PROMPT);
     expect(parseNativeRuntimeContext(current)).toEqual(current);
     expect(PAPERCLIP_EXECUTION_PROMPT).not.toMatch(/\b(?:cases?|workflows?|Mermaid)\b|stateDiagram-v2|(?:create|read|handoff)_case|(?:list|read|create|update)_workflow/i);
-    expect(PAPERCLIP_EXECUTION_PROMPT).toContain("resolve the requested recipient to exactly one agent ID returned for the current company");
+    expect(PAPERCLIP_EXECUTION_PROMPT).toContain("an exact match to the declared role/title only when the request specifies that role/title");
+    expect(PAPERCLIP_EXECUTION_PROMPT).toContain("Never infer a recipient from the task title or use a hardcoded role-to-ID mapping");
     expect(PAPERCLIP_EXECUTION_PROMPT).toContain("if the receipt is refused, unknown, erroneous, or lacks task or assignee data");
     expect(PAPERCLIP_EXECUTION_PROMPT).toContain("report the outcome as unconfirmed");
     expect(PAPERCLIP_EXECUTION_PROMPT).toContain("include that predecessor's exact task ID in blockedByTaskIds");
