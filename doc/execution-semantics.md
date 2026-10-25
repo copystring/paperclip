@@ -120,6 +120,8 @@ This requirement is prospective-only on rollout: it applies to transitions into 
 
 ### `in_review`
 
+Automatic review recovery belongs to the current review round. The last saved execution decision defines the round boundary, including when the same reviewer returns to the same stage. Earlier reviewer runs do not consume the current round's recovery attempt or become its retry predecessor. A missing referenced decision leaves recovery pending for state repair. Current-round failures, explicit stops, holds, budgets, and human-owned recovery remain in force.
+
 Execution work is paused because the next move belongs to a reviewer or approver, not the current executor.
 
 An external review service can also be a valid review path when the issue keeps an agent assignee and has an active one-shot monitor that will wake that assignee to check the service later.

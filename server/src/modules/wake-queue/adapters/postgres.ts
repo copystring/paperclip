@@ -14,6 +14,7 @@ import {
   agents,
   chatActions,
   heartbeatRuns,
+  issueExecutionDecisions,
   issueComments,
   issueRecoveryActions,
   issueRelations,
@@ -31,7 +32,7 @@ import { HttpError } from "../../../errors.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
 import { issueTreeControlService, isVerifiedIssueTreeControlInteractionWake } from "../../../services/issue-tree-control.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "../../../services/recovery/pause-hold-guard.js";
-import { classifyContinuationFailure } from "../../../services/recovery/service.js";
+import { classifyContinuationFailure, executionReviewAttemptBoundaryCondition } from "../../../services/recovery/service.js";
 import { issueService } from "../../../services/issues.js";
 import { issueRecoveryActionService } from "../../../services/issue-recovery-actions.js";
 import { readContinuationAttempt } from "../../../services/recovery/run-liveness-continuations.js";
@@ -602,6 +603,24 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
       );
     },
 
+    async isRunInCurrentExecutionReviewAttempt({ companyId, issueId, runId, decisionId }) {
+      const [currentAttemptRun] = await tx
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .innerJoin(
+          issueExecutionDecisions,
+          and(
+            eq(issueExecutionDecisions.id, decisionId),
+            eq(issueExecutionDecisions.companyId, companyId),
+            eq(issueExecutionDecisions.issueId, issueId),
+            executionReviewAttemptBoundaryCondition(companyId, issueId, decisionId),
+          ),
+        )
+        .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)))
+        .limit(1);
+      return currentAttemptRun !== undefined;
+    },
+
     async queueReviewParticipantRecoveryRun({ companyId, issue, finishingRun, recoveryAgent, sessionBefore, now }) {
       const executionState = parseIssueExecutionState(issue.executionState);
       const executionStage = executionState
@@ -627,6 +646,9 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
               retryOfRunId: finishingRun.id,
               retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_RETRY_REASON,
               ...(executionStage ? { executionStage } : {}),
+              currentStageId: executionState?.currentStageId ?? null,
+              currentStageType: executionState?.currentStageType ?? null,
+              currentReviewDecisionId: executionState?.lastDecisionId ?? null,
             },
             "normal_model",
           ),
@@ -656,6 +678,11 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
               source: "issue.execution_review_recovery",
               retryOfRunId: finishingRun.id,
               ...(executionStage ? { executionStage } : {}),
+              currentStageId: executionState?.currentStageId ?? null,
+              currentStageType: executionState?.currentStageType ?? null,
+              currentReviewDecisionId: executionState?.lastDecisionId ?? null,
+              reviewRecoveryInstruction:
+                "The previous reviewer run ended while this execution-review stage was still pending. Submit the review decision now, or mark the issue blocked with the exact unblock action.",
             },
             "normal_model",
           ),
