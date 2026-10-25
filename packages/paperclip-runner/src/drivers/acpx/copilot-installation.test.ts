@@ -96,7 +96,8 @@ describe("Copilot build-owned installation", () => {
     const prior = JSON.parse(readFileSync(new URL("../../../test/fixtures/copilot-profile-v58-identity.json", import.meta.url), "utf8"));
     const current = JSON.parse(readFileSync(new URL("../../../test/fixtures/copilot-profile-v59-identity.json", import.meta.url), "utf8"));
     expect(Object.keys(current.declaration).filter(key => current.declaration[key] !== prior.declaration[key]).sort()).toEqual([
-      "agentProfileVersion", "nativeRuntimePromptsSourceSha256", "profileCompatibilitySourceSha256",
+      "agentProfileVersion", "nativeInstructionsSourceSha256", "nativeRuntimePromptsSourceSha256",
+      "nativeSessionRuntimeSourceSha256", "profileCompatibilitySourceSha256", "transportContractSourceSha256",
     ]);
     expect(isSupportedAcpxProfileVersion("copilot", 58)).toBe(true);
     expect(current.commandDigest).not.toBe(prior.commandDigest);
