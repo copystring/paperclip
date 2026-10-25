@@ -39,7 +39,7 @@ import { createGitRemoteAuthProvider } from "../git-credentials.js";
 import { readNativeWorkspaceSyncReference, readNativeWorkspaceSyncLocalCwd } from "../native-runtime/index.js";
 import { parseObject } from "../../adapters/utils.js";
 import { materializeNativeChatTaskRoot } from "../native-runtime/native-chat-workspace.js";
-import { materializeIsolatedTaskDirectory } from "../isolated-task-directory.js";
+import { isReusableRepoLessTaskDirectory, materializeIsolatedTaskDirectory } from "../isolated-task-directory.js";
 import { withIsolatedRepositorySourceLock } from "../isolated-remote-workspace-source.js";
 import {
   cleanupExecutionWorkspaceArtifacts,
@@ -112,6 +112,7 @@ export interface HeartbeatWorkspacePreparationInput {
     effectiveExecutionWorkspaceMode: ParsedExecutionWorkspaceMode;
     requestedExecutionWorkspaceMode: ParsedExecutionWorkspaceMode;
     useIsolatedTaskDirectory: boolean;
+    taskDirectoryStrategyCanUsePrimary?: boolean;
     nativeChatWorkspaceScope: NativeChatWorkspaceScope | null;
     projectExecutionWorkspacePolicy: ProjectExecutionWorkspacePolicy | null;
     issueExecutionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
@@ -277,22 +278,23 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
           workspaceHints: [], warnings: [], baseCwdFallback: false, materializationFailures: [], additionalWorkspaces: [], referencedProjectFailures: [] };
       }
       if (useIsolatedTaskDirectory && issueRef && !pluginTaskWorkspace) {
-        const cwd = await materializeIsolatedTaskDirectory({
-          companyId: agent.companyId,
-          issueId: issueRef.id,
-          ...(input.task.freshWorkspace?.mode === "fresh_isolated_workspace" ? { attemptId: run.id } : {}),
-        });
-        if (reusableExistingExecutionWorkspace && (
-          reusableExistingExecutionWorkspace.companyId !== agent.companyId ||
-          reusableExistingExecutionWorkspace.sourceIssueId !== issueRef.id ||
-          reusableExistingExecutionWorkspace.mode !== "isolated_workspace" ||
-          reusableExistingExecutionWorkspace.strategyType !== "project_primary" ||
-          reusableExistingExecutionWorkspace.cwd !== cwd
-        )) {
+        const reusableTaskDirectory = reusableExistingExecutionWorkspace && requestedShouldReuseExisting &&
+          await isReusableRepoLessTaskDirectory({
+            companyId: agent.companyId,
+            workspace: reusableExistingExecutionWorkspace,
+          })
+          ? reusableExistingExecutionWorkspace
+          : null;
+        if (reusableExistingExecutionWorkspace && !reusableTaskDirectory) {
           throw new WorkspaceValidationFailure("The existing execution workspace is not this task's isolated directory.", {
             workspaceValidation: { reason: "isolated_task_directory_binding_mismatch", issueId: issueRef.id },
           });
         }
+        const cwd = reusableTaskDirectory?.cwd ?? await materializeIsolatedTaskDirectory({
+          companyId: agent.companyId,
+          issueId: issueRef.id,
+          ...(input.task.freshWorkspace?.mode === "fresh_isolated_workspace" ? { attemptId: run.id } : {}),
+        });
         return resolveWorkspaceForRun(agent, context, previousSessionParams, {
           executionEnvironmentDriver: selectedEnvironmentForConfig?.driver ?? null,
           anchorWorkspace: {
@@ -433,7 +435,10 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   const skipHostProvision = copyOnlyProvisioning || hostProvisionDriver === "sandbox" || hostProvisionDriver === "ssh" || hostProvisionDriver === "plugin";
   const hostExecutionWorkspaceConfig = isDotRun ? {} :
     stripHostWorkspaceProvision({
-      config: fresh ? { ...mergedConfig, workspaceStrategy: { type: "project_primary" } } : mergedConfig,
+      config: input.policy.taskDirectoryStrategyCanUsePrimary
+        ? { ...mergedConfig,
+            workspaceStrategy: { ...parseObject(mergedConfig.workspaceStrategy), type: "project_primary" } }
+        : mergedConfig,
       skipHostProvision,
     });
   const executionWorkspaceBase = {
