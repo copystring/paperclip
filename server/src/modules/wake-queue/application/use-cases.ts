@@ -549,7 +549,8 @@ async function runReleaseRecoveryTail(
   // and for a paused agent escalated the issue to `blocked`. The periodic sweep
   // already stands down for operator cancels; this keeps release consistent.
   const operatorStopped = run.status === "cancelled" && run.operatorStopped === true;
-  const suppressImmediateRecovery = input.suppressImmediateRecovery === true || operatorStopped || Boolean(
+  const suppressImmediateRecovery = input.suppressImmediateRecovery === true || operatorStopped ||
+    run.automaticRecoverySuppressed === true || Boolean(
     issue.conversationAgentId && issue.conversationUserId &&
     issue.conversationState === "waiting" && issue.status === "in_review"
   );

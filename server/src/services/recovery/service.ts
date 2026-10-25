@@ -154,6 +154,7 @@ import {
 } from "./origins.js";
 import { withRecoveryContext } from "./status-only-context.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
+import { MANAGER_TRIAGE_ORIGIN, recoveryManagerTriageService } from "./manager-triage.js";
 import {
   collectDispositionRepairSourceState,
   dispositionRepairDelayMs,
@@ -978,6 +979,7 @@ export function recoveryService(
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const treeControlSvc = issueTreeControlService(db);
   const budgets = budgetService(db);
+  const managerTriage = recoveryManagerTriageService(db);
   let resolvedDependencyWakeBackstopCandidateCursor: string | null = null;
 
   async function getAgent(agentId: string, database: DbOrTransaction = db) {
@@ -3596,6 +3598,30 @@ export function recoveryService(
         continue;
       }
 
+      // A manager is independent repair work, never a takeover of the source.
+      // Keep its source case alive until its separately reserved turn settles.
+      if (action.recoveryIssueId && parseObject(action.evidence.managerTriage).schema === "paperclip.recovery-manager-triage.v1") {
+        await managerTriage.settle(action.id);
+        const [triage] = await db.select({ status: issues.status }).from(issues).where(and(
+          eq(issues.companyId, action.companyId), eq(issues.id, action.recoveryIssueId),
+        )).limit(1);
+        if (triage && !["done", "cancelled"].includes(triage.status)) {
+          result.skipped += 1;
+          continue;
+        }
+      }
+
+      if (action.ownerType === "board" && !action.recoveryIssueId &&
+          action.kind === "deliberate_wait_without_target" &&
+          action.evidence.terminalReason === "unchanged_source_state_exhausted") {
+        const reserved = await managerTriage.reserve(action.id);
+        if (reserved) {
+          result.requeued += 1;
+          result.issueIds.push(issue.id);
+          continue;
+        }
+      }
+
       const [sourceState, healthyChildren, hasNewSourcePath] =
         await Promise.all([
           collectDispositionRepairSourceState(db, { issue }),
@@ -3880,6 +3906,10 @@ export function recoveryService(
 
   async function legacyRepairDispatchBlock(runId: string): Promise<string | null> {
     const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).limit(1);
+    if (run) {
+      const managerBlock = await managerTriage.dispatchBlock(run);
+      if (managerBlock) return managerBlock;
+    }
     const context = parseObject(run?.contextSnapshot);
     if (!run || !parseObject(context.legacyDispositionEpisode).id) return null;
     if (!["queued", "running", "scheduled_retry"].includes(run.status)) return "repair_not_active";
@@ -3926,6 +3956,8 @@ export function recoveryService(
       .then((rows) => rows[0] ?? null);
     if (!current || current.status === "done" || current.status === "cancelled")
       return "skipped";
+    // The manager owns one independently reserved turn, not a new repair chain.
+    if (current.originKind === MANAGER_TRIAGE_ORIGIN) return "skipped";
 
     const episode = options.legacyEpisode ?? (
       parseObject(parseObject(latestRun?.contextSnapshot).legacyDispositionEpisode).id && latestRun
@@ -4551,6 +4583,7 @@ export function recoveryService(
       .where(
         and(
           isNull(issues.assigneeUserId),
+          sql`${issues.originKind} IS DISTINCT FROM ${MANAGER_TRIAGE_ORIGIN}`,
           or(
             inArray(issues.status, ["todo", "in_progress", "in_review"]),
             and(
