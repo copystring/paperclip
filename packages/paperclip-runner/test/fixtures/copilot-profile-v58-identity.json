@@ -1,5 +1,5 @@
 {
-  "commandDigest": "sha256:7fbf0b3a48250c0c1852503d0dfd0af238c402d19c53573b573cc81f07c6016f",
+  "commandDigest": "sha256:95cdd5f779609937f39e9d89f6c1273028e6aced7b9627968edfd325f6b7eae5",
   "declaration": {
     "schema": "paperclip.acpx_profile_declaration.v1",
     "agent": "copilot",
@@ -49,7 +49,7 @@
     "singleReadEvidenceSourceSha256": "4069393405089bde613cecec04f5123c426594811da4c668bd96f0e7e283550f",
     "nativeSessionRuntimeSourceSha256": "e8a3bee66a1ff1c6f251b5ae57453ffb908336da9c4a6d98f41f94f7ee94a8e8",
     "nativeRuntimeContextSourceSha256": "71607f80dbb8dc5cc6c123d0b8f3995d6c5407277695a8c82cbedc90fb8f4842",
-    "nativeRuntimePromptsSourceSha256": "103b83066da72434602e9e461e6278dfb40bb993d2f3b49b2e93df81bbb08b72",
+    "nativeRuntimePromptsSourceSha256": "a287cb34de531802e341299004b23874d88ffa34855453b28cd0f652e374148d",
     "nativeSessionContractSourceSha256": "22a8c96ce41ba4f03e976fc37f0cc7c5d05cee99fa789941da31ee1dab440b90",
     "harnessSessionContractSourceSha256": "03f4cd7f76f34f6d82e009b66aa51f18f6e23dc235b660778060e35b6ea07412",
     "harnessBackendSourceSha256": "dc827e281ae6731545b166ee4d709a4f67f594a556dcbe63c70fe8f1aca26249",
