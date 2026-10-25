@@ -407,8 +407,6 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       delayMs?: number;
     },
   ) {
-    if (await isAutomaticManagerTriageRun(db, run)) return { outcome: "not_scheduled" as const,
-      reason: "The separately reserved manager invocation is exhausted.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
     if (await hasCaseHandoffForRun(run)) return { outcome: "not_scheduled" as const,
       reason: "The durable case handoff owns successor work.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
     if (["openai_dot", "muse"].includes(String(parseObject(agent.adapterConfig).provider))
@@ -518,6 +516,10 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       };
     }
 
+    // Existing handoffs and an exhausted retry allowance settle without DB
+    // admission. Only a candidate successor needs the separate triage guard.
+    if (await isAutomaticManagerTriageRun(db, run)) return { outcome: "not_scheduled" as const,
+      reason: "The separately reserved manager invocation is exhausted.", issueId };
     if (await legacyExecutionNeedsReconciliationWithEvidence(db, run)) {
       return {
         outcome: "not_scheduled" as const,
