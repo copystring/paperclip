@@ -1,6 +1,6 @@
 /** Canonical definition and documentation for `list_agents`. */
 const listAgentsDescription =
-  "List redacted agent profiles for the current company, including stable IDs and status. For delegation, resolve an explicitly requested teammate to one exact returned agent ID; do not infer a recipient from the task title or agent role/title. If the requested agent is absent or ambiguous, ask instead of choosing another agent.";
+  "List redacted agent profiles for the current company, including stable IDs, names, roles, titles, and status. For delegation, resolve an explicit request to an exact returned ID or exact unique name; when the request specifies a role or title, accept only an exact match to one listed profile's role/title. Never infer a recipient from the task title or use a hardcoded role-to-ID mapping. If no listed profile matches or multiple profiles match, ask instead of choosing another agent.";
 
 export const listAgentsAction = {
   "id": "list_agents",

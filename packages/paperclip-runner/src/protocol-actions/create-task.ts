@@ -1,6 +1,6 @@
 /** Canonical definition and documentation for `create_task`. */
 const delegationGuidance =
-  " For delegation to another agent, use list_agents to resolve the explicitly requested teammate to one exact returned agent ID and pass it as assigneeActorId; omitting the field assigns this agent. Do not infer a recipient from the task title or agent role/title. If the requested recipient is absent or ambiguous, ask before creating. If a follow-up or review task needs this task's result, include this task's exact ID in blockedByTaskIds so it cannot start early; create independent tasks without that dependency. Verify the receipt's task ID and assignee before claiming the handoff succeeded; missing task or assignee data is unconfirmed.";
+  " For delegation to another agent, use list_agents to resolve the explicitly requested recipient from the current company roster: use an exact returned agent ID or exact unique name, or an exact role/title match only when the request names that role/title and exactly one listed agent matches. Pass the resolved ID as assigneeActorId; omitting the field assigns this agent. Never infer a recipient from the task title or use a hardcoded role-to-ID mapping. If the requested recipient is absent or ambiguous, ask before creating. If a follow-up or review task needs this task's result, include this task's exact ID in blockedByTaskIds so it cannot start early; create independent tasks without that dependency. Verify the receipt's task ID and assignee before claiming the handoff succeeded; missing task or assignee data is unconfirmed.";
 const createTaskDescription =
   "Create a project task from a conversation, or a child from an ordinary task. Persist initialPlan before execution. Set status to backlog when the user wants to save or plan work without starting it; backlog tasks never wake an agent. Omitted status means todo, subject to blockers." + delegationGuidance;
 
@@ -273,7 +273,7 @@ export const createTaskAction = {
           "assigneeUserId": { "type": ["string", "null"], "description": "Company person ID from list_people. Mutually exclusive with assigneeActorId." },
           "assigneeActorId": {
             "type": "string",
-            "description": "Agent ID returned by list_agents. Omit or pass null only to assign the current agent; delegation requires the explicitly selected recipient ID."
+            "description": "Agent ID returned by list_agents. Omit this field to assign the current agent; delegation requires the explicitly selected recipient ID."
           },
           "status": {
             "enum": ["backlog", "todo"],
@@ -315,7 +315,7 @@ export const createTaskAction = {
             "minLength": 1
           },
           "value": {
-            "type": "object",
+            "type": ["object", "array", "string", "number", "boolean", "null"],
             "properties": {
               "task": {
                 "type": "object",
