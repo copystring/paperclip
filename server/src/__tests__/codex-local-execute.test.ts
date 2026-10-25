@@ -828,7 +828,7 @@ if (process.argv.includes("resume")) {
     const commandPath = path.join(root, "codex");
     await fs.mkdir(workspace, { recursive: true });
     // Faithful to the observed MCP transport crash: the protocol stream starts,
-    // then the process dies with only a harness tracing line on stderr — no
+    // then the process dies with only a harness tracing line on stderr â€” no
     // protocol-terminal event (error / turn.failed / turn.completed).
     const script = `#!/usr/bin/env node
 console.log(JSON.stringify({ type: "thread.started", thread_id: "thread-crash-1" }));
@@ -1225,7 +1225,8 @@ process.exit(1);
       expect(executorResult.exitCode).toBe(0);
       const executorCapture = JSON.parse(await fs.readFile(executorCapturePath, "utf8")) as CapturePayload;
       expect(executorCapture.prompt).toContain("execution wake role: executor");
-      expect(executorCapture.prompt).toContain("You are waking because changes were requested in the execution workflow.");
+      expect(executorCapture.prompt).toContain("reason: execution_changes_requested");
+      expect(executorCapture.prompt).toContain("You are the executor addressing requested changes, not the reviewer or approver named above.");
       expect(executorCapture.prompt).toContain("allowed actions: address_changes, resubmit");
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
